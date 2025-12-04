@@ -37,10 +37,10 @@ namespace akkaradb::common
         // Flags
         static constexpr uint32_t FLAG_TOMBSTONE = 0x01;
 
-        uint32_t key_len; ///< Key length in bytes
+        uint16_t key_len; ///< Key length in bytes
         uint32_t value_len; ///< Value length in bytes
         uint64_t seq; ///< Global sequence number (monotonic)
-        uint32_t flags; ///< Flags (tombstone, etc.)
+        uint8_t flags; ///< Flags (tombstone, etc.)
         uint64_t key_fp64; ///< SipHash-2-4 fingerprint of key
         std::array<uint8_t, 8> mini_key; ///< First 8 bytes of key (for fast comparison)
 
