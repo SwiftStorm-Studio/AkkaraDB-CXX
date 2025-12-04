@@ -19,10 +19,10 @@ if(CMAKE_BUILD_TYPE MATCHES Debug)
     endif()
 endif()
 
-add_subdirectory(akkara/common)
-add_subdirectory(akkara/format-api)
-add_subdirectory(akkara/format-akk)
-add_subdirectory(akkara/engine)
+#add_subdirectory(akkara/common)
+#add_subdirectory(akkara/format-api)
+#add_subdirectory(akkara/format-akk)
+#add_subdirectory(akkara/engine)
 
 # 統合ライブラリ（Kotlin版の akkaradb に相当）
 #add_library(akkaradb_native STATIC)
