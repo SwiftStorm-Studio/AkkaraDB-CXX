@@ -6,10 +6,8 @@
 #include "BufferView.hpp"
 #include <memory>
 
-namespace akkaradb::core
-{
-    class OwnedBuffer
-    {
+namespace akkaradb::core {
+    class OwnedBuffer {
     public:
         OwnedBuffer() noexcept = default;
 
@@ -22,13 +20,11 @@ namespace akkaradb::core
         OwnedBuffer(const OwnedBuffer&) = delete;
         OwnedBuffer& operator=(const OwnedBuffer&) = delete;
 
-        [[nodiscard]] BufferView view() const noexcept
-        {
+        [[nodiscard]] BufferView view() const noexcept {
             return BufferView{data_.get(), size_};
         }
 
-        [[nodiscard]] BufferView view() noexcept
-        {
+        [[nodiscard]] BufferView view() noexcept {
             return BufferView{data_.get(), size_};
         }
 
@@ -37,24 +33,20 @@ namespace akkaradb::core
         [[nodiscard]] size_t size() const noexcept { return size_; }
         [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
 
-        void zero_fill() noexcept
-        {
-            if (data_ && size_ > 0)
-            {
+        void zero_fill() noexcept {
+            if (data_ && size_ > 0) {
                 std::memset(data_.get(), 0, size_);
             }
         }
 
-        [[nodiscard]] std::byte* release() noexcept
-        {
+        [[nodiscard]] std::byte* release() noexcept {
             size_ = 0;
             return data_.release();
         }
 
     private:
         // Custom deleter (defined in .cpp)
-        struct AlignedDeleter
-        {
+        struct AlignedDeleter {
             void operator()(std::byte* ptr) const noexcept;
         };
 
@@ -62,8 +54,7 @@ namespace akkaradb::core
         size_t size_{0};
 
         OwnedBuffer(std::byte* data, size_t size) noexcept
-            : data_{data}, size_{size}
-        {
+            : data_{data}, size_{size} {
         }
     };
 } // namespace akkaradb::core

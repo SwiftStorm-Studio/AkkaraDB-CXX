@@ -4,8 +4,7 @@
 #include "AKHdr32.hpp"
 #include <string_view>
 
-namespace akkaradb::core
-{
+namespace akkaradb::core {
     /**
  * RecordView - Zero-copy view over an on-disk record.
  *
@@ -28,8 +27,7 @@ namespace akkaradb::core
  * uint64_t seq = view.header().seq;
  * ```
  */
-    class RecordView
-    {
+    class RecordView {
     public:
         /**
      * Constructs a RecordView from header and buffer regions.
@@ -38,13 +36,8 @@ namespace akkaradb::core
      * @param key_view View of key data
      * @param value_view View of value data
      */
-        RecordView(AKHdr32& header,
-                   std::string_view key_view,
-                   std::string_view value_view) noexcept
-            : header_{header}
-              , key_{key_view}
-              , value_{value_view}
-        {
+        RecordView(AKHdr32& header, std::string_view key_view, std::string_view value_view) noexcept
+            : header_{header}, key_{key_view}, value_{value_view} {
         }
 
         /**
@@ -77,8 +70,7 @@ namespace akkaradb::core
         /**
      * Returns true if this is a tombstone (deletion marker).
      */
-        [[nodiscard]] bool is_tombstone() const noexcept
-        {
+        [[nodiscard]] bool is_tombstone() const noexcept {
             return (header_.flags & 0x01) != 0;
         }
 
@@ -87,8 +79,7 @@ namespace akkaradb::core
      *
      * Size = 32 (header) + k_len + v_len
      */
-        [[nodiscard]] size_t total_size() const noexcept
-        {
+        [[nodiscard]] size_t total_size() const noexcept {
             return AKHdr32::SIZE + header_.k_len + header_.v_len;
         }
 

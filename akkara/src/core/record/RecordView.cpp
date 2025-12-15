@@ -2,13 +2,10 @@
 #include "akkara/core/record/RecordView.hpp"
 #include <stdexcept>
 
-namespace akkaradb::core
-{
-    RecordView RecordView::parse(BufferView buf, size_t& offset)
-    {
+namespace akkaradb::core {
+    RecordView RecordView::parse(BufferView buf, size_t& offset) {
         // Read header (32 bytes)
-        if (offset + AKHdr32::SIZE > buf.size())
-        {
+        if (offset + AKHdr32::SIZE > buf.size()) {
             throw std::out_of_range("RecordView::parse: insufficient space for header");
         }
 
@@ -16,13 +13,11 @@ namespace akkaradb::core
         offset += AKHdr32::SIZE;
 
         // Validate lengths
-        if (hdr.k_len == 0)
-        {
+        if (hdr.k_len == 0) {
             throw std::invalid_argument("RecordView::parse: key length is zero");
         }
 
-        if (const size_t required = static_cast<size_t>(hdr.k_len) + hdr.v_len; offset + required > buf.size())
-        {
+        if (const size_t required = static_cast<size_t>(hdr.k_len) + hdr.v_len; offset + required > buf.size()) {
             throw std::out_of_range("RecordView::parse: insufficient space for key/value");
         }
 

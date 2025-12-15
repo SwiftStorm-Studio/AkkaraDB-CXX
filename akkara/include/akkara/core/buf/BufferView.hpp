@@ -6,8 +6,7 @@
 #include <span>
 #include <string_view>
 
-namespace akkaradb::core
-{
+namespace akkaradb::core {
     /**
  * BufferView - Zero-copy, non-owning view over a contiguous byte region.
  *
@@ -23,14 +22,12 @@ namespace akkaradb::core
  * Thread-safety: Read-only operations are thread-safe. Concurrent writes
  * to the same region require external synchronization.
  */
-    class BufferView
-    {
+    class BufferView {
     public:
         /**
      * Constructs an empty BufferView.
      */
-        constexpr BufferView() noexcept : data_{nullptr}, size_{0}
-        {
+        constexpr BufferView() noexcept : data_{nullptr}, size_{0} {
         }
 
         /**
@@ -40,8 +37,7 @@ namespace akkaradb::core
      * @param size Size in bytes
      */
         constexpr BufferView(std::byte* data, size_t size) noexcept
-            : data_{data}, size_{size}
-        {
+            : data_{data}, size_{size} {
         }
 
         /**
@@ -50,8 +46,7 @@ namespace akkaradb::core
      * @param span Byte span
      */
         constexpr explicit BufferView(std::span<std::byte> span) noexcept
-            : data_{span.data()}, size_{span.size()}
-        {
+            : data_{span.data()}, size_{span.size()} {
         }
 
         // ==================== Basic Accessors ====================
@@ -74,16 +69,14 @@ namespace akkaradb::core
         /**
      * Returns a std::span view of the buffer.
      */
-        [[nodiscard]] constexpr std::span<std::byte> as_span() const noexcept
-        {
+        [[nodiscard]] constexpr std::span<std::byte> as_span() const noexcept {
             return {data_, size_};
         }
 
         /**
      * Returns a const std::span view of the buffer.
      */
-        [[nodiscard]] constexpr std::span<const std::byte> as_const_span() const noexcept
-        {
+        [[nodiscard]] constexpr std::span<const std::byte> as_const_span() const noexcept {
             return {data_, size_};
         }
 
@@ -231,8 +224,7 @@ namespace akkaradb::core
      *
      * @return 32-bit CRC32C value
      */
-        [[nodiscard]] uint32_t crc32c() const noexcept
-        {
+        [[nodiscard]] uint32_t crc32c() const noexcept {
             return crc32c(0, size_);
         }
 
@@ -251,8 +243,7 @@ namespace akkaradb::core
         /**
      * Creates a string_view over the entire buffer.
      */
-        [[nodiscard]] std::string_view as_string_view() const noexcept
-        {
+        [[nodiscard]] std::string_view as_string_view() const noexcept {
             return {reinterpret_cast<const char*>(data_), size_};
         }
 

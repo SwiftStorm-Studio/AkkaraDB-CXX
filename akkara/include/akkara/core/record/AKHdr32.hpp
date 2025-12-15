@@ -3,8 +3,7 @@
 #include "akkara/core/buf/BufferView.hpp"
 #include <cstdint>
 
-namespace akkaradb::core
-{
+namespace akkaradb::core {
     /**
  * AKHdr32 - 32-byte fixed-size record header.
  *
@@ -34,8 +33,7 @@ namespace akkaradb::core
  * - Little-Endian only (enforced by static_assert)
  */
 #pragma pack(push, 1)
-    struct AKHdr32
-    {
+    struct AKHdr32 {
         static constexpr size_t SIZE = 32;
         static constexpr uint64_t DEFAULT_SIPHASH_SEED = 0x5AD6DCD676D23C25ULL;
 
@@ -83,8 +81,7 @@ namespace akkaradb::core
      * @param seed Seed value (k0)
      * @return 64-bit fingerprint
      */
-        [[nodiscard]] static uint64_t sip_hash_24(std::string_view key,
-                                                  uint64_t seed) noexcept;
+        [[nodiscard]] static uint64_t sip_hash_24(std::string_view key, uint64_t seed) noexcept;
 
         /**
      * Builds the mini_key field from a key.
@@ -103,7 +100,6 @@ namespace akkaradb::core
 #pragma pack(pop)
 
     // Ensure struct is POD and exactly 32 bytes
-    static_assert(std::is_trivially_copyable_v<AKHdr32>,
-                  "AKHdr32 must be trivially copyable");
+    static_assert(std::is_trivially_copyable_v<AKHdr32>, "AKHdr32 must be trivially copyable");
     static_assert(sizeof(AKHdr32) == 32, "AKHdr32 must be exactly 32 bytes");
 } // namespace akkaradb::core

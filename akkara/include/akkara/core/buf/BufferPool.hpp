@@ -33,14 +33,12 @@ namespace akkaradb::core
  * pool->release(std::move(buf));
  * ```
  */
-    class BufferPool
-    {
+    class BufferPool {
     public:
         /**
      * Pool statistics for monitoring.
      */
-        struct Stats
-        {
+        struct Stats {
             uint64_t total_acquired{0}; ///< Total buffers acquired
             uint64_t total_released{0}; ///< Total buffers released
             uint64_t pool_hits{0}; ///< Acquisitions from pool
@@ -48,8 +46,7 @@ namespace akkaradb::core
             size_t current_pooled{0}; ///< Current buffers in pool
             size_t peak_allocated{0}; ///< Peak simultaneous allocations
 
-            [[nodiscard]] double hit_rate() const noexcept
-            {
+            [[nodiscard]] double hit_rate() const noexcept {
                 auto total = pool_hits + pool_misses;
                 return total > 0 ? static_cast<double>(pool_hits) / total : 0.0;
             }

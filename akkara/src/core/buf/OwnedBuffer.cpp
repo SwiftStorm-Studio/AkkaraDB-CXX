@@ -13,10 +13,8 @@
 #include <cstdlib>   // aligned_alloc or posix_memalign
 #endif
 
-namespace akkaradb::core
-{
-    namespace
-    {
+namespace akkaradb::core {
+    namespace {
         /**
      * Platform-agnostic aligned memory allocation.
      *
@@ -24,8 +22,7 @@ namespace akkaradb::core
      * @param alignment Alignment (must be power of 2)
      * @return Pointer to aligned memory, or nullptr on failure
      */
-        void* allocate_aligned(size_t size, size_t alignment)
-        {
+        void* allocate_aligned(size_t size, size_t alignment) {
 #if defined(_WIN32)
             // Windows: _aligned_malloc
             return _aligned_malloc(size, alignment);
@@ -33,8 +30,7 @@ namespace akkaradb::core
 #elif defined(__APPLE__) || (defined(__ANDROID__) && __ANDROID_API__ < 28)
             // macOS or old Android: posix_memalign
             void* ptr = nullptr;
-            if (posix_memalign(&ptr, alignment, size) != 0)
-            {
+            if (posix_memalign(&ptr, alignment, size) != 0) {
                 return nullptr;
             }
             return ptr;
@@ -50,8 +46,7 @@ namespace akkaradb::core
         /**
      * Platform-agnostic aligned memory deallocation.
      */
-        void deallocate_aligned(void* ptr) noexcept
-        {
+        void deallocate_aligned(void* ptr) noexcept {
 #if defined(_WIN32)
             _aligned_free(ptr);
 #else
@@ -61,37 +56,30 @@ namespace akkaradb::core
     } // anonymous namespace
 
     // Custom deleter implementation
-    void OwnedBuffer::AlignedDeleter::operator()(std::byte* ptr) const noexcept
-    {
-        if (ptr)
-        {
+    void OwnedBuffer::AlignedDeleter::operator()(std::byte* ptr) const noexcept {
+        if (ptr) {
             deallocate_aligned(ptr);
         }
     }
 
-    OwnedBuffer OwnedBuffer::allocate(size_t size, size_t alignment)
-    {
-        if (size == 0)
-        {
+    OwnedBuffer OwnedBuffer::allocate(size_t size, size_t alignment) {
+        if (size == 0) {
             return OwnedBuffer{};
         }
 
         // Validate alignment
-        if (alignment == 0 || (alignment & (alignment - 1)) != 0)
-        {
+        if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
             throw std::invalid_argument("Alignment must be a power of 2");
         }
 
         // Ensure alignment is at least sizeof(void*)
-        if (alignment < alignof(std::max_align_t))
-        {
+        if (alignment < alignof(std::max_align_t)) {
             alignment = alignof(std::max_align_t);
         }
 
         // Allocate
         void* raw_ptr = allocate_aligned(size, alignment);
-        if (!raw_ptr)
-        {
+        if (!raw_ptr) {
             throw std::bad_alloc{};
         }
 
