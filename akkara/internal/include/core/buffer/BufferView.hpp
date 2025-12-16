@@ -1,4 +1,23 @@
-// BufferView.hpp
+/*
+* AkkaraDB
+ * Copyright (C) 2025 Swift Storm Studio
+ *
+ * This file is part of AkkaraDB.
+ *
+ * AkkaraDB is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+ *
+ * AkkaraDB is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with AkkaraDB.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+// internal/include/core/buffer/BufferView.hpp
 #pragma once
 
 #include <cstddef>
@@ -16,7 +35,7 @@ namespace akkaradb::core {
  * Design principles:
  * - No ownership: lifetime managed externally
  * - Stack-allocated: trivial copy/move
- * - Immutable view: all write operations return void (modify in-place)
+ * - Immutable view: all write operations modify in-place
  * - LE-only: all multi-byte reads/writes are Little-Endian
  *
  * Thread-safety: Read-only operations are thread-safe. Concurrent writes
@@ -27,8 +46,7 @@ namespace akkaradb::core {
         /**
      * Constructs an empty BufferView.
      */
-        constexpr BufferView() noexcept : data_{nullptr}, size_{0} {
-        }
+        constexpr BufferView() noexcept : data_{nullptr}, size_{0} {}
 
         /**
      * Constructs a BufferView from raw pointer and size.
@@ -36,18 +54,14 @@ namespace akkaradb::core {
      * @param data Pointer to the beginning of the buffer
      * @param size Size in bytes
      */
-        constexpr BufferView(std::byte* data, size_t size) noexcept
-            : data_{data}, size_{size} {
-        }
+        constexpr BufferView(std::byte* data, size_t size) noexcept : data_{data}, size_{size} {}
 
         /**
      * Constructs a BufferView from a std::span.
      *
      * @param span Byte span
      */
-        constexpr explicit BufferView(std::span<std::byte> span) noexcept
-            : data_{span.data()}, size_{span.size()} {
-        }
+        constexpr explicit BufferView(std::span<std::byte> span) noexcept : data_{span.data()}, size_{span.size()} {}
 
         // ==================== Basic Accessors ====================
 
@@ -69,16 +83,12 @@ namespace akkaradb::core {
         /**
      * Returns a std::span view of the buffer.
      */
-        [[nodiscard]] constexpr std::span<std::byte> as_span() const noexcept {
-            return {data_, size_};
-        }
+        [[nodiscard]] constexpr std::span<std::byte> as_span() const noexcept { return {data_, size_}; }
 
         /**
      * Returns a const std::span view of the buffer.
      */
-        [[nodiscard]] constexpr std::span<const std::byte> as_const_span() const noexcept {
-            return {data_, size_};
-        }
+        [[nodiscard]] constexpr std::span<const std::byte> as_const_span() const noexcept { return {data_, size_}; }
 
         // ==================== Slicing ====================
 
@@ -224,9 +234,7 @@ namespace akkaradb::core {
      *
      * @return 32-bit CRC32C value
      */
-        [[nodiscard]] uint32_t crc32c() const noexcept {
-            return crc32c(0, size_);
-        }
+        [[nodiscard]] uint32_t crc32c() const noexcept { return crc32c(0, size_); }
 
         // ==================== String Operations ====================
 
@@ -243,15 +251,12 @@ namespace akkaradb::core {
         /**
      * Creates a string_view over the entire buffer.
      */
-        [[nodiscard]] std::string_view as_string_view() const noexcept {
-            return {reinterpret_cast<const char*>(data_), size_};
-        }
+        [[nodiscard]] std::string_view as_string_view() const noexcept { return {reinterpret_cast<const char*>(data_), size_}; }
 
     private:
         std::byte* data_;
         size_t size_;
 
-        // Bounds checking helper
         void check_bounds(size_t offset, size_t length) const;
     };
 } // namespace akkaradb::core

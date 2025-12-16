@@ -1,16 +1,43 @@
-// BufferView.cpp
-#include "../../../include/akkara/core/buf/BufferView.hpp"
+/*
+* AkkaraDB
+ * Copyright (C) 2025 Swift Storm Studio
+ *
+ * This file is part of AkkaraDB.
+ *
+ * AkkaraDB is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+ *
+ * AkkaraDB is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with AkkaraDB.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+// internal/src/core/buffer/BufferView.cpp
+#include "core/buffer/BufferView.hpp"
+
+#include <bit>
 #include <stdexcept>
 #include <cstring>
 
-static_assert(
-    std::endian::native == std::endian::little,
-    "AkkaraDB requires Little-Endian architecture"
-);
+static_assert(std::endian::native == std::endian::little, "AkkaraDB requires Little-Endian architecture");
 
-#ifdef __SSE4_2__
+
+#if defined(__SSE4_2__) || \
+(defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86)))
+#define AKKARADB_HAS_SSE42 1
+#else
+#define AKKARADB_HAS_SSE42 0
+#endif
+
+#if AKKARADB_HAS_SSE42
 #include <nmmintrin.h>
 #endif
+
 
 namespace akkaradb::core {
     // ==================== Slicing ====================
@@ -21,10 +48,7 @@ namespace akkaradb::core {
     }
 
     BufferView BufferView::slice(size_t offset) const {
-        if (offset > size_)
-        {
-            throw std::out_of_range("BufferView::slice: offset out of range");
-        }
+        if (offset > size_) { throw std::out_of_range("BufferView::slice: offset out of range"); }
         return BufferView{data_ + offset, size_ - offset};
     }
 
@@ -83,8 +107,6 @@ namespace akkaradb::core {
     void BufferView::copy_from(size_t offset, BufferView src, size_t src_offset, size_t length) const {
         check_bounds(offset, length);
         src.check_bounds(src_offset, length);
-
-        // Handle overlapping regions
         std::memmove(data_ + offset, src.data_ + src_offset, length);
     }
 
@@ -94,7 +116,11 @@ namespace akkaradb::core {
     }
 
     void BufferView::zero_fill() const noexcept {
-        if (data_&& size_ > 0) {
+        if (data_&& size_ 
+        >
+        0
+        )
+        {
             std::memset(data_, 0, size_);
         }
     }
@@ -107,10 +133,9 @@ namespace akkaradb::core {
         uint32_t crc = 0xFFFFFFFF;
         const auto* ptr = reinterpret_cast<const uint8_t*>(data_ + offset);
 
-#ifdef __SSE4_2__
+#if AKKARADB_HAS_SSE42
         size_t remaining = length;
 
-        // Hardware-accelerated CRC32C (SSE4.2)
         while (remaining >= 8) {
             uint64_t chunk;
             std::memcpy(&chunk, ptr, 8);
@@ -133,14 +158,11 @@ namespace akkaradb::core {
             --remaining;
         }
 #else
-        // Software fallback (Castagnoli polynomial 0x1EDC6F41)
         static constexpr uint32_t poly = 0x82F63B78;
 
         for (size_t i = 0; i < length; ++i) {
             crc ^= ptr[i];
-            for (int j = 0; j < 8; ++j) {
-                crc = (crc >> 1) ^ (poly & (-(crc & 1)));
-            }
+            for (int j = 0; j < 8; ++j) { crc = (crc >> 1) ^ (poly & (-(crc & 1))); }
         }
 #endif
 
@@ -157,8 +179,6 @@ namespace akkaradb::core {
     // ==================== Bounds Checking ====================
 
     void BufferView::check_bounds(size_t offset, size_t length) const {
-        if (offset + length > size_ || offset + length < offset) {
-            throw std::out_of_range("BufferView: access out of range");
-        }
+        if (offset + length > size_ || offset + length < offset) { throw std::out_of_range("BufferView: access out of range"); }
     }
 } // namespace akkaradb::core
