@@ -73,6 +73,10 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/format-api/BlockPacker.hpp
         ${INTERNAL_INCLUDE_DIR}/format-api/BlockUnpacker.hpp
         ${INTERNAL_INCLUDE_DIR}/format-api/RecordCursor.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-api/StripeReader.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-api/StripeWriter.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-api/FlushPolicy.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-api/ParityCoder.hpp
 
         # Format - Implementation
 
