@@ -70,7 +70,9 @@ target_sources(akkaradb PRIVATE
 
 
         # Format - API
-
+        ${INTERNAL_INCLUDE_DIR}/format-api/BlockPacker.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-api/BlockUnpacker.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-api/RecordCursor.hpp
 
         # Format - Implementation
 

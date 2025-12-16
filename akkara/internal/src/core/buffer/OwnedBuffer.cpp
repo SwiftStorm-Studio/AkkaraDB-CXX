@@ -75,6 +75,7 @@ namespace akkaradb::core {
     // ==================== OwnedBuffer Implementation ====================
 
     OwnedBuffer OwnedBuffer::allocate(size_t size, size_t alignment) {
+        // Zero-sized buffer is represented as empty OwnedBuffer
         if (size == 0) { return OwnedBuffer{}; }
 
         // Validate alignment (must be power of 2)
