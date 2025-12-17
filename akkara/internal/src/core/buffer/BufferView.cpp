@@ -116,11 +116,7 @@ namespace akkaradb::core {
     }
 
     void BufferView::zero_fill() const noexcept {
-        if (data_&& size_ 
-        >
-        0
-        )
-        {
+        if (data_ && size_ > 0) {
             std::memset(data_, 0, size_);
         }
     }

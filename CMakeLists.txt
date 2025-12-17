@@ -63,7 +63,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferPool.hpp
 
         # Core - Record
-        ${INTERNAL_INCLUDE_DIR}/core/record/AkHdr32.hpp
+        ${INTERNAL_INCLUDE_DIR}/core/record/AKHdr32.hpp
         ${INTERNAL_INCLUDE_DIR}/core/record/RecordView.hpp
         ${INTERNAL_INCLUDE_DIR}/core/record/MemRecord.hpp
 
@@ -79,6 +79,12 @@ target_sources(akkaradb PRIVATE
         # Format - Implementation
         ${INTERNAL_INCLUDE_DIR}/format-akk/AkkBlockPacker.hpp
         ${INTERNAL_INCLUDE_DIR}/format-akk/AkkBlockUnpacker.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-akk/AkkStripeWriter.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-akk/AkkStripeReader.hpp
+
+        ${INTERNAL_INCLUDE_DIR}/format-akk/parity/NoParityCoder.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-akk/parity/XorParityCoder.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-akk/parity/DualXorParityCoder.hpp
 
         # Engine
 
@@ -92,12 +98,19 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/core/buffer/BufferPool.cpp
 
         # Core - Record
-
+        ${INTERNAL_SRC_DIR}/core/record/AKHdr32.cpp
+        ${INTERNAL_SRC_DIR}/core/record/RecordView.cpp
+        ${INTERNAL_SRC_DIR}/core/record/MemRecord.cpp
 
         # Format - Implementation
         ${INTERNAL_SRC_DIR}/format-akk/AkkBlockPacker.cpp
         ${INTERNAL_SRC_DIR}/format-akk/AkkBlockUnpacker.cpp
+        ${INTERNAL_SRC_DIR}/format-akk/AkkStripeWriter.cpp
+        ${INTERNAL_SRC_DIR}/format-akk/AkkStripeReader.cpp
 
+        ${INTERNAL_SRC_DIR}/format-akk/parity/NoParityCoder.cpp
+        ${INTERNAL_SRC_DIR}/format-akk/parity/XorParityCoder.cpp
+        ${INTERNAL_SRC_DIR}/format-akk/parity/DualXorParityCoder.cpp
 
         # Engine
 

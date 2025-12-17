@@ -245,23 +245,20 @@ namespace akkaradb::core {
         /**
          * Equality operator (compares keys only, not values or seq).
          */
-        [[nodiscard]] bool operator==(const MemRecord& other) const noexcept {
-        return key_equals(other);
-    }
+        [[nodiscard]] bool operator==(const MemRecord& other) const noexcept { return key_equals(other); }
 
-private:
-    AKHdr32 header_{};
-    std::vector<uint8_t> key_;
-    std::vector<uint8_t> value_;
-    size_t approx_size_{0};
+    private:
+        AKHdr32 header_{};
+        std::vector<uint8_t> key_;
+        std::vector<uint8_t> value_;
+        size_t approx_size_{0};
 
-    MemRecord(
-        AKHdr32 header,
-        std::vector<uint8_t> key,
-        std::vector<uint8_t> value
-    ) noexcept;
+        MemRecord(
+            const AKHdr32& header,
+            std::vector<uint8_t> key,
+            std::vector<uint8_t> value
+        ) noexcept;
 
-    void compute_approx_size() noexcept;
-};
-
+        void compute_approx_size() noexcept;
+    };
 } // namespace akkaradb::core
