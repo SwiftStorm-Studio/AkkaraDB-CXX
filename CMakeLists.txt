@@ -62,12 +62,10 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/core/buffer/OwnedBuffer.hpp
         ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferPool.hpp
 
+        # Core - Record
         ${INTERNAL_INCLUDE_DIR}/core/record/AkHdr32.hpp
         ${INTERNAL_INCLUDE_DIR}/core/record/RecordView.hpp
         ${INTERNAL_INCLUDE_DIR}/core/record/MemRecord.hpp
-
-        # Core - Record
-
 
         # Format - API
         ${INTERNAL_INCLUDE_DIR}/format-api/BlockPacker.hpp
@@ -79,7 +77,8 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/format-api/ParityCoder.hpp
 
         # Format - Implementation
-
+        ${INTERNAL_INCLUDE_DIR}/format-akk/AkkBlockPacker.hpp
+        ${INTERNAL_INCLUDE_DIR}/format-akk/AkkBlockUnpacker.hpp
 
         # Engine
 
@@ -92,14 +91,12 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/core/buffer/OwnedBuffer.cpp
         ${INTERNAL_SRC_DIR}/core/buffer/BufferPool.cpp
 
-        ${INTERNAL_SRC_DIR}/core/record/AkHdr32.cpp
-        ${INTERNAL_SRC_DIR}/core/record/RecordView.cpp
-        ${INTERNAL_SRC_DIR}/core/record/MemRecord.cpp
-
         # Core - Record
 
 
         # Format - Implementation
+        ${INTERNAL_SRC_DIR}/format-akk/AkkBlockPacker.cpp
+        ${INTERNAL_SRC_DIR}/format-akk/AkkBlockUnpacker.cpp
 
 
         # Engine
