@@ -266,85 +266,74 @@ namespace akkaradb::engine::wal {
                 bytes_written_ += block.size();
             }
 
-            if (flush_mode_ == FlushMode::SYNC) {
-            file_handle_.fsync(sync_mode_);
+            if (flush_mode_ == FlushMode::SYNC) { file_handle_.fsync(sync_mode_); }
         }
+
+        std::filesystem::path wal_dir_;
+        std::filesystem::path current_file_path_;
+        std::shared_ptr<core::BufferPool> buffer_pool_;
+        format::FlushPolicy flush_policy_;
+        size_t k_;
+        size_t m_;
+        FlushMode flush_mode_;
+        SyncMode sync_mode_;
+
+        FileHandle file_handle_;
+        std::unique_ptr<format::akk::AkkStripeWriter> stripe_writer_;
+
+        core::OwnedBuffer current_block_;
+        size_t block_offset_;
+
+        uint64_t operations_written_;
+        uint64_t blocks_written_;
+        uint64_t bytes_written_;
+    };
+
+    // ==================== WalWriter Public API ====================
+
+    std::unique_ptr<WalWriter> WalWriter::create(
+        const std::filesystem::path& wal_dir,
+        std::shared_ptr<core::BufferPool> buffer_pool,
+        format::FlushPolicy flush_policy,
+        size_t k,
+        size_t m,
+        std::shared_ptr<format::ParityCoder> parity_coder,
+        FlushMode flush_mode,
+        SyncMode sync_mode
+    ) {
+        return std::unique_ptr<WalWriter>(new WalWriter(
+            wal_dir, std::move(buffer_pool), flush_policy, k, m, std::move(parity_coder), flush_mode, sync_mode
+        ));
     }
 
-    std::filesystem::path wal_dir_;
-    std::filesystem::path current_file_path_;
-    std::shared_ptr<core::BufferPool> buffer_pool_;
-    format::FlushPolicy flush_policy_;
-    size_t k_;
-    size_t m_;
-    FlushMode flush_mode_;
-    SyncMode sync_mode_;
+    WalWriter::WalWriter(
+        const std::filesystem::path& wal_dir,
+        std::shared_ptr<core::BufferPool> buffer_pool,
+        format::FlushPolicy flush_policy,
+        size_t k,
+        size_t m,
+        std::shared_ptr<format::ParityCoder> parity_coder,
+        FlushMode flush_mode,
+        SyncMode sync_mode
+    ) : impl_{
+        std::make_unique<Impl>(
+            wal_dir, std::move(buffer_pool), flush_policy, k, m, std::move(parity_coder), flush_mode, sync_mode
+        )
+    } {}
 
-    FileHandle file_handle_;
-    std::unique_ptr<format::akk::AkkStripeWriter> stripe_writer_;
+    WalWriter::~WalWriter() = default;
 
-    core::OwnedBuffer current_block_;
-    size_t block_offset_;
+    void WalWriter::append(const WalOp& op) { impl_->append(op); }
 
-    uint64_t operations_written_;
-    uint64_t blocks_written_;
-    uint64_t bytes_written_;
-};
+    void WalWriter::flush() { impl_->flush(); }
 
-// ==================== WalWriter Public API ====================
+    uint64_t WalWriter::operations_written() const noexcept { return impl_->operations_written(); }
 
-std::unique_ptr<WalWriter> WalWriter::create(
-    const std::filesystem::path& wal_dir,
-    std::shared_ptr<core::BufferPool> buffer_pool,
-    format::FlushPolicy flush_policy,
-    size_t k,
-    size_t m,
-    std::shared_ptr<format::ParityCoder> parity_coder,
-    FlushMode flush_mode,
-    SyncMode sync_mode
-) {
-    return std::unique_ptr<WalWriter>(new WalWriter(
-        wal_dir, std::move(buffer_pool), flush_policy, k, m, std::move(parity_coder), flush_mode, sync_mode
-    ));
-}
+    uint64_t WalWriter::blocks_written() const noexcept { return impl_->blocks_written(); }
 
-WalWriter::WalWriter(
-    const std::filesystem::path& wal_dir,
-    std::shared_ptr<core::BufferPool> buffer_pool,
-    format::FlushPolicy flush_policy,
-    size_t k,
-    size_t m,
-    std::shared_ptr<format::ParityCoder> parity_coder,
-    FlushMode flush_mode,
-    SyncMode sync_mode
-)
-    : impl_{std::make_unique<Impl>(
-        wal_dir, std::move(buffer_pool), flush_policy, k, m, std::move(parity_coder), flush_mode, sync_mode
-    )} {}
+    uint64_t WalWriter::stripes_written() const noexcept { return impl_->stripes_written(); }
 
-WalWriter::~WalWriter() = default;
-
-void WalWriter::append(const WalOp& op) {
-    impl_->append(op);
-}
-
-void WalWriter::flush() {
-    impl_->flush();
-}
-
-uint64_t WalWriter::operations_written() const noexcept {
-    return impl_->operations_written();
-}
-
-uint64_t WalWriter::blocks_written() const noexcept {
-    return impl_->blocks_written();
-}
-
-uint64_t WalWriter::stripes_written() const noexcept {
-    return impl_->stripes_written();
-}
-
-uint64_t WalWriter::bytes_written() const noexcept {
+    uint64_t WalWriter::bytes_written() const noexcept {
     return impl_->bytes_written();
 }
 
