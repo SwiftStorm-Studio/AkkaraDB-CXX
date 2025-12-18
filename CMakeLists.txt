@@ -87,7 +87,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/format-akk/parity/DualXorParityCoder.hpp
 
         # Engine
-
+        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalOp.hpp
 )
 
 # Internal implementation (internal/src)
@@ -113,7 +113,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/format-akk/parity/DualXorParityCoder.cpp
 
         # Engine
-
+        ${INTERNAL_SRC_DIR}/engine/wal/WalOp.cpp
 )
 
 # Include directories
