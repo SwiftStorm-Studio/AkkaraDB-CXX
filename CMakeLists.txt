@@ -87,7 +87,12 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/format-akk/parity/DualXorParityCoder.hpp
 
         # Engine
+        ${INTERNAL_INCLUDE_DIR}/engine/io/FileSync.hpp
+
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalOp.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalFraming.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalWriter.hpp
+
 )
 
 # Internal implementation (internal/src)
@@ -113,7 +118,11 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/format-akk/parity/DualXorParityCoder.cpp
 
         # Engine
+        ${INTERNAL_SRC_DIR}/engine/io/FileSync.cpp
+
         ${INTERNAL_SRC_DIR}/engine/wal/WalOp.cpp
+        ${INTERNAL_SRC_DIR}/engine/wal/WalFraming.cpp
+        ${INTERNAL_SRC_DIR}/engine/wal/WalWriter.cpp
 )
 
 # Include directories
