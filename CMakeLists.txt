@@ -2,6 +2,16 @@
 cmake_minimum_required(VERSION 4.1)
 project(AkkaraDB VERSION 0.1.0 LANGUAGES CXX)
 
+include(FetchContent)
+
+FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.12.0
+)
+
+FetchContent_MakeAvailable(nlohmann_json)
+
 # ==================== ! Build Options ! ====================
 option(BUILD_SHARED_LIBS "Build shared libraries (.so/.dll)" ON)
 option(AKKARADB_BUILD_TESTS "Build unit tests" OFF)
@@ -91,7 +101,11 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalFraming.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalWriter.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalReader.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalRecovery.hpp
 
+        ${INTERNAL_INCLUDE_DIR}/engine/memtable/MemTable.hpp
+
+        ${INTERNAL_INCLUDE_DIR}/engine/manifest/Manifest.hpp
 )
 
 # Internal implementation (internal/src)
@@ -121,6 +135,11 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/engine/wal/WalFraming.cpp
         ${INTERNAL_SRC_DIR}/engine/wal/WalWriter.cpp
         ${INTERNAL_SRC_DIR}/engine/wal/WalReader.cpp
+        ${INTERNAL_SRC_DIR}/engine/wal/WalRecovery.cpp
+
+        ${INTERNAL_SRC_DIR}/engine/memtable/MemTable.cpp
+
+        ${INTERNAL_SRC_DIR}/engine/manifest/Manifest.cpp
 )
 
 # Include directories
@@ -132,6 +151,13 @@ target_include_directories(akkaradb
         ${INTERNAL_INCLUDE_DIR}
 )
 
+# Link dependencies
+target_link_libraries(akkaradb
+        PRIVATE
+        nlohmann_json::nlohmann_json
+)
+
+# Specify C++ linker
 set_target_properties(akkaradb PROPERTIES LINKER_LANGUAGE CXX)
 
 # Shared library configuration

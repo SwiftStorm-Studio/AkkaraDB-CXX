@@ -180,7 +180,7 @@ namespace akkaradb::engine::wal {
             }
 
             const auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
-            current_file_path_ = wal_dir_ / ("wal-" + std::to_string(timestamp) + ".dat");
+            current_file_path_ = wal_dir_ / ("wal-" + std::to_string(timestamp) + ".akwal");
 
             file_handle_ = FileHandle::open(current_file_path_);
 
@@ -188,7 +188,7 @@ namespace akkaradb::engine::wal {
                 k_,
                 m_,
                 std::move(parity_coder),
-                [this](format::StripeWriter::Stripe stripe) { this->on_stripe_ready(std::move(stripe)); },
+                [this](const format::StripeWriter::Stripe& stripe) { this->on_stripe_ready(stripe); },
                 flush_policy_
             );
 
@@ -333,12 +333,7 @@ namespace akkaradb::engine::wal {
 
     uint64_t WalWriter::stripes_written() const noexcept { return impl_->stripes_written(); }
 
-    uint64_t WalWriter::bytes_written() const noexcept {
-    return impl_->bytes_written();
-}
+    uint64_t WalWriter::bytes_written() const noexcept { return impl_->bytes_written(); }
 
-std::filesystem::path WalWriter::current_file_path() const {
-    return impl_->current_file_path();
-}
-
+    std::filesystem::path WalWriter::current_file_path() const { return impl_->current_file_path(); }
 } // namespace akkaradb::engine::wal
