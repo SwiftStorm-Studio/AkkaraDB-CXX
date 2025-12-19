@@ -21,12 +21,14 @@
 #pragma once
 
 #include "WalOp.hpp"
-#include "format-api/FlushPolicy.hpp"
-#include "format-api/ParityCoder.hpp"
-#include "core/buffer/BufferPool.hpp"
 #include <memory>
 #include <filesystem>
 #include <cstdint>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -37,70 +39,103 @@
 
 namespace akkaradb::engine::wal {
     /**
- * WalWriter - Write-Ahead Log writer with true fsync support.
+ * WalWriter - Write-Ahead Log writer with group commit optimization.
  *
- * Uses platform-specific low-level I/O for guaranteed durability:
- * - Linux: fsync(2) or fdatasync(2)
- * - macOS: fcntl(F_FULLFSYNC)
- * - Windows: FlushFileBuffers
+ * Follows JVM implementation exactly:
+ * - Single WAL file (wal.akwal)
+ * - Direct frame writes [len:u32][payload][crc32c:u32]
+ * - Queue-based single-writer architecture
+ * - Group commit for throughput
  *
  * Design principles:
- * - Durability: True fsync on flush
- * - Group commit: Batches operations for throughput
- * - Striped storage: Optional parity for redundancy
- * - Direct I/O ready: Aligned writes for O_DIRECT (future)
- * - Single-producer: NOT thread-safe
+ * - Single-writer: Dedicated flusher thread
+ * - Lock-free producers: Atomic LSN + queue submission
+ * - Group commit: Batch N frames or T microseconds
+ * - Platform-specific fsync: fdatasync/F_FULLFSYNC/FlushFileBuffers
+ *
+ * Typical usage:
+ * ```cpp
+ * auto writer = WalWriter::create(
+ *     "./data/wal.akwal",
+ *     32,    // groupN
+ *     500,   // groupMicros
+ *     false  // fastMode
+ * );
+ *
+ * writer->append(WalOp::put("key", "value", 1));
+ * writer->append(WalOp::del("key", 2));
+ * writer->flush();
+ * writer->close();
+ * ```
+ *
+ * Thread-safety: Fully thread-safe. Multiple producers, single consumer.
  */
     class WalWriter {
     public:
         /**
-     * Flush mode configuration.
+     * Creates a WalWriter.
+     *
+     * @param wal_file Path to WAL file (e.g., "./data/wal.akwal")
+     * @param group_n Maximum entries per batch (default: 32)
+     * @param group_micros Maximum microseconds to wait (default: 500)
+     * @param fast_mode If true, append() returns immediately; if false, blocks until fsync
+     * @return Unique pointer to writer
+     * @throws std::runtime_error if file cannot be opened
      */
-        enum class FlushMode {
-            SYNC, ///< Block until fsync completes (max durability)
-            ASYNC ///< Return immediately, fsync in background (fast mode)
-        };
-
-        /**
-     * Sync mode configuration (POSIX-specific).
-     */
-        enum class SyncMode {
-            FULL, ///< fsync() - sync data + metadata
-            DATA_ONLY ///< fdatasync() - sync data only (faster)
-        };
-
         [[nodiscard]] static std::unique_ptr<WalWriter> create(
-            const std::filesystem::path& wal_dir,
-            std::shared_ptr<core::BufferPool> buffer_pool,
-            format::FlushPolicy flush_policy = format::FlushPolicy::default_policy(),
-            size_t k = 4,
-            size_t m = 2,
-            std::shared_ptr<format::ParityCoder> parity_coder = nullptr,
-            FlushMode flush_mode = FlushMode::SYNC,
-            SyncMode sync_mode = SyncMode::FULL
+            const std::filesystem::path& wal_file,
+            size_t group_n = 32,
+            size_t group_micros = 500,
+            bool fast_mode = false
         );
 
         ~WalWriter();
 
-        void append(const WalOp& op);
-        void flush();
+        /**
+     * Appends a WAL operation and returns LSN.
+     *
+     * In fast mode: returns immediately after queuing (~5-10 µs)
+     * In durable mode: blocks until fsync completes (~50-500 µs)
+     *
+     * @param op Operation to append
+     * @return Log Sequence Number assigned
+     * @throws std::runtime_error if WAL is closed
+     * @throws std::runtime_error if durable mode times out
+     */
+        [[nodiscard]] uint64_t append(const WalOp& op);
 
-        [[nodiscard]] uint64_t operations_written() const noexcept;
-        [[nodiscard]] uint64_t blocks_written() const noexcept;
-        [[nodiscard]] uint64_t stripes_written() const noexcept;
-        [[nodiscard]] uint64_t bytes_written() const noexcept;
-        [[nodiscard]] std::filesystem::path current_file_path() const;
+        /**
+     * Forces all pending writes to durable storage.
+     *
+     * Blocks until all queued frames are written and fsync'd.
+     */
+        void force_sync();
+
+        /**
+     * Truncates WAL file to zero length.
+     *
+     * Intended after durable checkpoint when WAL is no longer needed.
+     */
+        void truncate();
+
+        /**
+     * Closes WAL and releases resources.
+     *
+     * Blocks until flusher thread completes. Idempotent.
+     */
+        void close();
+
+        /**
+     * Returns next LSN that will be assigned.
+     */
+        [[nodiscard]] uint64_t next_lsn() const noexcept;
 
     private:
         WalWriter(
-            const std::filesystem::path& wal_dir,
-            std::shared_ptr<core::BufferPool> buffer_pool,
-            format::FlushPolicy flush_policy,
-            size_t k,
-            size_t m,
-            std::shared_ptr<format::ParityCoder> parity_coder,
-            FlushMode flush_mode,
-            SyncMode sync_mode
+            const std::filesystem::path& wal_file,
+            size_t group_n,
+            size_t group_micros,
+            bool fast_mode
         );
 
         class Impl;
