@@ -211,7 +211,7 @@ namespace akkaradb::engine::wal {
             , next_lsn_{1}
             , running_{true} {
             // Start flusher thread
-            flusher_thread_ = std::thread([this]() { this->flush_loop(); });
+            flusher_thread_ = std::thread([this] { this->flush_loop(); });
         }
 
         ~Impl() { close(); }
@@ -298,64 +298,103 @@ namespace akkaradb::engine::wal {
 
     private:
         void flush_loop() {
-            std::vector<Command> batch;
-            batch.reserve(group_n_);
+            std::vector<Command> write_batch;
+            write_batch.reserve(group_n_);
 
             while (true) {
                 std::unique_lock lock{queue_mutex_};
 
-                // Wait for commands or timeout
+                // 1. Poll first command (with timeout)
                 const auto timeout = std::chrono::microseconds(group_micros_);
                 queue_cv_.wait_for(lock, timeout, [this]() { return !queue_.empty() || !running_.load(); });
 
                 if (!running_.load() && queue_.empty()) { break; }
 
-                // Collect batch
-                while (!queue_.empty() && batch.size() < group_n_) {
-                    batch.push_back(std::move(queue_.front()));
-                    queue_.pop();
+                if (queue_.empty()) {
+                    continue; // Timeout, retry
                 }
 
+                Command cmd = std::move(queue_.front());
+                queue_.pop();
                 lock.unlock();
 
-                // Process commands
-                for (auto& cmd : batch) {
-                    switch (cmd.type) {
-                    case Command::Type::WRITE:
-                        file_handle_.write(cmd.frame.data(), cmd.frame.size());
-                        break;
+                // 2. Handle command type
+                if (cmd.type == Command::Type::WRITE) {
+                    write_batch.push_back(std::move(cmd));
 
-                    case Command::Type::FORCE_SYNC:
-                        file_handle_.fsync_data();
-                        if (cmd.waiter) cmd.waiter->signal();
-                        break;
+                    // Drain additional WRITE commands (non-blocking)
+                    while (write_batch.size() < group_n_) {
+                        std::unique_lock drain_lock{queue_mutex_};
+                        if (queue_.empty()) { break; }
 
-                    case Command::Type::TRUNCATE:
-                        file_handle_.truncate_file();
-                        file_handle_.fsync_full();
-                        if (cmd.waiter) cmd.waiter->signal();
-                        break;
+                        Command next = std::move(queue_.front());
+                        queue_.pop();
+                        drain_lock.unlock();
 
-                    case Command::Type::SHUTDOWN:
-                        break;
+                        if (next.type == Command::Type::WRITE) { write_batch.push_back(std::move(next)); }
+                        else {
+                            // Non-write command: flush batch first
+                            if (!write_batch.empty()) {
+                                flush_write_batch(write_batch);
+                                write_batch.clear();
+                            }
+
+                            // Handle non-write command
+                            handle_command(next);
+                            break;
+                        }
+                    }
+
+                    // Flush write batch
+                    if (!write_batch.empty()) {
+                        flush_write_batch(write_batch);
+                        write_batch.clear();
                     }
                 }
+                else {
+                    // Non-write command: handle immediately
+                    handle_command(cmd);
 
-                // Fsync for write batch
-                if (!batch.empty()) {
-                    file_handle_.fsync_data();
-
-                    // Signal all waiters
-                    for (auto& cmd : batch) { if (cmd.waiter) { cmd.waiter->signal(); } }
+                    if (cmd.type == Command::Type::SHUTDOWN) { break; }
                 }
-
-                batch.clear();
             }
 
             // Final fsync
             try { file_handle_.fsync_data(); }
             catch (...) {
                 // Best effort
+            }
+        }
+
+        void flush_write_batch(std::vector<Command>& batch) {
+            // Write all frames
+            for (auto& cmd : batch) { file_handle_.write(cmd.frame.data(), cmd.frame.size()); }
+
+            // Single fsync
+            file_handle_.fsync_data();
+
+            // Signal all waiters
+            for (auto& cmd : batch) { if (cmd.waiter) { cmd.waiter->signal(); } }
+        }
+
+        void handle_command(Command& cmd) {
+            switch (cmd.type) {
+            case Command::Type::FORCE_SYNC:
+                file_handle_.fsync_data();
+                if (cmd.waiter) cmd.waiter->signal();
+                break;
+
+            case Command::Type::TRUNCATE:
+                file_handle_.truncate_file();
+                file_handle_.fsync_full();
+                if (cmd.waiter) cmd.waiter->signal();
+                break;
+
+            case Command::Type::SHUTDOWN:
+                break;
+
+            default:
+                break;
             }
         }
 
