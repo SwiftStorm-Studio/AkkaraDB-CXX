@@ -111,6 +111,22 @@ namespace akkaradb::core {
         [[nodiscard]] size_t size() const noexcept { return size_; }
 
         /**
+     * Creates a deep copy of this buffer.
+     *
+     * Allocates new memory and copies all data.
+     *
+     * @return New OwnedBuffer with copied data
+     * @throws std::bad_alloc if allocation fails
+     */
+        [[nodiscard]] OwnedBuffer clone() const {
+           if (empty()) { return OwnedBuffer{}; }
+
+           auto new_buf = allocate(size_);
+           std::memcpy(new_buf.data(), data_.get(), size_);
+           return new_buf;
+        }
+
+        /**
      * Returns true if the buffer is empty (size == 0).
      */
         [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
