@@ -58,7 +58,7 @@ namespace akkaradb::core {
 
             [[nodiscard]] uint64_t finalize(size_t total_len) noexcept {
                 // Pad tail to 8 bytes with total length in last byte
-                uint64_t b = static_cast<uint64_t>(total_len) << 56;
+                uint64_t b = total_len << 56;
                 for (size_t i = 0; i < tail_len_; ++i) { b |= static_cast<uint64_t>(tail_[i]) << (i * 8); }
                 compress(b);
 

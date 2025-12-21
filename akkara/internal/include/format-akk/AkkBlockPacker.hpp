@@ -24,6 +24,8 @@
 #include "core/buffer/BufferPool.hpp"
 #include <memory>
 
+#include "core/record/MemRecord.hpp"
+
 namespace akkaradb::format::akk {
     /**
      * AkkBlockPacker - Concrete implementation of BlockPacker for AkkaraDB format.
@@ -89,6 +91,8 @@ namespace akkaradb::format::akk {
             uint64_t key_fp64,
             uint64_t mini_key
         ) override;
+
+        bool try_append(const core::MemRecord& record);
 
         void end_block() override;
 

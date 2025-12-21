@@ -174,6 +174,18 @@ namespace akkaradb::format::akk {
         uint64_t mini_key
     ) { return impl_->try_append(key, value, seq, flags, key_fp64, mini_key); }
 
+    bool AkkBlockPacker::try_append(const core::MemRecord& record) {
+        const auto& hdr = record.header();
+        return try_append(
+            record.key(),
+            record.value(),
+            hdr.seq,
+            hdr.flags,
+            hdr.key_fp64,
+            hdr.mini_key
+        );
+    }
+
     void AkkBlockPacker::end_block() { impl_->end_block(); }
 
     void AkkBlockPacker::flush() { impl_->flush(); }
