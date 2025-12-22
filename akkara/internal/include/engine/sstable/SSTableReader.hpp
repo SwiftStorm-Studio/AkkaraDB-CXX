@@ -11,22 +11,17 @@
 #include <memory>
 #include <optional>
 #include <fstream>
-#include <map>
 #include <mutex>
+#include <unordered_map>
 
 namespace akkaradb::engine::sstable {
     /**
-     * BlockCache - Simple LRU cache for blocks (zero-copy with shared_ptr).
+     * BlockCache - O(1) LRU cache with intrusive list.
      *
-     * Thread-safe block cache using shared_ptr to avoid expensive memcpy.
+     * Uses unordered_map + doubly-linked list for true O(1) operations.
      */
     class BlockCache {
     public:
-        struct CachedBlock {
-            std::shared_ptr<core::OwnedBuffer> buffer;
-            uint64_t access_count;
-        };
-
         explicit BlockCache(size_t max_blocks = 512);
 
         std::shared_ptr<core::OwnedBuffer> get(uint64_t offset);
@@ -34,8 +29,14 @@ namespace akkaradb::engine::sstable {
         void clear();
 
     private:
+        struct Entry {
+            std::shared_ptr<core::OwnedBuffer> buffer;
+            std::list<uint64_t>::iterator lru_it;
+        };
+
         size_t max_blocks_;
-        std::map<uint64_t, CachedBlock> cache_;
+        std::unordered_map<uint64_t, Entry> cache_;
+        std::list<uint64_t> lru_list_; // Most recent at front
         std::mutex mutex_;
     };
 
@@ -61,6 +62,49 @@ namespace akkaradb::engine::sstable {
     class SSTableReader {
     public:
         /**
+         * Range query.
+         *
+         * Returns all records in [start_key, end_key).
+         *
+         * @param start_key Inclusive start
+         * @param end_key Exclusive end (nullopt = EOF)
+         * @return Vector of (key, value, header) tuples
+         */
+        struct RangeRecord {
+            std::vector<uint8_t> key;
+            std::vector<uint8_t> value;
+            core::AKHdr32 header;
+        };
+
+        /**
+         * RangeIterator - Zero-copy forward iterator over range.
+         *
+         * Returns RecordView pointing into cached blocks.
+         */
+        class RangeIterator {
+        public:
+            [[nodiscard]] bool has_next() const;
+            [[nodiscard]] std::optional<core::RecordView> next();
+
+        private:
+            friend class SSTableReader;
+
+            RangeIterator(
+                SSTableReader* reader,
+                std::span<const uint8_t> start_key,
+                std::optional<std::span<const uint8_t>> end_key
+            );
+
+            SSTableReader* reader_;
+            std::vector<uint8_t> start_key_;
+            std::optional<std::vector<uint8_t>> end_key_;
+
+            size_t current_entry_idx_;
+            std::shared_ptr<core::OwnedBuffer> current_block_;
+            std::unique_ptr<format::RecordCursor> current_cursor_;
+        };
+
+        /**
          * Opens an SSTable file.
          *
          * @param file_path Path to .sst file
@@ -76,28 +120,47 @@ namespace akkaradb::engine::sstable {
         ~SSTableReader();
 
         /**
-         * Point lookup.
+         * Point lookup (zero-copy).
+         *
+         * Returns RecordView pointing into cached block.
+         * RecordView is valid until block is evicted from cache.
          *
          * @param key Key to find
-         * @return Value if found, nullopt otherwise
+         * @return RecordView if found, nullopt otherwise
          */
-        [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::span<const uint8_t> key);
+        [[nodiscard]] std::optional<core::RecordView> get(std::span<const uint8_t> key);
 
         /**
-         * Range query.
+         * Point lookup (owning copy).
          *
-         * Returns all records in [start_key, end_key).
+         * Returns owned copy of value for cases where lifetime management is needed.
+         *
+         * @param key Key to find
+         * @return Value vector if found, nullopt otherwise
+         */
+        [[nodiscard]] std::optional<std::vector<uint8_t>> get_copy(std::span<const uint8_t> key);
+
+        /**
+         * Range query (zero-copy iterator).
+         *
+         * @param start_key Inclusive start
+         * @param end_key Exclusive end (nullopt = EOF)
+         * @return Iterator over records
+         */
+        [[nodiscard]] RangeIterator range_iter(
+            std::span<const uint8_t> start_key,
+            const std::optional<std::span<const uint8_t>>& end_key = std::nullopt
+        );
+
+        /**
+         * Range query (materialized vector).
+         *
+         * Use this when you need owned copies of all records.
          *
          * @param start_key Inclusive start
          * @param end_key Exclusive end (nullopt = EOF)
          * @return Vector of (key, value, header) tuples
          */
-        struct RangeRecord {
-            std::vector<uint8_t> key;
-            std::vector<uint8_t> value;
-            core::AKHdr32 header;
-        };
-
         [[nodiscard]] std::vector<RangeRecord> range(
             std::span<const uint8_t> start_key,
             const std::optional<std::span<const uint8_t>>& end_key = std::nullopt

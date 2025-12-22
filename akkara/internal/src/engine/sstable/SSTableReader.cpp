@@ -15,29 +15,40 @@ namespace akkaradb::engine::sstable {
         auto it = cache_.find(offset);
         if (it == cache_.end()) { return nullptr; }
 
-        ++it->second.access_count;
-        return it->second.buffer; // shared_ptr copy (fast)
+        // Move to front (MRU) - O(1)
+        lru_list_.splice(lru_list_.begin(), lru_list_, it->second.lru_it);
+
+        return it->second.buffer;
     }
 
     void BlockCache::put(uint64_t offset, std::shared_ptr<core::OwnedBuffer> buffer) {
         std::lock_guard lock{mutex_};
 
-        // Evict LRU if at capacity
-        if (cache_.size() >= max_blocks_) {
-            auto lru_it = std::min_element(
-                cache_.begin(),
-                cache_.end(),
-                [](const auto& a, const auto& b) { return a.second.access_count < b.second.access_count; }
-            );
-            cache_.erase(lru_it);
+        // Check if already exists
+        auto it = cache_.find(offset);
+        if (it != cache_.end()) {
+            // Update and move to front
+            it->second.buffer = std::move(buffer);
+            lru_list_.splice(lru_list_.begin(), lru_list_, it->second.lru_it);
+            return;
         }
 
-        cache_[offset] = CachedBlock{std::move(buffer), 1};
+        // Evict LRU if at capacity - O(1)
+        if (cache_.size() >= max_blocks_) {
+            auto lru_offset = lru_list_.back();
+            cache_.erase(lru_offset);
+            lru_list_.pop_back();
+        }
+
+        // Insert at front (MRU)
+        lru_list_.push_front(offset);
+        cache_[offset] = Entry{std::move(buffer), lru_list_.begin()};
     }
 
     void BlockCache::clear() {
         std::lock_guard lock{mutex_};
         cache_.clear();
+        lru_list_.clear();
     }
 
     // ==================== SSTableReader ====================
@@ -118,7 +129,7 @@ namespace akkaradb::engine::sstable {
 
     SSTableReader::~SSTableReader() { close(); }
 
-    std::optional<std::vector<uint8_t>> SSTableReader::get(std::span<const uint8_t> key) {
+    std::optional<core::RecordView> SSTableReader::get(std::span<const uint8_t> key) {
         // Fast Bloom reject
         if (bloom_.has_value() && !bloom_->might_contain(key)) { return std::nullopt; }
 
@@ -129,14 +140,96 @@ namespace akkaradb::engine::sstable {
         // Load block (zero-copy via shared_ptr)
         auto block_ptr = load_block(static_cast<uint64_t>(block_off));
 
-        // Search in block
-        auto record_opt = find_in_block(block_ptr->view(), key);
+        // Search in block (zero-copy)
+        return find_in_block(block_ptr->view(), key);
+    }
+
+    std::optional<std::vector<uint8_t>> SSTableReader::get_copy(std::span<const uint8_t> key) {
+        auto record_opt = get(key);
         if (!record_opt) { return std::nullopt; }
 
-        // Copy value
         auto value_span = record_opt->value();
         return std::vector(value_span.begin(), value_span.end());
     }
+
+    SSTableReader::RangeIterator::RangeIterator(
+        SSTableReader* reader,
+        std::span<const uint8_t> start_key,
+        std::optional<std::span<const uint8_t>> end_key
+    ) : reader_{reader}
+        , start_key_(start_key.begin(), start_key.end())
+        , end_key_(end_key.has_value()
+                       ? std::optional(std::vector(end_key->begin(), end_key->end()))
+                       : std::nullopt)
+        , current_entry_idx_{0} {
+        // Find starting block
+        const int64_t start_block_off = reader_->index_.lookup(start_key);
+        if (start_block_off < 0) {
+            current_entry_idx_ = reader_->index_.entries().size();
+            return;
+        }
+
+        const auto& entries = reader_->index_.entries();
+        auto entry_it = std::ranges::find_if(entries, [start_block_off](const IndexBlock::Entry& e) {
+            return static_cast<int64_t>(e.block_offset) == start_block_off;
+        });
+
+        if (entry_it != entries.end()) {
+            current_entry_idx_ = std::distance(entries.begin(), entry_it);
+            current_block_ = reader_->load_block(entry_it->block_offset);
+            current_cursor_ = reader_->unpacker_->cursor(current_block_->view());
+        }
+        else { current_entry_idx_ = entries.size(); }
+    }
+
+    bool SSTableReader::RangeIterator::has_next() const { return current_entry_idx_<reader_->index_.entries().size(); }
+
+    std::optional<core::RecordView> SSTableReader::RangeIterator::next() {
+        if (!has_next()) { return std::nullopt; }
+
+        while (true) {
+            // Try current cursor
+            if (current_cursor_&& current_cursor_->has_next())
+            {
+                auto record_opt = current_cursor_->try_next();
+                if (!record_opt) {
+                    break; // Advance to next block
+                }
+
+                auto& record = *record_opt;
+                auto rec_key = record.key();
+
+                // Check start boundary
+                if (std::ranges::lexicographical_compare(rec_key, start_key_)) { continue; }
+
+                // Check end boundary
+                if (end_key_.has_value()) {
+                    if (!std::ranges::lexicographical_compare(rec_key, *end_key_)) {
+                        current_entry_idx_ = reader_->index_.entries().size();
+                        return std::nullopt;
+                    }
+                }
+
+                return record;
+            }
+
+            // Advance to next block
+            ++current_entry_idx_;
+            if (!has_next()) { return std::nullopt; }
+
+            const auto& entries = reader_->index_.entries();
+            auto offset = entries[current_entry_idx_].block_offset;
+            current_block_ = reader_->load_block(offset);
+            current_cursor_ = reader_->unpacker_->cursor(current_block_->view());
+        }
+
+        return std::nullopt;
+    }
+
+    SSTableReader::RangeIterator SSTableReader::range_iter(
+        std::span<const uint8_t> start_key,
+        const std::optional<std::span<const uint8_t>>& end_key
+    ) { return RangeIterator{this, start_key, end_key}; }
 
     std::vector<SSTableReader::RangeRecord> SSTableReader::range(
         std::span<const uint8_t> start_key,
@@ -144,49 +237,20 @@ namespace akkaradb::engine::sstable {
     ) {
         std::vector<RangeRecord> results;
 
-        // Find starting block
-        const int64_t start_block_off = index_.lookup(start_key);
-        if (start_block_off < 0) { return results; }
+        auto iter = range_iter(start_key, end_key);
+        while (iter.has_next()) {
+            auto record_opt = iter.next();
+            if (!record_opt) break;
 
-        // Iterate through blocks
-        const auto& entries = index_.entries();
-        auto entry_it = std::ranges::find_if(entries, [start_block_off](const IndexBlock::Entry& e) {
-                                                 return static_cast<int64_t>(e.block_offset) == start_block_off;
-                                             }
-        );
+            auto& record = *record_opt;
+            auto rec_key = record.key();
+            auto rec_value = record.value();
 
-        while (entry_it != entries.end()) {
-            auto block_ptr = load_block(entry_it->block_offset);
-            auto cursor = unpacker_->cursor(block_ptr->view());
-
-            while (cursor->has_next()) {
-                auto record_opt = cursor->try_next();
-                if (!record_opt) break;
-
-                auto& record = *record_opt;
-                auto rec_key = record.key();
-
-                // Check start boundary
-                if (std::ranges::lexicographical_compare(rec_key, start_key
-                )) { continue; }
-
-                // Check end boundary
-                if (end_key.has_value()) {
-                    auto end_span = *end_key;
-                    if (!std::ranges::lexicographical_compare(rec_key, end_span
-                    )) { return results; }
-                }
-
-                // Add to results
-                auto rec_value = record.value();
-                results.push_back(RangeRecord{
-                    std::vector(rec_key.begin(), rec_key.end()),
-                    std::vector(rec_value.begin(), rec_value.end()),
-                    record.header()
-                });
-            }
-
-            ++entry_it;
+            results.push_back(RangeRecord{
+                std::vector(rec_key.begin(), rec_key.end()),
+                std::vector(rec_value.begin(), rec_value.end()),
+                record.header()
+            });
         }
 
         return results;
@@ -207,7 +271,7 @@ namespace akkaradb::engine::sstable {
 
         file_.seekg(offset);
         file_.read(
-            reinterpret_cast<char*>(const_cast<std::byte*>(block_buf.view().data())),
+            reinterpret_cast<char*>(block_buf.view().data()),
             BLOCK_SIZE
         );
 
@@ -236,7 +300,7 @@ namespace akkaradb::engine::sstable {
             auto& record = *record_opt;
             auto rec_key = record.key();
 
-            if (std::equal(rec_key.begin(), rec_key.end(), key.begin(), key.end())) { return record; }
+            if (std::ranges::equal(rec_key, key)) { return record; }
         }
 
         return std::nullopt;
