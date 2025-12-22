@@ -1,3 +1,22 @@
+/*
+* AkkaraDB
+ * Copyright (C) 2025 Swift Storm Studio
+ *
+ * This file is part of AkkaraDB.
+ *
+ * AkkaraDB is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+ *
+ * AkkaraDB is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with AkkaraDB.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 // internal/src/engine/sstable/SSTableReader.cpp
 #include "engine/sstable/SSTableReader.hpp"
 #include <algorithm>
@@ -182,14 +201,17 @@ namespace akkaradb::engine::sstable {
         else { current_entry_idx_ = entries.size(); }
     }
 
-    bool SSTableReader::RangeIterator::has_next() const { return current_entry_idx_<reader_->index_.entries().size(); }
+    bool SSTableReader::RangeIterator::has_next() const { return current_entry_idx_ < reader_->index_.entries().size(); }
 
     std::optional<core::RecordView> SSTableReader::RangeIterator::next() {
         if (!has_next()) { return std::nullopt; }
 
         while (true) {
             // Try current cursor
-            if (current_cursor_&& current_cursor_->has_next())
+            if (current_cursor_&& current_cursor_
+            ->
+            has_next()
+            )
             {
                 auto record_opt = current_cursor_->try_next();
                 if (!record_opt) {

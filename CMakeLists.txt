@@ -112,6 +112,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/engine/sstable/BloomFilter.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTableWriter.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTableReader.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTCompactor.hpp
 )
 
 # Internal implementation (internal/src)
@@ -152,6 +153,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/engine/sstable/BloomFilter.cpp
         ${INTERNAL_SRC_DIR}/engine/sstable/SSTableWriter.cpp
         ${INTERNAL_SRC_DIR}/engine/sstable/SSTableReader.cpp
+        ${INTERNAL_SRC_DIR}/engine/sstable/SSTCompactor.cpp
 )
 
 # Include directories
