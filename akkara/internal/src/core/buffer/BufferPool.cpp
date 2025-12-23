@@ -287,19 +287,93 @@ public:
     // Core Operations
     // ------------------------------------------------------------------------
 
-    [[nodiscard]] OwnedBuffer acquire() {
+    [[nodiscard]] OwnedBuffer acquire(bool skip_zero_fill = false) {
         stats_total_acquired_.fetch_add(1, std::memory_order_relaxed);
 
         // Fast path: TLS cache hit
         auto& tls = get_tls_cache();
         if (auto buf = tls.try_pop(); !buf.empty()) {
             stats_tls_hits_.fetch_add(1, std::memory_order_relaxed);
-            buf.zero_fill();
+            if (!skip_zero_fill) buf.zero_fill();
             return buf;
         }
 
         // Slow path: Refill TLS from global shards
-        return acquire_slow_path(tls);
+        return acquire_slow_path(tls, skip_zero_fill);
+    }
+
+    [[nodiscard]] std::vector<OwnedBuffer> acquire_batch(size_t count, bool skip_zero_fill = false) {
+        if (count == 0) return {};
+
+        stats_total_acquired_.fetch_add(count, std::memory_order_relaxed);
+
+        std::vector<OwnedBuffer> result;
+        result.reserve(count);
+
+        auto& tls = get_tls_cache();
+
+        // First, drain TLS
+        while (result.size() < count && !tls.empty()) {
+            auto buf = tls.try_pop();
+            if (!buf.empty()) {
+                stats_tls_hits_.fetch_add(1, std::memory_order_relaxed);
+                if (!skip_zero_fill) buf.zero_fill();
+                result.push_back(std::move(buf));
+            }
+        }
+
+        // Then, take from global shards directly (bypass TLS refill for batch)
+        if (result.size() < count) {
+            const size_t needed = count - result.size();
+            const size_t primary = current_shard_index();
+
+            // Try all shards
+            for (size_t i = 0; i < SHARD_COUNT && result.size() < count; ++i) {
+                const size_t idx = (primary + i) & SHARD_MASK;
+                std::vector<OwnedBuffer> batch;
+                shards_[idx]->take_batch(batch, needed - (result.size() - (count - needed)));
+
+                for (auto& buf : batch) {
+                    stats_shard_hits_.fetch_add(1, std::memory_order_relaxed);
+                    if (!skip_zero_fill) buf.zero_fill();
+                    result.push_back(std::move(buf));
+                }
+            }
+        }
+
+        // Allocate remaining
+        while (result.size() < count) { result.push_back(allocate_new(skip_zero_fill)); }
+
+        return result;
+    }
+
+    void release_batch(std::vector<OwnedBuffer>&& buffers) noexcept {
+        if (buffers.empty()) return;
+
+        stats_total_released_.fetch_add(buffers.size(), std::memory_order_relaxed);
+
+        // Zero-fill all buffers first
+        for (auto& buf : buffers) { buf.zero_fill(); }
+
+        auto& tls = get_tls_cache();
+
+        // Fill TLS first
+        while (!buffers.empty() && !tls.full()) {
+            if (tls.try_push(std::move(buffers.back()))) { buffers.pop_back(); }
+            else { break; }
+        }
+
+        // Return rest directly to shards
+        if (!buffers.empty()) {
+            const size_t primary = current_shard_index();
+
+            for (size_t i = 0; i < SHARD_COUNT && !buffers.empty(); ++i) {
+                const size_t idx = (primary + i) & SHARD_MASK;
+                shards_[idx]->return_batch(buffers);
+            }
+        }
+
+        // Any remaining will be deallocated by vector destructor
     }
 
     void release(OwnedBuffer&& buffer) noexcept {
@@ -365,7 +439,7 @@ private:
     /**
      * Slow path for acquire: refill TLS from global shards.
      */
-    [[nodiscard]] OwnedBuffer acquire_slow_path(TLSCache& tls) {
+    [[nodiscard]] OwnedBuffer acquire_slow_path(TLSCache& tls, bool skip_zero_fill = false) {
         // Try to refill TLS from global shards
         std::vector<OwnedBuffer> batch;
         batch.reserve(BATCH_REFILL);
@@ -392,12 +466,12 @@ private:
             // Put rest in TLS
             tls.refill_from(batch);
 
-            result.zero_fill();
+            if (!skip_zero_fill) result.zero_fill();
             return result;
         }
 
         // Cold path: allocate new buffer
-        return allocate_new();
+        return allocate_new(skip_zero_fill);
     }
 
     /**
@@ -454,7 +528,7 @@ private:
     /**
      * Allocates a new buffer (cold path).
      */
-    [[nodiscard]] OwnedBuffer allocate_new() {
+    [[nodiscard]] OwnedBuffer allocate_new(bool skip_zero_fill = false) {
         stats_allocations_.fetch_add(1, std::memory_order_relaxed);
 
         // Track peak allocation
@@ -468,7 +542,7 @@ private:
         }
 
         auto buf = OwnedBuffer::allocate(block_size_, alignment_);
-        buf.zero_fill();
+        if (!skip_zero_fill) buf.zero_fill();
         return buf;
     }
 
@@ -511,17 +585,21 @@ BufferPool::BufferPool(size_t block_size, size_t alignment, size_t max_pooled)
 
 BufferPool::~BufferPool() = default;
 
-OwnedBuffer BufferPool::acquire() {
-    return impl_->acquire();
+OwnedBuffer BufferPool::acquire(bool skip_zero_fill) {
+    return impl_->acquire(skip_zero_fill);
 }
+
+std::vector<OwnedBuffer> BufferPool::acquire_batch(size_t count, bool skip_zero_fill) { return impl_->acquire_batch(count, skip_zero_fill); }
 
 void BufferPool::release(OwnedBuffer&& buffer) noexcept {
     impl_->release(std::move(buffer));
 }
 
-BufferPool::Stats BufferPool::stats() const noexcept {
-    return impl_->stats();
+void BufferPool::release_batch(std::vector<OwnedBuffer>&& buffers) noexcept {
+    impl_->release_batch(std::move(buffers));
 }
+
+BufferPool::Stats BufferPool::stats() const noexcept { return impl_->stats(); }
 
 size_t BufferPool::block_size() const noexcept {
     return impl_->block_size();

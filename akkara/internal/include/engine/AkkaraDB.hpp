@@ -159,15 +159,14 @@ namespace akkaradb::engine {
         void rebuild_readers();
         void on_flush(std::vector<core::MemRecord> batch);
 
-    Options opts_;
-    std::unique_ptr<memtable::MemTable> memtable_;
-    std::unique_ptr<wal::WalWriter> wal_;
-    std::shared_ptr<manifest::Manifest> manifest_;
-    std::shared_ptr<sstable::SSTCompactor> compactor_;
-    std::shared_ptr<core::BufferPool> buffer_pool_;
+        Options opts_;
+        std::unique_ptr<memtable::MemTable> memtable_;
+        std::unique_ptr<wal::WalWriter> wal_;
+        std::shared_ptr<manifest::Manifest> manifest_;
+        std::shared_ptr<sstable::SSTCompactor> compactor_;
+        std::shared_ptr<core::BufferPool> buffer_pool_;
 
-    mutable std::mutex readers_mutex_;
-    std::deque<std::unique_ptr<sstable::SSTableReader>> readers_;
-};
-
+        mutable std::mutex readers_mutex_;
+        std::deque<std::unique_ptr<sstable::SSTableReader>> readers_;
+    };
 } // namespace akkaradb::engine

@@ -1,5 +1,5 @@
 /*
-* AkkaraDB
+ * AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
  * This file is part of AkkaraDB.
@@ -20,24 +20,40 @@
 // internal/src/format-akk/AkkBlockPacker.cpp
 #include "format-akk/AkkBlockPacker.hpp"
 #include "core/buffer/BufferView.hpp"
+#include "core/buffer/PooledBuffer.hpp"
 #include "core/record/AKHdr32.hpp"
 #include <cstring>
 
 namespace akkaradb::format::akk {
     /**
- * AkkBlockPacker::Impl - Private implementation (Pimpl idiom).
- */
+     * AkkBlockPacker::Impl - Private implementation (Pimpl idiom).
+     *
+     * Improvements over original:
+     * - Uses PooledBuffer for RAII-based exception safety
+     * - Skips redundant zero_fill by using skip_zero_fill=true on acquire
+     * - Only zero-fills the actual payload region, not entire buffer
+     */
     class AkkBlockPacker::Impl {
     public:
-        Impl(BlockReadyCallback callback, std::shared_ptr<core::BufferPool> pool) : callback_{std::move(callback)}, pool_{std::move(pool)} {}
+        Impl(BlockReadyCallback callback, std::shared_ptr<core::BufferPool> pool) : callback_{std::move(callback)}
+                                                                                    , pool_{std::move(pool)} {}
+
+        ~Impl() {
+            // PooledBuffer automatically returns buffer to pool on destruction
+            // No manual cleanup needed - exception safe!
+        }
 
         void begin_block() {
             if (current_buffer_.empty()) {
                 // Acquire new buffer from pool
-                current_buffer_ = pool_->acquire();
-                current_buffer_.zero_fill();
+                // skip_zero_fill=true: we'll zero-fill only the regions we need
+                current_buffer_ = core::PooledBuffer::acquire(pool_);
 
-                // Reserve space for payloadLen at offset 0
+                // Zero-fill only the header region (payloadLen)
+                // The rest will be explicitly written or zero-padded in end_block()
+                auto view = current_buffer_.view();
+                view.write_u32_le(0, 0); // payloadLen placeholder
+
                 payload_offset_ = sizeof(uint32_t);
                 record_count_ = 0;
             }
@@ -64,7 +80,7 @@ namespace akkaradb::format::akk {
             // Calculate required space
             const size_t record_size = sizeof(core::AKHdr32) + key.size() + value.size();
 
-            // Check if block has enough space (留 CRC space)
+            // Check if block has enough space (reserve space for CRC)
             if (const size_t required = payload_offset_ + record_size; required > MAX_PAYLOAD) {
                 return false; // Block full
             }
@@ -108,13 +124,15 @@ namespace akkaradb::format::akk {
             auto view = current_buffer_.view();
 
             // Write payloadLen at offset 0
-            const uint32_t payload_len = payload_offset_ - sizeof(uint32_t);
+            const uint32_t payload_len = static_cast<uint32_t>(payload_offset_ - sizeof(uint32_t));
             view.write_u32_le(0, payload_len);
 
-            // Zero-fill padding (already zero-filled on acquire, but be explicit)
+            // Zero-fill padding region: [payloadPos .. BLOCK_SIZE-4)
             const size_t padding_start = payload_offset_;
             constexpr size_t padding_end = BLOCK_SIZE - sizeof(uint32_t);
-            if (padding_end > padding_start) { view.fill(padding_start, padding_end - padding_start, std::byte{0}); }
+            if (padding_end > padding_start) {
+                view.fill(padding_start, padding_end - padding_start, std::byte{0});
+            }
 
             // Compute CRC32C over [0..32764)
             const uint32_t crc = view.crc32c(0, BLOCK_SIZE - sizeof(uint32_t));
@@ -122,20 +140,20 @@ namespace akkaradb::format::akk {
             // Write CRC32C at offset 32764
             view.write_u32_le(BLOCK_SIZE - sizeof(uint32_t), crc);
 
-            // Emit block via callback
-            callback_(std::move(current_buffer_));
+            // Release ownership and emit block via callback
+            // After release(), PooledBuffer no longer owns the buffer
+            callback_(current_buffer_.release());
 
-            // Reset state
-            current_buffer_ = core::OwnedBuffer{};
+            // Reset state - current_buffer_ is now empty (released)
             payload_offset_ = 0;
             record_count_ = 0;
         }
 
-        void flush() { end_block(); }
+        void flush() { if (!current_buffer_.empty() && record_count_ > 0) { end_block(); } }
 
         [[nodiscard]] size_t remaining() const noexcept {
-            if (current_buffer_.empty()) { return 0; }
-            return MAX_PAYLOAD - payload_offset_;
+        if (current_buffer_.empty()) { return 0; }
+        return MAX_PAYLOAD - payload_offset_;
         }
 
         [[nodiscard]] size_t record_count() const noexcept { return record_count_; }
@@ -144,53 +162,59 @@ namespace akkaradb::format::akk {
         BlockReadyCallback callback_;
         std::shared_ptr<core::BufferPool> pool_;
 
-        core::OwnedBuffer current_buffer_;
-        size_t payload_offset_{0};
-        size_t record_count_{0};
-    };
+        // PooledBuffer provides RAII - if exception occurs, buffer returns to pool
+    core::PooledBuffer current_buffer_;
+    size_t payload_offset_{0};
+    size_t record_count_{0};
+};
 
-    // ==================== AkkBlockPacker Public API ====================
+// ==================== AkkBlockPacker Public API ====================
 
-    std::unique_ptr<AkkBlockPacker> AkkBlockPacker::create(
-        BlockReadyCallback callback,
-        std::shared_ptr<core::BufferPool> pool
-    ) { return std::unique_ptr<AkkBlockPacker>(new AkkBlockPacker(std::move(callback), std::move(pool))); }
+std::unique_ptr<AkkBlockPacker> AkkBlockPacker::create(
+    BlockReadyCallback callback,
+    std::shared_ptr<core::BufferPool> pool
+) {
+    return std::unique_ptr<AkkBlockPacker>(new AkkBlockPacker(std::move(callback), std::move(pool)));
+}
 
-    AkkBlockPacker::AkkBlockPacker(
-        BlockReadyCallback callback,
-        std::shared_ptr<core::BufferPool> pool
-    ) : impl_{std::make_unique<Impl>(std::move(callback), std::move(pool))} {}
+AkkBlockPacker::AkkBlockPacker(
+    BlockReadyCallback callback,
+    std::shared_ptr<core::BufferPool> pool
+) : impl_{std::make_unique<Impl>(std::move(callback), std::move(pool))} {}
 
-    AkkBlockPacker::~AkkBlockPacker() = default;
+AkkBlockPacker::~AkkBlockPacker() = default;
 
-    void AkkBlockPacker::begin_block() { impl_->begin_block(); }
+void AkkBlockPacker::begin_block() { impl_->begin_block(); }
 
-    bool AkkBlockPacker::try_append(
-        std::span<const uint8_t> key,
-        std::span<const uint8_t> value,
-        uint64_t seq,
-        uint8_t flags,
-        uint64_t key_fp64,
-        uint64_t mini_key
-    ) { return impl_->try_append(key, value, seq, flags, key_fp64, mini_key); }
+bool AkkBlockPacker::try_append(
+    std::span<const uint8_t> key,
+    std::span<const uint8_t> value,
+    uint64_t seq,
+    uint8_t flags,
+    uint64_t key_fp64,
+    uint64_t mini_key
+) {
+    return impl_->try_append(key, value, seq, flags, key_fp64, mini_key);
+}
 
-    bool AkkBlockPacker::try_append(const core::MemRecord& record) {
-        const auto& hdr = record.header();
-        return try_append(
-            record.key(),
-            record.value(),
-            hdr.seq,
-            hdr.flags,
-            hdr.key_fp64,
-            hdr.mini_key
-        );
-    }
+bool AkkBlockPacker::try_append(const core::MemRecord& record) {
+    const auto& hdr = record.header();
+    return try_append(
+        record.key(),
+        record.value(),
+        hdr.seq,
+        hdr.flags,
+        hdr.key_fp64,
+        hdr.mini_key
+    );
+}
 
-    void AkkBlockPacker::end_block() { impl_->end_block(); }
+void AkkBlockPacker::end_block() { impl_->end_block(); }
 
-    void AkkBlockPacker::flush() { impl_->flush(); }
+void AkkBlockPacker::flush() { impl_->flush(); }
 
-    size_t AkkBlockPacker::remaining() const noexcept { return impl_->remaining(); }
+size_t AkkBlockPacker::remaining() const noexcept { return impl_->remaining(); }
 
-    size_t AkkBlockPacker::record_count() const noexcept { return impl_->record_count(); }
+size_t AkkBlockPacker::record_count() const noexcept { return impl_->record_count(); }
+
 } // namespace akkaradb::format::akk

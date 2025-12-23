@@ -22,6 +22,8 @@
 
 #include "OwnedBuffer.hpp"
 #include <memory>
+#include <cstddef>
+#include <vector>
 
 namespace akkaradb::core {
     /**
@@ -128,12 +130,34 @@ namespace akkaradb::core {
          * Fast path: Returns from thread-local cache (no locks).
          * Slow path: Refills TLS from global shard, then returns.
          *
-         * The returned buffer is guaranteed to be zero-filled.
-         *
+         * @param skip_zero_fill If true, skip zero-filling (caller will overwrite entirely)
          * @return An OwnedBuffer of size block_size
          * @throws std::bad_alloc if allocation fails
          */
-        [[nodiscard]] OwnedBuffer acquire();
+        [[nodiscard]] OwnedBuffer acquire(bool skip_zero_fill = false);
+
+        /**
+         * Acquires multiple buffers in a single operation.
+         *
+         * More efficient than calling acquire() repeatedly when multiple
+         * buffers are needed (e.g., for stripe writing). Minimizes lock
+         * acquisitions by batching TLS refills.
+         *
+         * @param count Number of buffers to acquire
+         * @param skip_zero_fill If true, skip zero-filling
+         * @return Vector of OwnedBuffers
+         * @throws std::bad_alloc if allocation fails
+         */
+        [[nodiscard]] std::vector<OwnedBuffer> acquire_batch(size_t count, bool skip_zero_fill = false);
+
+        /**
+         * Releases multiple buffers back to the pool.
+         *
+         * More efficient than calling release() repeatedly.
+         *
+         * @param buffers Buffers to release (moved)
+         */
+        void release_batch(std::vector<OwnedBuffer>&& buffers) noexcept;
 
         /**
          * Releases a buffer back to the pool.
@@ -145,21 +169,21 @@ namespace akkaradb::core {
          *
          * @param buffer Buffer to release (moved)
          */
-        void release(OwnedBuffer&& buffer) noexcept;
+    void release(OwnedBuffer&& buffer) noexcept;
 
-        /**
-         * Returns current pool statistics.
-         *
-         * Thread-safe: Can be called concurrently with other operations.
-         * Note: Statistics are approximate due to relaxed memory ordering.
-         *
-         * @return Pool statistics snapshot
-         */
-        [[nodiscard]] Stats stats() const noexcept;
+    /**
+     * Returns current pool statistics.
+     *
+     * Thread-safe: Can be called concurrently with other operations.
+     * Note: Statistics are approximate due to relaxed memory ordering.
+     *
+     * @return Pool statistics snapshot
+     */
+    [[nodiscard]] Stats stats() const noexcept;
 
-        /**
-         * Returns the configured block size.
-         */
+    /**
+     * Returns the configured block size.
+     */
     [[nodiscard]] size_t block_size() const noexcept;
 
     /**

@@ -71,6 +71,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferView.hpp
         ${INTERNAL_INCLUDE_DIR}/core/buffer/OwnedBuffer.hpp
         ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferPool.hpp
+        ${INTERNAL_INCLUDE_DIR}/core/buffer/PooledBuffer.hpp
 
         # Core - Record
         ${INTERNAL_INCLUDE_DIR}/core/record/AKHdr32.hpp
