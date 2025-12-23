@@ -113,6 +113,8 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTableWriter.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTableReader.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTCompactor.hpp
+
+        ${INTERNAL_INCLUDE_DIR}/engine/AkkaraDB.hpp
 )
 
 # Internal implementation (internal/src)
@@ -154,6 +156,8 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/engine/sstable/SSTableWriter.cpp
         ${INTERNAL_SRC_DIR}/engine/sstable/SSTableReader.cpp
         ${INTERNAL_SRC_DIR}/engine/sstable/SSTCompactor.cpp
+
+        ${INTERNAL_SRC_DIR}/engine/AkkaraDB.cpp
 )
 
 # Include directories
