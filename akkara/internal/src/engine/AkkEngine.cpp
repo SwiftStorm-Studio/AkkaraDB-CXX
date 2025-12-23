@@ -1,5 +1,5 @@
-// internal/src/engine/AkkaraDB.cpp
-#include "engine/AkkaraDB.hpp"
+// internal/src/engine/AkkEngine.cpp
+#include "engine/AkkEngine.hpp"
 #include "engine/wal/WalOp.hpp"
 #include <algorithm>
 #include <fstream>
@@ -22,9 +22,9 @@ namespace akkaradb::engine {
         }
     } // anonymous namespace
 
-    // ==================== AkkaraDB ====================
+    // ==================== AkkEngine ====================
 
-    std::unique_ptr<AkkaraDB> AkkaraDB::open(const Options& opts) {
+    std::unique_ptr<AkkEngine> AkkEngine::open(const Options& opts) {
         // Create directories
         std::filesystem::create_directories(opts.base_dir);
         const auto sst_dir = opts.base_dir / "sst";
@@ -60,7 +60,7 @@ namespace akkaradb::engine {
         auto memtable = memtable::MemTable::create(
             opts.memtable_shard_count,
             opts.memtable_threshold_bytes / opts.memtable_shard_count,
-            nullptr // Callback set after AkkaraDB construction
+            nullptr // Callback set after AkkEngine construction
         );
 
         // Create WAL
@@ -84,8 +84,8 @@ namespace akkaradb::engine {
             // Note: recovery result can be logged
         }
 
-        // Construct AkkaraDB
-        auto db = std::unique_ptr<AkkaraDB>(new AkkaraDB(
+        // Construct AkkEngine
+        auto db = std::unique_ptr<AkkEngine>(new AkkEngine(
             std::move(opts),
             std::move(memtable),
             std::move(wal),
@@ -100,7 +100,7 @@ namespace akkaradb::engine {
         return db;
     }
 
-    AkkaraDB::AkkaraDB(
+    AkkEngine::AkkEngine(
         Options opts,
         std::unique_ptr<memtable::MemTable> memtable,
         std::unique_ptr<wal::WalWriter> wal,
@@ -114,9 +114,9 @@ namespace akkaradb::engine {
         , compactor_{std::move(compactor)}
         , buffer_pool_{std::move(buffer_pool)} {}
 
-    AkkaraDB::~AkkaraDB() { close(); }
+    AkkEngine::~AkkEngine() { close(); }
 
-    uint64_t AkkaraDB::put(
+    uint64_t AkkEngine::put(
         std::span<const uint8_t> key,
         std::span<const uint8_t> value
     ) {
@@ -132,7 +132,7 @@ namespace akkaradb::engine {
         return seq;
     }
 
-    uint64_t AkkaraDB::del(std::span<const uint8_t> key) {
+    uint64_t AkkEngine::del(std::span<const uint8_t> key) {
         const uint64_t seq = memtable_->next_seq();
 
         // Write to WAL first
@@ -145,7 +145,7 @@ namespace akkaradb::engine {
         return seq;
     }
 
-    std::optional<std::vector<uint8_t>> AkkaraDB::get(
+    std::optional<std::vector<uint8_t>> AkkEngine::get(
         std::span<const uint8_t> key
     ) {
         // 1. Check MemTable (fast path)
@@ -171,7 +171,7 @@ namespace akkaradb::engine {
         return std::nullopt;
     }
 
-    bool AkkaraDB::compare_and_swap(
+    bool AkkEngine::compare_and_swap(
         std::span<const uint8_t> key,
         uint64_t expected_seq,
         const std::optional<std::span<const uint8_t>>& new_value
@@ -206,7 +206,7 @@ namespace akkaradb::engine {
         return true;
     }
 
-    std::vector<core::MemRecord> AkkaraDB::range(
+    std::vector<core::MemRecord> AkkEngine::range(
         std::span<const uint8_t> start_key,
         std::optional<std::span<const uint8_t>> end_key
     ) {
@@ -299,7 +299,7 @@ namespace akkaradb::engine {
         return result;
     }
 
-    void AkkaraDB::flush() {
+    void AkkEngine::flush() {
         memtable_->force_flush();
         wal_->force_sync();
 
@@ -310,7 +310,7 @@ namespace akkaradb::engine {
         );
     }
 
-    void AkkaraDB::close() {
+    void AkkEngine::close() {
         flush();
 
         if (wal_) { wal_->close(); }
@@ -318,9 +318,9 @@ namespace akkaradb::engine {
         if (manifest_) { manifest_->close(); }
     }
 
-    uint64_t AkkaraDB::last_seq() const { return memtable_->last_seq(); }
+    uint64_t AkkEngine::last_seq() const { return memtable_->last_seq(); }
 
-    void AkkaraDB::rebuild_readers() {
+    void AkkEngine::rebuild_readers() {
         std::lock_guard lock{readers_mutex_};
         readers_.clear();
 
@@ -367,7 +367,7 @@ namespace akkaradb::engine {
         }
     }
 
-    void AkkaraDB::on_flush(std::vector<core::MemRecord> batch) {
+    void AkkEngine::on_flush(std::vector<core::MemRecord> batch) {
         if (batch.empty()) {
             manifest_->checkpoint(
                 std::optional<std::string>("memFlush-empty"),

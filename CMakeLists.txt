@@ -57,12 +57,12 @@ add_library(akkaradb)
 target_sources(akkaradb PUBLIC FILE_SET HEADERS
         BASE_DIRS ${AKKARADB_INCLUDE_DIR}
         FILES
-
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/AkkaraDB.hpp
 )
 
 # Public implementation (akkaradb/src)
 target_sources(akkaradb PRIVATE
-
+        ${AKKARADB_SRC_DIR}/AkkaraDB.cpp
 )
 
 # Internal headers (not exposed to users)
@@ -115,7 +115,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTableReader.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTCompactor.hpp
 
-        ${INTERNAL_INCLUDE_DIR}/engine/AkkaraDB.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
 )
 
 # Internal implementation (internal/src)
@@ -158,7 +158,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/engine/sstable/SSTableReader.cpp
         ${INTERNAL_SRC_DIR}/engine/sstable/SSTCompactor.cpp
 
-        ${INTERNAL_SRC_DIR}/engine/AkkaraDB.cpp
+        ${INTERNAL_SRC_DIR}/engine/AkkEngine.cpp
 )
 
 # Include directories

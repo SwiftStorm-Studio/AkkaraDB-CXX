@@ -1,20 +1,20 @@
 /*
- * AkkaraDB
+ * AkkEngine
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkaraDB.
+ * This file is part of AkkEngine.
  *
- * AkkaraDB is free software: you can redistribute it and/or modify
+ * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
  *
- * AkkaraDB is distributed in the hope that it will be useful,
+ * AkkEngine is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with AkkaraDB.  If not, see <https://www.gnu.org/licenses/>.
+ * along with AkkEngine.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 // internal/include/core/buffer/BufferPool.hpp
@@ -169,9 +169,9 @@ namespace akkaradb::core {
          *
          * @param buffer Buffer to release (moved)
          */
-    void release(OwnedBuffer&& buffer) noexcept;
+        void release(OwnedBuffer&& buffer) noexcept;
 
-    /**
+        /**
      * Returns current pool statistics.
      *
      * Thread-safe: Can be called concurrently with other operations.
@@ -179,29 +179,28 @@ namespace akkaradb::core {
      *
      * @return Pool statistics snapshot
      */
-    [[nodiscard]] Stats stats() const noexcept;
+        [[nodiscard]] Stats stats() const noexcept;
 
-    /**
+        /**
      * Returns the configured block size.
      */
-    [[nodiscard]] size_t block_size() const noexcept;
+        [[nodiscard]] size_t block_size() const noexcept;
 
-    /**
+        /**
      * Returns the configured alignment.
      */
-    [[nodiscard]] size_t alignment() const noexcept;
+        [[nodiscard]] size_t alignment() const noexcept;
 
-private:
-    /**
+    private:
+        /**
      * Private constructor (use create() factory method).
      */
-    BufferPool(size_t block_size, size_t alignment, size_t max_pooled);
+        BufferPool(size_t block_size, size_t alignment, size_t max_pooled);
 
-    /**
+        /**
      * Pimpl: Implementation class (defined in .cpp).
      */
-    class Impl;
-    std::unique_ptr<Impl> impl_;
-};
-
+        class Impl;
+        std::unique_ptr<Impl> impl_;
+    };
 } // namespace akkaradb::core

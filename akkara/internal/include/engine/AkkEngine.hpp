@@ -1,4 +1,4 @@
-// internal/include/engine/AkkaraDB.hpp
+// internal/include/engine/AkkEngine.hpp
 #pragma once
 
 #include "memtable/MemTable.hpp"
@@ -31,7 +31,7 @@ namespace akkaradb::engine {
      *
      * Thread-safety: Thread-safe for concurrent reads/writes.
      */
-    class AkkaraDB {
+    class AkkEngine {
     public:
         /**
          * Configuration options.
@@ -71,9 +71,9 @@ namespace akkaradb::engine {
          * @return Unique pointer to AkkaraDB instance
          * @throws std::runtime_error on failure
          */
-        [[nodiscard]] static std::unique_ptr<AkkaraDB> open(const Options& opts);
+        [[nodiscard]] static std::unique_ptr<AkkEngine> open(const Options& opts);
 
-        ~AkkaraDB();
+        ~AkkEngine();
 
         /**
          * Inserts or updates a key-value pair.
@@ -147,7 +147,7 @@ namespace akkaradb::engine {
         [[nodiscard]] uint64_t last_seq() const;
 
     private:
-        AkkaraDB(
+        AkkEngine(
             Options opts,
             std::unique_ptr<memtable::MemTable> memtable,
             std::unique_ptr<wal::WalWriter> wal,
