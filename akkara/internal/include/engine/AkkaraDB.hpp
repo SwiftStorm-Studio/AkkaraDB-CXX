@@ -134,30 +134,30 @@ namespace akkaradb::engine {
         /**
          * Forces flush of MemTable to SSTable.
          */
-    void flush();
+        void flush();
 
-    /**
-     * Closes database (calls flush first).
-     */
-    void close();
+        /**
+         * Closes database (calls flush first).
+         */
+        void close();
 
-    /**
-     * Returns last assigned sequence number.
-     */
-    [[nodiscard]] uint64_t last_seq() const;
+        /**
+         * Returns last assigned sequence number.
+         */
+        [[nodiscard]] uint64_t last_seq() const;
 
-private:
-    AkkaraDB(
-        Options opts,
-        std::unique_ptr<memtable::MemTable> memtable,
-        std::unique_ptr<wal::WalWriter> wal,
-        std::shared_ptr<manifest::Manifest> manifest,
-        std::shared_ptr<sstable::SSTCompactor> compactor,
-        std::shared_ptr<core::BufferPool> buffer_pool
-    );
+    private:
+        AkkaraDB(
+            Options opts,
+            std::unique_ptr<memtable::MemTable> memtable,
+            std::unique_ptr<wal::WalWriter> wal,
+            std::shared_ptr<manifest::Manifest> manifest,
+            std::shared_ptr<sstable::SSTCompactor> compactor,
+            std::shared_ptr<core::BufferPool> buffer_pool
+        );
 
-    void rebuild_readers();
-    void on_flush(std::vector<core::MemRecord> batch);
+        void rebuild_readers();
+        void on_flush(std::vector<core::MemRecord> batch);
 
     Options opts_;
     std::unique_ptr<memtable::MemTable> memtable_;
