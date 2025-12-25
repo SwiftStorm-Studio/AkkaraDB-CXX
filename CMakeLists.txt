@@ -58,11 +58,16 @@ target_sources(akkaradb PUBLIC FILE_SET HEADERS
         BASE_DIRS ${AKKARADB_INCLUDE_DIR}
         FILES
         ${AKKARADB_INCLUDE_DIR}/akkaradb/AkkaraDB.hpp
+
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/EntityMacros.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/Serialization.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/PackedTable.hpp
 )
 
 # Public implementation (akkaradb/src)
 target_sources(akkaradb PRIVATE
         ${AKKARADB_SRC_DIR}/AkkaraDB.cpp
+        ${AKKARADB_SRC_DIR}/typed/PackedTable.cpp
 )
 
 # Internal headers (not exposed to users)

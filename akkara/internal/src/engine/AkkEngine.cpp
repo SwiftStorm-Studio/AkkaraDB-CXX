@@ -172,7 +172,7 @@ namespace akkaradb::engine {
             if (record->is_tombstone()) { return std::nullopt; }
 
             auto value_span = record->value();
-            return std::vector<uint8_t>(value_span.begin(), value_span.end());
+            return std::vector(value_span.begin(), value_span.end());
         }
 
         // 2. Check SSTables (newest first)
@@ -183,7 +183,7 @@ namespace akkaradb::engine {
             auto record_opt = reader->get(key);
             if (record_opt.has_value()) {
                 auto value_span = record_opt->value();
-                return std::vector<uint8_t>(value_span.begin(), value_span.end());
+                return std::vector(value_span.begin(), value_span.end());
             }
         }
 

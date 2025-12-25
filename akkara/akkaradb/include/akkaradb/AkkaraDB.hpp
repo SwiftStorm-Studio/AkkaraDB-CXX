@@ -217,13 +217,13 @@ namespace akkaradb {
          *
          * @throws std::runtime_error if database is closed
          */
-    void flush();
+        void flush();
 
-    /**
-     * Closes the database.
-     * Safe to call multiple times (idempotent).
-     */
-    void close() noexcept;
+        /**
+         * Closes the database.
+         * Safe to call multiple times (idempotent).
+         */
+        void close() noexcept;
 
 private:
     explicit AkkaraDB();
