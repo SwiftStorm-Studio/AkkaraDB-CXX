@@ -67,7 +67,6 @@ target_sources(akkaradb PUBLIC FILE_SET HEADERS
 # Public implementation (akkaradb/src)
 target_sources(akkaradb PRIVATE
         ${AKKARADB_SRC_DIR}/AkkaraDB.cpp
-        ${AKKARADB_SRC_DIR}/typed/PackedTable.cpp
 )
 
 # Internal headers (not exposed to users)
