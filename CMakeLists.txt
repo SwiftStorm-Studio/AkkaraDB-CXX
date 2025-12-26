@@ -60,8 +60,20 @@ target_sources(akkaradb PUBLIC FILE_SET HEADERS
         ${AKKARADB_INCLUDE_DIR}/akkaradb/AkkaraDB.hpp
 
         ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/EntityMacros.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/Serialization.hpp
         ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/PackedTable.hpp
+
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/Serialization.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/Core.hpp
+
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Primitives.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/String.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Bool.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Vector.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Optional.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Map.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Set.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Pair.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Array.hpp
 )
 
 # Public implementation (akkaradb/src)

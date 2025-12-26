@@ -104,7 +104,7 @@ namespace akkaradb {
         [[nodiscard]] bool compare_and_swap(
             std::span<const uint8_t> key,
             uint64_t expected_seq,
-            std::optional<std::span<const uint8_t>> new_value
+            const std::optional<std::span<const uint8_t>>& new_value
         ) {
             check_open();
             return internal_db_->compare_and_swap(key, expected_seq, new_value);
@@ -112,7 +112,7 @@ namespace akkaradb {
 
         [[nodiscard]] std::vector<Record> range(
             std::span<const uint8_t> start_key,
-            std::optional<std::span<const uint8_t>> end_key
+            const std::optional<std::span<const uint8_t>>& end_key
         ) {
             check_open();
 
@@ -120,7 +120,7 @@ namespace akkaradb {
             auto internal_records = internal_db_->range(start_key, end_key);
 
             // Convert to public Record
-            std::vector<Record> public_records;
+            std::vector < Record > public_records;
             public_records.reserve(internal_records.size());
 
             for (auto& internal_rec : internal_records) {

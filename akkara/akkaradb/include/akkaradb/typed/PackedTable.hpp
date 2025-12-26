@@ -22,7 +22,7 @@
 
 #include <akkaradb/AkkaraDB.hpp>
 #include "EntityMacros.hpp"
-#include "Serialization.hpp"
+#include "serialization/Serialization.hpp"
 #include <optional>
 #include <string_view>
 #include <memory>
@@ -130,17 +130,17 @@ namespace akkaradb::typed {
         if (remaining >= 12) k2 ^= static_cast<uint64_t>(tail[11]) << 24;
         if (remaining >= 11) k2 ^= static_cast<uint64_t>(tail[10]) << 16;
         if (remaining >= 10) k2 ^= static_cast<uint64_t>(tail[9]) << 8;
-        if (remaining >= 9)  k2 ^= static_cast<uint64_t>(tail[8]) << 0;
+        if (remaining >= 9) k2 ^= static_cast<uint64_t>(tail[8]) << 0;
 
         // k1 (bytes 0-7)
-        if (remaining >= 8)  k1 ^= static_cast<uint64_t>(tail[7]) << 56;
-        if (remaining >= 7)  k1 ^= static_cast<uint64_t>(tail[6]) << 48;
-        if (remaining >= 6)  k1 ^= static_cast<uint64_t>(tail[5]) << 40;
-        if (remaining >= 5)  k1 ^= static_cast<uint64_t>(tail[4]) << 32;
-        if (remaining >= 4)  k1 ^= static_cast<uint64_t>(tail[3]) << 24;
-        if (remaining >= 3)  k1 ^= static_cast<uint64_t>(tail[2]) << 16;
-        if (remaining >= 2)  k1 ^= static_cast<uint64_t>(tail[1]) << 8;
-        if (remaining >= 1)  k1 ^= static_cast<uint64_t>(tail[0]) << 0;
+        if (remaining >= 8) k1 ^= static_cast<uint64_t>(tail[7]) << 56;
+        if (remaining >= 7) k1 ^= static_cast<uint64_t>(tail[6]) << 48;
+        if (remaining >= 6) k1 ^= static_cast<uint64_t>(tail[5]) << 40;
+        if (remaining >= 5) k1 ^= static_cast<uint64_t>(tail[4]) << 32;
+        if (remaining >= 4) k1 ^= static_cast<uint64_t>(tail[3]) << 24;
+        if (remaining >= 3) k1 ^= static_cast<uint64_t>(tail[2]) << 16;
+        if (remaining >= 2) k1 ^= static_cast<uint64_t>(tail[1]) << 8;
+        if (remaining >= 1) k1 ^= static_cast<uint64_t>(tail[0]) << 0;
 
         // Mix tail into hash
         if (k1 != 0) {
@@ -190,7 +190,7 @@ namespace akkaradb::typed {
          * @param db AkkaraDB instance
          * @param table_name Namespace name (typically class name)
          */
-        explicit PackedTable(akkaradb::AkkaraDB& db, std::string_view table_name);
+        explicit PackedTable(AkkaraDB& db, std::string_view table_name);
 
         /**
          * Destructor (no-op, uses RAII for cleanup).
@@ -305,7 +305,7 @@ namespace akkaradb::typed {
 
             // Deserialize each field in order
             std::apply([&](auto... ptrs) {
-                ([&]() {
+                ([&] {
                     using FieldType = std::remove_reference_t<decltype(result.*ptrs)>;
                     result.*ptrs = deserialize<FieldType>(data);
                 }(), ...);
@@ -314,7 +314,7 @@ namespace akkaradb::typed {
             return result;
         }
 
-        akkaradb::AkkaraDB& db_;
+        AkkaraDB& db_;
         std::array<uint8_t, 8> namespace_hash_;
     };
 
