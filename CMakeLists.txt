@@ -61,6 +61,7 @@ target_sources(akkaradb PUBLIC FILE_SET HEADERS
 
         ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/EntityMacros.hpp
         ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/PackedTable.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/Query.hpp
 
         ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/Serialization.hpp
         ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/Core.hpp

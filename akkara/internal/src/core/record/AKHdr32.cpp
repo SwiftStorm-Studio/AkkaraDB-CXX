@@ -33,10 +33,13 @@ namespace akkaradb::core {
         class SipHash24 {
         public:
             explicit SipHash24(uint64_t seed = 0x5AD6DCD676D23C25) noexcept {
-                v0_ = 0x736f6d6570736575ULL ^ seed;
-                v1_ = 0x646f72616e646f6dULL ^ seed;
-                v2_ = 0x6c7967656e657261ULL ^ seed;
-                v3_ = 0x7465646279746573ULL ^ seed;
+                const uint64_t k0 = seed;
+                const uint64_t k1 = seed ^ 0x9E3779B97F4A7C15ULL;
+
+                v0_ = 0x736f6d6570736575ULL ^ k0;
+                v1_ = 0x646f72616e646f6dULL ^ k1;
+                v2_ = 0x6c7967656e657261ULL ^ k0;
+                v3_ = 0x7465646279746573ULL ^ k1;
             }
 
             void update(const uint8_t* data, size_t len) noexcept {
@@ -114,7 +117,12 @@ namespace akkaradb::core {
     uint64_t AKHdr32::build_mini_key(const uint8_t* key, size_t key_len) noexcept {
         uint64_t mini = 0;
         const size_t copy_len = std::min<size_t>(key_len, 8);
-        std::memcpy(&mini, key, copy_len);
+
+        // key[0] → bits [7:0], key[1] → bits [15:8], ..., key[7] → bits [63:56]
+        for (size_t i = 0; i < copy_len; ++i) {
+            mini |= static_cast<uint64_t>(key[i]) << (i * 8);
+        }
+
         return mini;
     }
 
