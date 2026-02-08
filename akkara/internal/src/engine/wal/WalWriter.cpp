@@ -227,7 +227,10 @@ namespace akkaradb::engine::wal {
 
             // 3. Convert to vector
             auto frame_view = frame_buf.view();
-            std::vector<uint8_t> frame_vec(frame_view.data(), frame_view.data() + frame_view.size());
+            std::vector frame_vec(
+                reinterpret_cast<const uint8_t*>(frame_view.data()),
+                reinterpret_cast<const uint8_t*>(frame_view.data() + frame_view.size())
+            );
 
             // 4. Create waiter
             auto waiter = std::make_shared<Waiter>();

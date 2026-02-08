@@ -35,7 +35,7 @@ set(INTERNAL_SRC_DIR ${INTERNAL_DIR}/src)
 
 # ==================== Compiler Settings ====================
 if (MSVC)
-    add_compile_options(/W4 /WX /permissive-)
+    add_compile_options(/W4 /WX /permissive- /utf-8)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else ()
     add_compile_options(-Wall -Wextra -Werror -pedantic)
@@ -234,3 +234,36 @@ if (AKKARADB_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif ()
+
+# ==================== Benchmarks ====================
+message(STATUS "Building AkkaraDB benchmarks")
+
+# Benchmark executable
+add_executable(akkaradb_benchmark
+        benchmarks/main_benchmark.cpp
+)
+
+# Link against akkaradb library
+target_link_libraries(akkaradb_benchmark
+        PRIVATE
+        akkaradb
+)
+
+# Include benchmark headers
+target_include_directories(akkaradb_benchmark
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+)
+
+# Set output directory
+set_target_properties(akkaradb_benchmark PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# Install benchmark executable
+install(TARGETS akkaradb_benchmark
+        RUNTIME DESTINATION bin
+)
+
+message(STATUS "Benchmark executable will be built at: ${CMAKE_BINARY_DIR}/bin/akkaradb_benchmark")

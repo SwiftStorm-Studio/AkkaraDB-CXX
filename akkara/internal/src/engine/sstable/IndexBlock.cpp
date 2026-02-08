@@ -26,8 +26,8 @@
 namespace akkaradb::engine::sstable {
     namespace {
         /**
- * FNV-1a hash (32-bit).
- */
+         * FNV-1a hash (32-bit).
+         */
         uint32_t fnv1a32(std::span<const uint8_t> data) {
             uint32_t hash = 0x811c9dc5;
             for (uint8_t byte : data) {
@@ -38,13 +38,18 @@ namespace akkaradb::engine::sstable {
         }
 
         /**
- * CRC32C computation.
- */
+         * CRC32C computation.
+         */
         uint32_t crc32c(const uint8_t* data, size_t size) {
-            uint32_t crc = 0xFFFFFFFF;
+            auto crc = 0xFFFFFFFF;
             for (size_t i = 0; i < size; ++i) {
-                crc ^= data[i];
-                for (int j = 0; j < 8; ++j) { crc = (crc >> 1) ^ (0x82F63B78 & -(crc & 1)); }
+                crc ^= static_cast<uint32_t>(data[i]);
+                for (auto j = 0; j < 8; ++j) {
+                    const uint32_t mask = (crc & 1)
+                                              ? 0xFFFFFFFF
+                                              : 0;
+                    crc = (crc >> 1) ^ (0x82F63B78 & mask);
+                }
             }
             return ~crc;
         }

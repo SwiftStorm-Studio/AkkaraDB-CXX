@@ -116,7 +116,11 @@ namespace akkaradb::core {
     }
 
     void BufferView::zero_fill() const noexcept {
-        if (data_ && size_ > 0) {
+        if (data_&& size_ 
+        >
+        0
+        )
+        {
             std::memset(data_, 0, size_);
         }
     }
@@ -135,7 +139,7 @@ namespace akkaradb::core {
         while (remaining >= 8) {
             uint64_t chunk;
             std::memcpy(&chunk, ptr, 8);
-            crc = _mm_crc32_u64(crc, chunk);
+            crc = static_cast<uint32_t>(_mm_crc32_u64(crc, chunk));
             ptr += 8;
             remaining -= 8;
         }

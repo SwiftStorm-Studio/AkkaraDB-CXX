@@ -32,20 +32,6 @@
 #endif
 
 namespace akkaradb::engine::sstable {
-    namespace {
-        /**
- * CRC32C computation (Castagnoli polynomial).
- */
-        uint32_t crc32c(const uint8_t* data, size_t size) {
-            uint32_t crc = 0xFFFFFFFF;
-            for (size_t i = 0; i < size; ++i) {
-                crc ^= data[i];
-                for (int j = 0; j < 8; ++j) { crc = (crc >> 1) ^ (0x82F63B78 & -(crc & 1)); }
-            }
-            return ~crc;
-        }
-    } // anonymous namespace
-
     void AKSSFooter::write_to(
         core::BufferView buffer,
         const Footer& footer,
@@ -166,7 +152,7 @@ namespace akkaradb::engine::sstable {
 
             for (size_t i = 0; i < actually_read; ++i) {
                 crc ^= buffer[i];
-                for (int j = 0; j < 8; ++j) { crc = (crc >> 1) ^ (0x82F63B78 & -(crc & 1)); }
+                for (int j = 0; j < 8; ++j) { crc = (crc >> 1) ^ (0x82F63B78 & (0u - (crc & 1))); }
             }
 
             total_read += actually_read;

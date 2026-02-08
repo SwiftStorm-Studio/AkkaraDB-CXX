@@ -1,4 +1,4 @@
-/*
+﻿/*
 * AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *

@@ -125,7 +125,7 @@ namespace akkaradb {
 
             for (auto& internal_rec : internal_records) {
                 // Use friend constructor
-                public_records.emplace_back(static_cast<void*>(&internal_rec));
+                public_records.push_back(Record{static_cast<void*>(&internal_rec)});
             }
 
             return public_records;

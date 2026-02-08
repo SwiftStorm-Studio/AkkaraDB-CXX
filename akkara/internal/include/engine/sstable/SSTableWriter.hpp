@@ -137,9 +137,6 @@ namespace akkaradb::engine::sstable {
 
         void on_block_ready(core::OwnedBuffer block);
 
-        class Impl;
-        std::unique_ptr<Impl> impl_;
-
         std::filesystem::path file_path_;
         std::shared_ptr<core::BufferPool> buffer_pool_;
         std::ofstream file_;
