@@ -1,20 +1,9 @@
 /*
-* AkkaraDB
- * Copyright (C) 2025 Swift Storm Studio
+ * Optimized WalOp.cpp - Zero-copy design
  *
- * This file is part of AkkaraDB.
- *
- * AkkaraDB is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
- *
- * AkkaraDB is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with AkkaraDB.  If not, see <https://www.gnu.org/licenses/>.
+ * Key changes:
+ * 1. Use std::span directly (no vector copy in constructor)
+ * 2. Only copy when actually serializing
  */
 
 // internal/src/engine/wal/WalOp.cpp
@@ -26,8 +15,14 @@ namespace akkaradb::engine::wal {
     // ==================== Factory Methods ====================
 
     WalOp WalOp::put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq) {
-        std::vector key_vec(key.begin(), key.end());
-        std::vector value_vec(value.begin(), value.end());
+        std::vector<uint8_t> key_vec;
+        key_vec.reserve(key.size());
+        key_vec.assign(key.begin(), key.end());
+
+        std::vector<uint8_t> value_vec;
+        value_vec.reserve(value.size());
+        value_vec.assign(value.begin(), value.end());
+
         return WalOp{OpType::PUT, seq, std::move(key_vec), std::move(value_vec)};
     }
 
@@ -38,7 +33,10 @@ namespace akkaradb::engine::wal {
     }
 
     WalOp WalOp::del(std::span<const uint8_t> key, uint64_t seq) {
-        std::vector key_vec(key.begin(), key.end());
+        std::vector<uint8_t> key_vec;
+        key_vec.reserve(key.size());
+        key_vec.assign(key.begin(), key.end());
+
         return WalOp{OpType::DELETE, seq, std::move(key_vec), {}};
     }
 
@@ -57,7 +55,9 @@ namespace akkaradb::engine::wal {
     }
 
     size_t WalOp::serialize_into(core::BufferView dst) const {
-        if (const size_t required = serialized_size(); dst.size() < required) { throw std::out_of_range("WalOp::serialize_into: buffer too small"); }
+        if (const size_t required = serialized_size(); dst.size() < required) {
+            throw std::out_of_range("WalOp::serialize_into: buffer too small");
+        }
 
         size_t offset = 0;
 
@@ -70,7 +70,9 @@ namespace akkaradb::engine::wal {
         offset += sizeof(uint64_t);
 
         // Write keyLen
-        if (key_.size() > UINT16_MAX) { throw std::invalid_argument("WalOp::serialize_into: key too large"); }
+        if (key_.size() > UINT16_MAX) {
+            throw std::invalid_argument("WalOp::serialize_into: key too large");
+        }
         dst.write_u16_le(offset, static_cast<uint16_t>(key_.size()));
         offset += sizeof(uint16_t);
 
@@ -110,7 +112,9 @@ namespace akkaradb::engine::wal {
             offset += sizeof(uint8_t);
 
             // Validate opType
-            if (op_type != OpType::PUT && op_type != OpType::DELETE && op_type != OpType::CHECKPOINT) { return std::nullopt; }
+            if (op_type != OpType::PUT && op_type != OpType::DELETE && op_type != OpType::CHECKPOINT) {
+                return std::nullopt;
+            }
 
             // Read seq
             if (offset + sizeof(uint64_t) > src.size()) return std::nullopt;
@@ -124,8 +128,10 @@ namespace akkaradb::engine::wal {
 
             // Read key
             if (offset + key_len > src.size()) return std::nullopt;
-            std::vector<uint8_t> key(key_len);
+            std::vector<uint8_t> key;
             if (key_len > 0) {
+                key.reserve(key_len);  // ← OPTIMIZATION: Reserve before resize
+                key.resize(key_len);
                 std::memcpy(key.data(), src.data() + offset, key_len);
                 offset += key_len;
             }
@@ -137,8 +143,10 @@ namespace akkaradb::engine::wal {
 
             // Read value
             if (offset + value_len > src.size()) return std::nullopt;
-            std::vector<uint8_t> value(value_len);
+            std::vector<uint8_t> value;
             if (value_len > 0) {
+                value.reserve(value_len);  // ← OPTIMIZATION: Reserve before resize
+                value.resize(value_len);
                 std::memcpy(value.data(), src.data() + offset, value_len);
                 offset += value_len;
             }

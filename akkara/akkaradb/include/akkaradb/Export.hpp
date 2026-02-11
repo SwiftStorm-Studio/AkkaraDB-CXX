@@ -28,17 +28,17 @@
  */
 
 #if defined(_WIN32) || defined(_WIN64)
-    // Windows DLL export/import
+// Windows DLL export/import
     #ifdef AKKARADB_BUILD_SHARED
-        // Building the DLL - export symbols
+// Building the DLL - export symbols
         #define AKKARADB_API __declspec(dllexport)
     #else
-        // Using the DLL - import symbols
+// Using the DLL - import symbols
         #define AKKARADB_API __declspec(dllimport)
     #endif
     #define AKKARADB_LOCAL
 #elif defined(__GNUC__) || defined(__clang__)
-    // GCC/Clang visibility attributes
+// GCC/Clang visibility attributes
     #ifdef AKKARADB_BUILD_SHARED
         #define AKKARADB_API __attribute__((visibility("default")))
         #define AKKARADB_LOCAL __attribute__((visibility("hidden")))
@@ -47,7 +47,7 @@
         #define AKKARADB_LOCAL
     #endif
 #else
-    // Unknown compiler - no visibility control
+// Unknown compiler - no visibility control
     #define AKKARADB_API
     #define AKKARADB_LOCAL
 #endif

@@ -76,24 +76,21 @@ namespace akkaradb::engine::wal {
                 fh.handle_ = ::CreateFileW(
                     path.c_str(),
                     GENERIC_WRITE,
-                    FILE_SHARE_READ,  // Allow concurrent reads
+                    FILE_SHARE_READ,
+                    // Allow concurrent reads
                     nullptr,
                     OPEN_ALWAYS,
                     FILE_ATTRIBUTE_NORMAL,
                     nullptr
                 );
 
-                if (fh.handle_ == INVALID) {
-                    throw std::runtime_error("Failed to open WAL: " + path.string());
-                }
+                if (fh.handle_ == INVALID) { throw std::runtime_error("Failed to open WAL: " + path.string()); }
 
                 ::SetFilePointer(fh.handle_, 0, nullptr, FILE_END);
 #else
                 fh.handle_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
 
-                if (fh.handle_ < 0) {
-                    throw std::runtime_error("Failed to open WAL: " + path.string());
-                }
+                if (fh.handle_ < 0) { throw std::runtime_error("Failed to open WAL: " + path.string()); }
 #endif
 
                 return fh;
@@ -108,13 +105,9 @@ namespace akkaradb::engine::wal {
                     DWORD written = 0;
                     const auto remaining = static_cast<DWORD>(size - total_written);
 
-                    if (!::WriteFile(handle_, data + total_written, remaining, &written, nullptr)) {
-                        throw std::runtime_error("WAL write failed");
-                    }
+                    if (!::WriteFile(handle_, data + total_written, remaining, &written, nullptr)) { throw std::runtime_error("WAL write failed"); }
 
-                    if (written == 0) {
-                        throw std::runtime_error("WAL write returned 0 bytes");
-                    }
+                    if (written == 0) { throw std::runtime_error("WAL write returned 0 bytes"); }
 
                     total_written += written;
                 }
@@ -123,13 +116,11 @@ namespace akkaradb::engine::wal {
                     const ssize_t written = ::write(handle_, data + total_written, size - total_written);
 
                     if (written < 0) {
-                        if (errno == EINTR) continue;  // Interrupted, retry
+                        if (errno == EINTR) continue; // Interrupted, retry
                         throw std::runtime_error("WAL write failed: " + std::string(strerror(errno)));
                     }
 
-                    if (written == 0) {
-                        throw std::runtime_error("WAL write returned 0 bytes");
-                    }
+                    if (written == 0) { throw std::runtime_error("WAL write returned 0 bytes"); }
 
                     total_written += static_cast<size_t>(written);
                 }
@@ -146,13 +137,9 @@ namespace akkaradb::engine::wal {
 
             void fsync_data() {
 #ifdef _WIN32
-                if (!::FlushFileBuffers(handle_)) {
-                    throw std::runtime_error("WAL fsync failed");
-                }
+                if (!::FlushFileBuffers(handle_)) { throw std::runtime_error("WAL fsync failed"); }
 #elif defined(__APPLE__)
-                if (::fcntl(handle_, F_FULLFSYNC) < 0) {
-                    throw std::runtime_error("WAL fsync failed");
-                }
+                if (::fcntl(handle_, F_FULLFSYNC) < 0) { throw std::runtime_error("WAL fsync failed"); }
 #else
                 if (::fdatasync(handle_) < 0) {
                     throw std::runtime_error("WAL fsync failed");
@@ -162,26 +149,20 @@ namespace akkaradb::engine::wal {
 
             void fsync_full() {
 #ifdef _WIN32
-                if (!::FlushFileBuffers(handle_)) {
-                    throw std::runtime_error("WAL fsync failed");
-                }
+                if (!::FlushFileBuffers(handle_)) { throw std::runtime_error("WAL fsync failed"); }
 #elif defined(__APPLE__)
                 if (::fcntl(handle_, F_FULLFSYNC) < 0) {
                     throw std::runtime_error("WAL fsync failed");
                 }
 #else
-                if (::fsync(handle_) < 0) {
-                    throw std::runtime_error("WAL fsync failed");
-                }
+                if (::fsync(handle_) < 0) { throw std::runtime_error("WAL fsync failed"); }
 #endif
             }
 
             void truncate_file() {
 #ifdef _WIN32
                 ::SetFilePointer(handle_, 0, nullptr, FILE_BEGIN);
-                if (!::SetEndOfFile(handle_)) {
-                    throw std::runtime_error("WAL truncate failed");
-                }
+                if (!::SetEndOfFile(handle_)) { throw std::runtime_error("WAL truncate failed"); }
 #else
                 if (::ftruncate(handle_, 0) < 0) {
                     throw std::runtime_error("WAL truncate failed");
@@ -224,9 +205,7 @@ namespace akkaradb::engine::wal {
                 }
             }
 
-            void signal() {
-                done_.store(true, std::memory_order_release);
-            }
+            void signal() { done_.store(true, std::memory_order_release); }
 
             void signal_error(std::exception_ptr e) {
                 error_ = e;
@@ -237,11 +216,7 @@ namespace akkaradb::engine::wal {
                 return done_.load(std::memory_order_acquire);
             }
 
-            void check_error() const {
-                if (error_) {
-                    std::rethrow_exception(error_);
-                }
-            }
+            void check_error() const { if (error_) { std::rethrow_exception(error_); } }
 
         private:
             std::atomic<bool> done_;
@@ -257,7 +232,7 @@ namespace akkaradb::engine::wal {
             enum class Type { WRITE, FORCE_SYNC, TRUNCATE, SHUTDOWN };
 
             Type type;
-            core::OwnedBuffer frame;  // ← std::vector<uint8_t> から変更
+            core::OwnedBuffer frame; // ← std::vector<uint8_t> から変更
             std::shared_ptr<Waiter> waiter;
 
             // Move-only (OwnedBuffer is move-only)
@@ -294,8 +269,8 @@ namespace akkaradb::engine::wal {
                 return cmd;
             }
 
-        private:
-            Command() = default;  // Private default constructor
+            private:
+                Command() = default; // Private default constructor
         };
     } // anonymous namespace
 
@@ -303,18 +278,19 @@ namespace akkaradb::engine::wal {
  * WalWriter::Impl - Private implementation.
  */
     class WalWriter::Impl {
-    public:
-        Impl(
-            const std::filesystem::path& wal_file,
-            size_t group_n,
-            size_t group_micros,
-            bool fast_mode
-        ) : file_handle_{FileHandle::open(wal_file)}
-            , group_n_{group_n}
-            , group_micros_{group_micros}
-            , fast_mode_{fast_mode}
-            , next_lsn_{1}
-            , running_{true} {
+        public:
+            Impl(
+                const std::filesystem::path& wal_file,
+                size_t group_n,
+                size_t group_micros,
+                bool fast_mode
+            )
+                : file_handle_{FileHandle::open(wal_file)},
+                  group_n_{group_n},
+                  group_micros_{group_micros},
+                  fast_mode_{fast_mode}
+                , next_lsn_{1}
+                , running_{true} {
             // Start flusher thread
             flusher_thread_ = std::thread([this] { this->flush_loop(); });
         }
@@ -353,84 +329,82 @@ namespace akkaradb::engine::wal {
                 if (!waiter->is_done()) {
                     throw std::runtime_error("WAL fsync timeout");
                 }
-                waiter->check_error();  // Throw if fsync failed
+                waiter->check_error(); // Throw if fsync failed
             }
 
             return lsn;
-        }
+            }
 
-        void force_sync() {
-            if (!running_.load(std::memory_order_acquire)) {
+            void force_sync() {
+                if (!running_.load(std::memory_order_acquire)) {
                 return;
             }
 
-            auto waiter = std::make_shared<Waiter>();
+                auto waiter = std::make_shared<Waiter>();
 
-            {
-                std::lock_guard lock{queue_mutex_};
-                queue_.emplace_back(Command::force_sync(waiter));
-            }
-            queue_cv_.notify_one();
+                {
+                    std::lock_guard lock{queue_mutex_};
+                    queue_.emplace_back(Command::force_sync(waiter));
+                }
+                queue_cv_.notify_one();
 
-            waiter->wait(std::chrono::seconds(300));
-            if (!waiter->is_done()) {
-                throw std::runtime_error("WAL forceSync timeout");
+                waiter->wait(std::chrono::seconds(300));
+                if (!waiter->is_done()) {
+                    throw std::runtime_error("WAL forceSync timeout");
             }
             waiter->check_error();
         }
 
-        void truncate() {
-            if (!running_.load(std::memory_order_acquire)) {
+            void truncate() {
+                if (!running_.load(std::memory_order_acquire)) {
                 return;
-            }
+                }
 
-            auto waiter = std::make_shared<Waiter>();
+                auto waiter = std::make_shared<Waiter>();
 
-            {
-                std::lock_guard lock{queue_mutex_};
-                queue_.emplace_back(Command::truncate(waiter));
-            }
-            queue_cv_.notify_one();
+                {
+                    std::lock_guard lock{queue_mutex_};
+                    queue_.emplace_back(Command::truncate(waiter));
+                }
+                queue_cv_.notify_one();
 
-            waiter->wait(std::chrono::seconds(300));
-            if (!waiter->is_done()) {
+                waiter->wait(std::chrono::seconds(300));
+                if (!waiter->is_done()) {
                 throw std::runtime_error("WAL truncate timeout");
             }
-            waiter->check_error();
-        }
-
-        void close() {
-            if (!running_.exchange(false, std::memory_order_acq_rel)) {
-                return; // Already closed
+                waiter->check_error();
             }
 
-            // Submit shutdown command
-            {
-                std::lock_guard lock{queue_mutex_};
-                queue_.emplace_back(Command::shutdown());
-            }
-            queue_cv_.notify_all();
+            void close() {
+                if (!running_.exchange(false, std::memory_order_acq_rel)) {
+                    return; // Already closed
+                }
 
-            // Wait for flusher thread to finish
+                // Submit shutdown command
+                {
+                    std::lock_guard lock{queue_mutex_};
+                    queue_.emplace_back(Command::shutdown());
+                }
+                queue_cv_.notify_all();
+
+                // Wait for flusher thread to finish
             if (flusher_thread_.joinable()) {
                 flusher_thread_.join();
+                }
+
+                // Close file handle after thread terminates
+                file_handle_.close();
             }
 
-            // Close file handle after thread terminates
-            file_handle_.close();
-        }
+            [[nodiscard]] uint64_t next_lsn() const noexcept { return next_lsn_.load(std::memory_order_relaxed); }
 
-        [[nodiscard]] uint64_t next_lsn() const noexcept {
-            return next_lsn_.load(std::memory_order_relaxed);
-        }
+        private:
+            void flush_loop() {
+                std::vector<Command> write_batch;
+                write_batch.reserve(group_n_);
 
-    private:
-        void flush_loop() {
-            std::vector<Command> write_batch;
-            write_batch.reserve(group_n_);
-
-            try {
-                while (running_.load(std::memory_order_acquire) || !is_queue_empty()) {
+                try {
+                    while (running_.load(std::memory_order_acquire) || !is_queue_empty()) {
                     std::unique_lock lock{queue_mutex_};
 
                     // 1. Poll first command (with timeout)
@@ -439,9 +413,7 @@ namespace akkaradb::engine::wal {
                         return !queue_.empty() || !running_.load(std::memory_order_acquire);
                     });
 
-                    if (!running_.load(std::memory_order_acquire) && queue_.empty()) {
-                        break;
-                    }
+                    if (!running_.load(std::memory_order_acquire) && queue_.empty()) { break; }
 
                     if (queue_.empty()) {
                         continue; // Timeout, retry
@@ -511,18 +483,16 @@ namespace akkaradb::engine::wal {
 
                 // Drain queue and notify all waiters
                 drain_queue_on_error();
+                }
+
+                // Final fsync (best effort)
+                try { file_handle_.fsync_data(); }
+                catch (...) {
+                    // Suppress exception during shutdown
+                }
             }
 
-            // Final fsync (best effort)
-            try {
-                file_handle_.fsync_data();
-            }
-            catch (...) {
-                // Suppress exception during shutdown
-            }
-        }
-
-        void flush_write_batch(std::vector<Command>& batch) {
+            void flush_write_batch(std::vector<Command>& batch) {
             std::exception_ptr batch_error = nullptr;
 
             try {
@@ -540,87 +510,81 @@ namespace akkaradb::engine::wal {
 
                 // Notify all waiters of success
                 for (auto& cmd : batch) {
-                    if (cmd.waiter) {
-                        cmd.waiter->signal();
-                    }
+                    if (cmd.waiter) { cmd.waiter->signal(); }
                 }
             }
             catch (...) {
                 batch_error = std::current_exception();
 
                 // Notify all waiters of failure
-                for (auto& cmd : batch) {
-                    if (cmd.waiter) {
-                        cmd.waiter->signal_error(batch_error);
-                    }
-                }
+                for (auto& cmd : batch) { if (cmd.waiter) { cmd.waiter->signal_error(batch_error); } }
 
                 throw; // Re-throw to crash flusher thread
             }
-        }
+            }
 
-        bool handle_command(Command& cmd) {
-            std::exception_ptr error = nullptr;
+            bool handle_command(Command& cmd) {
+                std::exception_ptr error = nullptr;
 
-            try {
-                switch (cmd.type) {
-                case Command::Type::FORCE_SYNC:
-                    file_handle_.fsync_data();
-                    if (cmd.waiter) cmd.waiter->signal();
+                try {
+                    switch (cmd.type) {
+                        case Command::Type::FORCE_SYNC:
+                            file_handle_.fsync_data();
+                            if (cmd.waiter) cmd.waiter->signal();
                     return false;
 
                 case Command::Type::TRUNCATE:
-                    file_handle_.truncate_file();
-                    file_handle_.fsync_full();  // Use force(true) for metadata
-                    if (cmd.waiter) cmd.waiter->signal();
-                    return false;
+                            file_handle_.truncate_file();
+                            file_handle_.fsync_full(); // Use force(true) for metadata
+                            if (cmd.waiter) cmd.waiter->signal();
+                            return false;
 
-                case Command::Type::SHUTDOWN:
-                    return true; // Signal shutdown
+                        case Command::Type::SHUTDOWN:
+                            return true; // Signal shutdown
 
-                default:
-                    return false;
+                        default:
+                            return false;
+                    }
+                }
+                catch (...) {
+                    if (cmd.waiter) { cmd.waiter->signal_error(std::current_exception()); }
+                    throw;
                 }
             }
-            catch (...) {
-                if (cmd.waiter) {
-                    cmd.waiter->signal_error(std::current_exception());
-                }
-                throw;
-            }
-        }
 
-        void drain_queue_on_error() {
-            std::lock_guard lock{queue_mutex_};
+            void drain_queue_on_error() {
+                std::lock_guard lock{queue_mutex_};
 
-            while (!queue_.empty()) {
-                Command cmd = std::move(queue_.front());
-                queue_.pop_front();
+                while (!queue_.empty()) {
+                    Command cmd = std::move(queue_.front());
+                    queue_.pop_front();
 
-                if (cmd.waiter) {
-                    cmd.waiter->signal_error(std::make_exception_ptr(
-                        std::runtime_error("WAL flusher thread terminated")
-                    ));
+                    if (cmd.waiter) {
+                        cmd.waiter->signal_error(
+                            std::make_exception_ptr(
+                                std::runtime_error("WAL flusher thread terminated")
+                            )
+                        );
+                    }
                 }
             }
-        }
 
-        bool is_queue_empty() {
-            std::lock_guard lock{queue_mutex_};
-            return queue_.empty();
-        }
+            bool is_queue_empty() {
+                std::lock_guard lock{queue_mutex_};
+                return queue_.empty();
+            }
 
-        FileHandle file_handle_;
-        size_t group_n_;
-        size_t group_micros_;
-        bool fast_mode_;
+            FileHandle file_handle_;
+            size_t group_n_;
+            size_t group_micros_;
+            bool fast_mode_;
 
-        std::atomic<uint64_t> next_lsn_;
-        std::atomic<bool> running_;
+            std::atomic<uint64_t> next_lsn_;
+            std::atomic<bool> running_;
 
-        std::mutex queue_mutex_;
-        std::condition_variable queue_cv_;
-        std::deque<Command> queue_;  // Unlimited size
+            std::mutex queue_mutex_;
+            std::condition_variable queue_cv_;
+            std::deque<Command> queue_;  // Unlimited size
 
         std::thread flusher_thread_;
     };
