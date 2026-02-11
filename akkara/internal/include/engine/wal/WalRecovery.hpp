@@ -63,59 +63,59 @@ namespace akkaradb::engine::wal {
  * Thread-safety: NOT thread-safe. Single-threaded recovery only.
  */
     class WalRecovery {
-    public:
-        /**
+        public:
+            /**
      * Recovery result statistics.
      */
-        struct Result {
-            bool success; ///< True if replay completed without errors
-            uint64_t operations_applied; ///< Number of operations successfully applied
-            uint64_t put_count; ///< Number of PUT operations
-            uint64_t delete_count; ///< Number of DELETE operations
-            uint64_t checkpoint_count; ///< Number of CHECKPOINT operations
-            uint64_t error_position; ///< File position where error occurred (0 if success)
-            WalReader::ErrorType error_type; ///< Type of error encountered
-        };
+            struct Result {
+                bool success; ///< True if replay completed without errors
+                uint64_t operations_applied; ///< Number of operations successfully applied
+                uint64_t put_count; ///< Number of PUT operations
+                uint64_t delete_count; ///< Number of DELETE operations
+                uint64_t checkpoint_count; ///< Number of CHECKPOINT operations
+                uint64_t error_position; ///< File position where error occurred (0 if success)
+                WalReader::ErrorType error_type; ///< Type of error encountered
+            };
 
-        /**
+            /**
      * PUT operation handler.
      *
      * @param key Key bytes
      * @param value Value bytes
      * @param seq Sequence number
      */
-        using PutHandler = std::function<void(
+            using PutHandler = std::function<void(
         std::span<const uint8_t> key,
         std::span<const uint8_t> value,
         uint64_t seq
-        )>;
+            )>;
 
-        /**
+            /**
      * DELETE operation handler.
      *
      * @param key Key bytes
      * @param seq Sequence number
      */
-        using DeleteHandler = std::function<void(
+            using DeleteHandler = std::function<void(
         std::span<const uint8_t> key,
         uint64_t seq
-        )>;
+            )>;
 
-        /**
+            /**
      * CHECKPOINT operation handler (optional).
      *
      * @param seq Sequence number at checkpoint
      */
-        using CheckpointHandler = std::function<void(uint64_t seq)>;
+            using CheckpointHandler = std::function<void(uint64_t seq)>;
 
-        /**
+            /**
      * Creates a WalRecovery instance.
      */
-        [[nodiscard]] static std::unique_ptr<WalRecovery> create();
+            [[nodiscard]] static std::unique_ptr<WalRecovery> create();
 
-        ~WalRecovery();
+            ~WalRecovery();
 
-        /**
+            /**
      * Replays a WAL file and applies operations via callbacks.
      *
      * Stops at first error (truncated/corrupted frame) and returns statistics.
@@ -127,14 +127,14 @@ namespace akkaradb::engine::wal {
      * @return Recovery result with statistics
      * @throws std::runtime_error if file cannot be opened
      */
-        [[nodiscard]] static Result replay(
-            const std::filesystem::path& wal_file,
-            const PutHandler& on_put,
-            const DeleteHandler& on_delete,
-            const CheckpointHandler& on_checkpoint = nullptr
-        );
+            static Result replay(
+                const std::filesystem::path& wal_file,
+                const PutHandler& on_put,
+                const DeleteHandler& on_delete,
+                const CheckpointHandler& on_checkpoint = nullptr
+            );
 
-    private:
-        WalRecovery() = default;
+        private:
+            WalRecovery() = default;
     };
 } // namespace akkaradb::engine::wal

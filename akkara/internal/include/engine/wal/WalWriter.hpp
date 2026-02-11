@@ -71,8 +71,8 @@ namespace akkaradb::engine::wal {
  * Thread-safety: Fully thread-safe. Multiple producers, single consumer.
  */
     class WalWriter {
-    public:
-        /**
+        public:
+            /**
      * Creates a WalWriter.
      *
      * @param wal_file Path to WAL file (e.g., "./data/wal.akwal")
@@ -82,16 +82,16 @@ namespace akkaradb::engine::wal {
      * @return Unique pointer to writer
      * @throws std::runtime_error if file cannot be opened
      */
-        [[nodiscard]] static std::unique_ptr<WalWriter> create(
-            const std::filesystem::path& wal_file,
-            size_t group_n = 32,
-            size_t group_micros = 500,
-            bool fast_mode = false
-        );
+            [[nodiscard]] static std::unique_ptr<WalWriter> create(
+                const std::filesystem::path& wal_file,
+                size_t group_n = 32,
+                size_t group_micros = 500,
+                bool fast_mode = false
+            );
 
-        ~WalWriter();
+            ~WalWriter();
 
-        /**
+            /**
      * Appends a WAL operation and returns LSN.
      *
      * In fast mode: returns immediately after queuing (~5-10 µs)
@@ -102,43 +102,43 @@ namespace akkaradb::engine::wal {
      * @throws std::runtime_error if WAL is closed
      * @throws std::runtime_error if durable mode times out
      */
-        [[nodiscard]] uint64_t append(const WalOp& op);
+            uint64_t append(const WalOp& op);
 
-        /**
+            /**
      * Forces all pending writes to durable storage.
      *
      * Blocks until all queued frames are written and fsync'd.
      */
-        void force_sync();
+            void force_sync();
 
-        /**
+            /**
      * Truncates WAL file to zero length.
      *
      * Intended after durable checkpoint when WAL is no longer needed.
      */
-        void truncate();
+            void truncate();
 
-        /**
+            /**
      * Closes WAL and releases resources.
      *
      * Blocks until flusher thread completes. Idempotent.
      */
-        void close();
+            void close();
 
-        /**
+            /**
      * Returns next LSN that will be assigned.
      */
-        [[nodiscard]] uint64_t next_lsn() const noexcept;
+            [[nodiscard]] uint64_t next_lsn() const noexcept;
 
-    private:
-        WalWriter(
-            const std::filesystem::path& wal_file,
-            size_t group_n,
-            size_t group_micros,
-            bool fast_mode
-        );
+        private:
+            WalWriter(
+                const std::filesystem::path& wal_file,
+                size_t group_n,
+                size_t group_micros,
+                bool fast_mode
+            );
 
-        class Impl;
-        std::unique_ptr<Impl> impl_;
+            class Impl;
+            std::unique_ptr<Impl> impl_;
     };
 } // namespace akkaradb::engine::wal

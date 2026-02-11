@@ -57,6 +57,8 @@ add_library(akkaradb)
 target_sources(akkaradb PUBLIC FILE_SET HEADERS
         BASE_DIRS ${AKKARADB_INCLUDE_DIR}
         FILES
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/Export.hpp
+
         ${AKKARADB_INCLUDE_DIR}/akkaradb/AkkaraDB.hpp
 
         ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/EntityMacros.hpp
@@ -243,6 +245,16 @@ add_executable(akkaradb_benchmark
         benchmarks/main_benchmark.cpp
 )
 
+if (MSVC)
+    target_compile_options(akkaradb_benchmark PRIVATE /WX-)
+else ()
+    get_target_property(CURRENT_OPTS akkaradb_benchmark COMPILE_OPTIONS)
+    if (CURRENT_OPTS)
+        list(REMOVE_ITEM CURRENT_OPTS "-Werror")
+        set_target_properties(akkaradb_benchmark PROPERTIES COMPILE_OPTIONS "${CURRENT_OPTS}")
+    endif ()
+endif ()
+
 # Link against akkaradb library
 target_link_libraries(akkaradb_benchmark
         PRIVATE
@@ -267,3 +279,12 @@ install(TARGETS akkaradb_benchmark
 )
 
 message(STATUS "Benchmark executable will be built at: ${CMAKE_BINARY_DIR}/bin/akkaradb_benchmark")
+
+if (WIN32 AND BUILD_SHARED_LIBS)
+    add_custom_command(TARGET akkaradb_benchmark POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:akkaradb>
+            $<TARGET_FILE_DIR:akkaradb_benchmark>
+            COMMENT "Copying akkaradb.dll to benchmark executable directory"
+    )
+endif ()

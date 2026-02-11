@@ -27,6 +27,8 @@
 #include <vector>
 #include <filesystem>
 
+#include "Export.hpp"
+
 /**
  * AkkaraDB Public API
  *
@@ -40,8 +42,8 @@ namespace akkaradb {
      * Represents a single key-value pair with metadata.
      * Lifetime: Valid until the owning vector is destroyed.
      */
-    class Record {
-    public:
+    class AKKARADB_API Record {
+        public:
         ~Record() noexcept;
 
         // Move-only
@@ -93,8 +95,8 @@ namespace akkaradb {
     /**
      * AkkaraDB - High-performance embedded key-value database.
      */
-    class AkkaraDB {
-    public:
+    class AKKARADB_API AkkaraDB {
+        public:
         /**
          * Configuration options.
          */
@@ -233,3 +235,7 @@ private:
 };
 
 } // namespace akkaradb
+
+#ifdef _MSC_VER
+    #pragma warning(pop)
+#endif

@@ -83,7 +83,7 @@ namespace akkaradb::benchmark {
 
                 const size_t count = sorted.size();
                 const int64_t sum = std::accumulate(sorted.begin(), sorted.end(), 0LL);
-                const double mean = static_cast<double>(sum) / count;
+                //const double mean = static_cast<double>(sum) / count;
 
                 // Calculate ops/sec
                 const double total_sec = static_cast<double>(sum) / 1'000'000'000.0;

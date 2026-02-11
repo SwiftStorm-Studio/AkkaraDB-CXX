@@ -80,7 +80,7 @@ namespace akkaradb::engine::manifest {
                 fh.handle_ = ::CreateFileW(
                     path.c_str(),
                     GENERIC_WRITE,
-                    0,
+                    FILE_SHARE_READ,
                     nullptr,
                     OPEN_ALWAYS,
                     FILE_ATTRIBUTE_NORMAL,
@@ -152,7 +152,7 @@ namespace akkaradb::engine::manifest {
             uint32_t crc = 0xFFFFFFFF;
             for (size_t i = 0; i < size; ++i) {
                 crc ^= data[i];
-                for (int j = 0; j < 8; ++j) { crc = (crc >> 1) ^ (0x82F63B78 & -(crc & 1)); }
+                for (int j = 0; j < 8; ++j) { crc = (crc >> 1) ^ (0x82F63B78 & (0u - (crc & 1))); }
             }
             return ~crc;
         }
@@ -449,8 +449,16 @@ namespace akkaradb::engine::manifest {
         void replay_internal() {
             if (!std::filesystem::exists(path_)) { return; }
 
+            const auto file_size = std::filesystem::file_size(path_);
+            if (file_size == 0) { return; }
+
             std::ifstream file(path_, std::ios::binary);
-            if (!file) { throw std::runtime_error("Failed to open manifest for replay"); }
+            if (!file) {
+                throw std::runtime_error(
+                    "Failed to open manifest for replay: " + path_.string() +
+                    " (exists: yes, size: " + std::to_string(file_size) + " bytes)"
+                );
+            }
 
             while (file) {
                 // Read length

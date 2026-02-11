@@ -61,8 +61,7 @@ namespace akkaradb::engine {
             manifest::Manifest::create(manifest_path, true).release()
         );
 
-        // Replay manifest
-        manifest->replay();
+        // Start Manifest
         manifest->start();
 
         // Create compactor (as shared_ptr)

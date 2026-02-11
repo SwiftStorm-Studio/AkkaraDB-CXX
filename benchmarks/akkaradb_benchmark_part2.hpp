@@ -116,7 +116,7 @@ namespace akkaradb::benchmark {
                     }
 
                     // Second DB instance: read from SST
-                    auto db2 = akkaradb::AkkaraDB::open(
+                    auto db2 = AkkaraDB::open(
                         {
                             .base_dir = base_dir.string(),
                             .memtable_shard_count = 4,
