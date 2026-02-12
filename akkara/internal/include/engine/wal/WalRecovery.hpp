@@ -84,11 +84,7 @@ namespace akkaradb::engine::wal {
      * @param value Value bytes
      * @param seq Sequence number
      */
-            using PutHandler = std::function<void(
-        std::span<const uint8_t> key,
-        std::span<const uint8_t> value,
-        uint64_t seq
-            )>;
+            using PutHandler = std::function<void(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq)>;
 
             /**
      * DELETE operation handler.
@@ -96,10 +92,7 @@ namespace akkaradb::engine::wal {
      * @param key Key bytes
      * @param seq Sequence number
      */
-            using DeleteHandler = std::function<void(
-        std::span<const uint8_t> key,
-        uint64_t seq
-            )>;
+            using DeleteHandler = std::function<void(std::span<const uint8_t> key, uint64_t seq)>;
 
             /**
      * CHECKPOINT operation handler (optional).

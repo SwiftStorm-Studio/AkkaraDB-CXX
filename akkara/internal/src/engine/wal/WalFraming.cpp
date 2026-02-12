@@ -28,7 +28,7 @@ namespace akkaradb::engine::wal {
         const size_t payload_len = op.serialized_size();
         const size_t total_size = frame_size(payload_len);
 
-        auto buffer = core::OwnedBuffer::allocate(total_size, 4096);
+        auto buffer = core::OwnedBuffer::allocate(total_size, 16);
         encode_into(op, buffer.view());
         return buffer;
     }

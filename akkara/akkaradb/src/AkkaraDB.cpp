@@ -213,7 +213,7 @@ namespace akkaradb {
     bool AkkaraDB::compare_and_swap(
         std::span<const uint8_t> key,
         uint64_t expected_seq,
-        std::optional<std::span<const uint8_t>> new_value
+        const std::optional<std::span<const uint8_t>>& new_value
     ) {
         if (!impl_) { throw std::runtime_error("AkkaraDB: database is closed"); }
         return impl_->compare_and_swap(key, expected_seq, new_value);
@@ -221,7 +221,7 @@ namespace akkaradb {
 
     std::vector<Record> AkkaraDB::range(
         std::span<const uint8_t> start_key,
-        std::optional<std::span<const uint8_t>> end_key
+        const std::optional<std::span<const uint8_t>>& end_key
     ) {
         if (!impl_) { throw std::runtime_error("AkkaraDB: database is closed"); }
         return impl_->range(start_key, end_key);

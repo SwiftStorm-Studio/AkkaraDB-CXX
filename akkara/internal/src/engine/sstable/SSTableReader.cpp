@@ -208,11 +208,7 @@ namespace akkaradb::engine::sstable {
 
         while (true) {
             // Try current cursor
-            if (current_cursor_&& current_cursor_
-            ->
-            has_next()
-            )
-            {
+            if (current_cursor_ && current_cursor_->has_next()) {
                 auto record_opt = current_cursor_->try_next();
                 if (!record_opt) {
                     break; // Advance to next block

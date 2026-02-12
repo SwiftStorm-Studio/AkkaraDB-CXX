@@ -20,6 +20,10 @@
 // internal/src/engine/AkkEngine.cpp
 #include "engine/AkkEngine.hpp"
 #include "engine/wal/WalOp.hpp"
+#include "format-akk/AkkBlockPacker.hpp"
+#include "format-akk/AkkBlockUnpacker.hpp"
+#include "format-akk/parity/NoParityCoder.hpp"
+#include "core/record/AKHdr32.hpp"
 #include <algorithm>
 #include <fstream>
 
@@ -38,6 +42,19 @@ namespace akkaradb::engine {
             for (size_t i = 0; i < max_bytes; ++i) { ss << std::setw(2) << static_cast<int>(key[i]); }
 
             return ss.str();
+        }
+
+        /**
+         * Returns the appropriate parity coder for m parity lanes.
+         */
+        std::shared_ptr<format::ParityCoder> make_parity_coder(size_t m) {
+            using namespace format::akk;
+            switch (m) {
+                case 0: return format::NoParityCoder::create();
+                case 1: return format::XorParityCoder::create();
+                case 2: return format::DualXorParityCoder::create();
+                default: return format::NoParityCoder::create(); //RSParityCoder::create(m);
+            }
         }
     } // anonymous namespace
 
@@ -112,6 +129,57 @@ namespace akkaradb::engine {
             buffer_pool
         ));
 
+        // Wire the flush callback now that db is fully constructed.
+        // This cannot be done earlier because the lambda captures db.get(),
+        // which is only valid after the AkkEngine object exists.
+        db->memtable_->set_flush_callback([raw = db.get()](std::vector<core::MemRecord> batch) { raw->on_flush(std::move(batch)); });
+
+        // --- Stripe layer setup ---
+        const auto lane_dir = db->opts_.base_dir / "lanes";
+
+        db->stripe_store_ = StripeStore::create(
+            lane_dir,
+            db->opts_.stripe_k,
+            db->opts_.stripe_m,
+            format::akk::AkkBlockPacker::BLOCK_SIZE,
+            db->opts_.stripe_fast_mode
+        );
+
+        db->stripe_writer_ = format::akk::AkkStripeWriter::create(
+            db->opts_.stripe_k,
+            db->opts_.stripe_m,
+            make_parity_coder(db->opts_.stripe_m),
+            [raw_store = db->stripe_store_.get()](format::StripeWriter::Stripe s) { raw_store->on_stripe_ready(std::move(s)); },
+            db->opts_.stripe_flush_policy
+        );
+
+        // Stripe recovery: restore last_sealed position from lane file sizes.
+        {
+            const auto rec = db->stripe_store_->recover();
+            if (rec.truncated_tail) {
+                // Discard any partial trailing block by truncating all lanes to
+                // the last fully-written stripe.
+                const int64_t keep = rec.last_sealed >= 0
+                                         ? rec.last_sealed + 1
+                                         : 0;
+                db->stripe_store_->truncate(keep);
+            }
+            if (rec.last_sealed >= 0) {
+                manifest->checkpoint(std::optional("stripeRecover"), std::optional(rec.last_sealed), std::optional(db->memtable_->last_seq()));
+            }
+        }
+
+        // Optional stripe reader for get() fallback.
+        if (db->opts_.use_stripe_for_read) {
+            db->stripe_reader_ = format::akk::AkkStripeReader::create(
+                db->opts_.stripe_k,
+                db->opts_.stripe_m,
+                format::akk::AkkBlockPacker::BLOCK_SIZE,
+                make_parity_coder(db->opts_.stripe_m)
+            );
+            db->block_unpacker_ = format::akk::AkkBlockUnpacker::create();
+        }
+
         // Load existing SSTables
         db->rebuild_readers();
 
@@ -132,7 +200,7 @@ namespace akkaradb::engine {
         , compactor_{std::move(compactor)}
         , buffer_pool_{std::move(buffer_pool)} {}
 
-    AkkEngine::~AkkEngine() { close(); }
+    AkkEngine::~AkkEngine() = default;
 
     uint64_t AkkEngine::put(
         std::span<const uint8_t> key,
@@ -175,14 +243,66 @@ namespace akkaradb::engine {
         }
 
         // 2. Check SSTables (newest first)
-        std::lock_guard lock{readers_mutex_};
+        {
+            std::lock_guard lock{readers_mutex_};
+            for (auto& reader : readers_) {
+                auto record_opt = reader->get(key);
+                if (record_opt.has_value()) {
+                    auto value_span = record_opt->value();
+                    return std::vector(value_span.begin(), value_span.end());
+                }
+            }
+        }
 
-        for (auto& reader : readers_) {
-            // Use get() which returns std::optional<RecordView>
-            auto record_opt = reader->get(key);
-            if (record_opt.has_value()) {
-                auto value_span = record_opt->value();
-                return std::vector(value_span.begin(), value_span.end());
+        // 3. Stripe fallback (optional; only when use_stripe_for_read = true)
+        if (stripe_reader_ && stripe_store_ && block_unpacker_) {
+            const int64_t total_stripes = stripe_store_->last_sealed_stripe() + 1;
+            int64_t best_seq = -1;
+            bool best_tombstone = false;
+            std::vector<uint8_t> best_value;
+
+            for (int64_t si = 0; si < total_stripes; ++si) {
+                auto raw_blocks = stripe_store_->read_stripe_blocks(si);
+                if (raw_blocks.empty()) break;
+
+                // Build BufferView spans for the reader
+                std::vector<core::BufferView> views;
+                views.reserve(raw_blocks.size());
+                for (const auto& b : raw_blocks) views.push_back(b.view());
+
+                auto result = stripe_reader_->read_stripe(views);
+                if (!result) continue; // unrecoverable; skip
+
+                for (const auto& data_block : result->data_blocks) {
+                    auto cursor = block_unpacker_->cursor(data_block.view());
+                    while (cursor->has_next()) {
+                        auto entry_opt = cursor->try_next();
+                        if (!entry_opt) break;
+                        const auto& entry = *entry_opt;
+                        if (entry.compare_key(key) != 0) continue;
+
+                        const int64_t seq = static_cast<int64_t>(entry.seq());
+                        if (seq > best_seq) {
+                            best_seq = seq;
+                            best_tombstone = entry.is_tombstone();
+                            if (!best_tombstone) {
+                                const auto v = entry.value();
+                                best_value.assign(v.begin(), v.end());
+                            }
+                            else { best_value.clear(); }
+                        }
+                        else if (seq == best_seq && entry.is_tombstone()) {
+                            // Tie-break: tombstone wins
+                            best_tombstone = true;
+                            best_value.clear();
+                        }
+                    }
+                }
+            }
+
+            if (best_seq >= 0) {
+                if (best_tombstone) return std::nullopt;
+                return best_value;
             }
         }
 
@@ -224,119 +344,103 @@ namespace akkaradb::engine {
         return true;
     }
 
-    std::vector<core::MemRecord> AkkEngine::range(
-        std::span<const uint8_t> start_key,
-        std::optional<std::span<const uint8_t>> end_key
-    ) {
-        std::vector<core::MemRecord> result;
+        std::vector<core::MemRecord> AkkEngine::range(
+            std::span<const uint8_t> start_key,
+            std::optional<std::span<const uint8_t>> end_key
+        ) {
+            memtable::MemTable::KeyRange mem_range{
+                std::vector(start_key.begin(), start_key.end()),
+                end_key.has_value()
+                    ? std::vector(end_key->begin(), end_key->end())
+                    : std::vector<uint8_t>{}
+            };
 
-        // Create range from MemTable
-        memtable::MemTable::KeyRange mem_range{
-            std::vector(start_key.begin(), start_key.end()),
-            end_key.has_value()
-                ? std::vector(end_key->begin(), end_key->end())
-                : std::vector<uint8_t>{} // ← empty vector instead of nullopt
-        };
+            auto mem_iter = memtable_->iterator(mem_range);
 
-        auto mem_records = memtable_->range(mem_range);
-
-        // Create iterators from SSTables
-        std::vector<sstable::SSTableReader::RangeIterator> sst_iterators;
-        {
-            std::lock_guard lock{readers_mutex_};
-            for (auto& reader : readers_) { sst_iterators.push_back(reader->range_iter(start_key, end_key)); }
-        }
-
-        // K-way merge
-        struct Entry {
-            core::MemRecord record;
-            size_t source_idx; // 0 = MemTable, 1+ = SSTable index
-
-            bool operator>(const Entry& other) const {
-                const int cmp = record.compare_key(other.record);
-                if (cmp != 0) { return cmp > 0; }
-                // If keys equal, prioritize higher seq
-                return record.seq() < other.record.seq();
+            std::vector<sstable::SSTableReader::RangeIterator> sst_iterators;
+            {
+                std::lock_guard lock{readers_mutex_};
+                for (auto& reader : readers_) { sst_iterators.push_back(reader->range_iter(start_key, end_key)); }
             }
-        };
 
-        std::priority_queue<Entry, std::vector<Entry>, std::greater<>> pq;
+            struct Entry {
+                core::MemRecord record;
+                size_t source_idx;
 
-        // Initialize with first from each source
-        size_t mem_idx = 0;
-        if (mem_idx < mem_records.size()) { pq.push(Entry{mem_records[mem_idx], 0}); }
+                bool operator>(const Entry& other) const {
+                    const int cmp = record.compare_key(other.record);
+                    if (cmp != 0) return cmp > 0;
+                    return record.seq() < other.record.seq();
+                }
+            };
 
-        for (size_t i = 0; i < sst_iterators.size(); ++i) {
-            if (sst_iterators[i].has_next()) {
-                auto record_opt = sst_iterators[i].next();
-                if (record_opt.has_value()) {
-                    auto mem_record = core::MemRecord::from_view(*record_opt);
-                    pq.push(Entry{std::move(mem_record), i + 1});
+            std::priority_queue<Entry, std::vector<Entry>, std::greater<>> pq;
+
+            if (mem_iter.has_next()) {
+                if (auto rec = mem_iter.next()) {
+                    pq.push(Entry{std::move(*rec), 0});
                 }
             }
-        }
-
-        std::optional<std::vector<uint8_t>> last_key;
-
-        while (!pq.empty()) {
-            auto entry = pq.top(); // ← structured binding避ける（コピーエラー回避）
-            pq.pop();
-
-            // Advance source
-            if (entry.source_idx == 0) {
-                // MemTable
-                ++mem_idx;
-                if (mem_idx < mem_records.size()) { pq.push(Entry{mem_records[mem_idx], 0}); }
+            for (size_t i = 0; i < sst_iterators.size(); ++i) {
+                if (sst_iterators[i].has_next()) { if (auto rec = sst_iterators[i].next()) { pq.push(Entry{core::MemRecord::from_view(*rec), i + 1}); } }
             }
-            else {
-                // SSTable
-                auto& iter = sst_iterators[entry.source_idx - 1];
-                if (iter.has_next()) {
-                    auto record_opt = iter.next();
-                    if (record_opt.has_value()) {
-                        auto mem_record = core::MemRecord::from_view(*record_opt);
-                        pq.push(Entry{std::move(mem_record), entry.source_idx});
+
+            std::vector<core::MemRecord> result;
+            std::optional<std::vector<uint8_t>> last_key;
+
+            while (!pq.empty()) {
+                auto [record, source_idx] = pq.top();
+                pq.pop();
+
+                if (source_idx == 0) {
+                    if (mem_iter.has_next()) {
+                        if (auto rec = mem_iter.next()) { pq.push(Entry{std::move(*rec), 0}); }
                     }
                 }
+                else {
+                    auto& iter = sst_iterators[source_idx - 1];
+                    if (iter.has_next()) { if (auto rec = iter.next()) { pq.push(Entry{core::MemRecord::from_view(*rec), source_idx}); } }
+                }
+
+                auto key_span = record.key();
+                std::vector cur_key(key_span.begin(), key_span.end());
+                if (last_key.has_value() && *last_key == cur_key) continue;
+                last_key = cur_key;
+
+                if (record.is_tombstone()) continue;
+
+                result.push_back(std::move(record));
             }
 
-            // Dedup: skip if same key as last
-            auto current_key_span = entry.record.key();
-            std::vector current_key(current_key_span.begin(), current_key_span.end());
-
-            if (last_key.has_value() && *last_key == current_key) { continue; }
-
-            last_key = current_key;
-
-            // Skip tombstones
-            if (entry.record.is_tombstone()) { continue; }
-
-            result.push_back(std::move(entry.record));
+            return result;
         }
 
-        return result;
-    }
+        void AkkEngine::flush() {
+            memtable_->force_flush();
+            wal_->force_sync();
 
-    void AkkEngine::flush() {
-        memtable_->force_flush();
-        wal_->force_sync();
+            // Seal any pending partial stripe, then force all lane files to disk.
+            if (stripe_writer_) { stripe_writer_->flush(); }
+            if (stripe_store_) { stripe_store_->force(); }
 
-        manifest_->checkpoint(
-            std::optional<std::string>("flush"),
-            std::nullopt,
-            std::optional(memtable_->last_seq())
-        );
-    }
+            manifest_->checkpoint(
+                std::optional<std::string>("flush"),
+            stripe_store_
+                    ? std::optional<int64_t>(stripe_store_->last_sealed_stripe())
+                    : std::nullopt,
+                std::optional(memtable_->last_seq())
+            );
+        }
 
-    void AkkEngine::close() {
-        flush();
+        void AkkEngine::close() {
+            flush();
 
-        if (wal_) { wal_->close(); }
+        if (stripe_store_) { stripe_store_->close(); }
+            if (wal_) { wal_->close(); }
+            if (manifest_) { manifest_->close(); }
+        }
 
-        if (manifest_) { manifest_->close(); }
-    }
-
-    uint64_t AkkEngine::last_seq() const { return memtable_->last_seq(); }
+        uint64_t AkkEngine::last_seq() const { return memtable_->last_seq(); }
 
     void AkkEngine::rebuild_readers() {
         std::lock_guard lock{readers_mutex_};
@@ -354,7 +458,8 @@ namespace akkaradb::engine {
         }
 
         // Sort by level (L0 < L1 < L2...) then by mtime (newest first within level)
-        std::sort(sst_files.begin(), sst_files.end(), [](const auto& a, const auto& b) {
+        std::ranges::sort(
+            sst_files, [](const auto& a, const auto& b) {
             auto parse_level = [](const std::filesystem::path& p) -> int {
                 auto parent = p.parent_path().filename().string();
                 if (parent.size() >= 2 && parent[0] == 'L') {
@@ -396,7 +501,10 @@ namespace akkaradb::engine {
         }
 
         // Sort by key
-        std::sort(batch.begin(), batch.end(), [](const auto& a, const auto& b) { return a.compare_key(b) < 0; });
+        std::ranges::sort(
+            batch, [](const auto& a, const auto& b) {
+            return a.compare_key(b) < 0;
+        });
 
         // Generate filename
         const auto l0_dir = opts_.base_dir / "sst" / "L0";
@@ -429,9 +537,38 @@ namespace akkaradb::engine {
         auto seal_result = writer->seal();
         writer->close();
 
+        // Pack records into stripe blocks (best-effort; stripe layer is optional).
+        // Only runs if a stripe writer is configured.
+        if (stripe_writer_) {
+            try {
+                auto packer = format::akk::AkkBlockPacker::create(
+                    [this](core::OwnedBuffer block) { stripe_writer_->add_block(std::move(block)); },
+                    buffer_pool_
+                );
+
+                packer->begin_block();
+                for (const auto& record : batch) {
+                    const bool ok = packer->try_append(record);
+                    if (!ok) {
+                        packer->end_block();
+                        packer->begin_block();
+                        // A single record must always fit in a fresh block.
+                        packer->try_append(record);
+                    }
+                }
+                packer->end_block();
+                // Do not force-flush here; partial stripes stay pending and
+                // will be sealed when k blocks accumulate or flush() is called.
+            }
+            catch (...) {
+                // Stripe packing is non-fatal; SST already persisted above.
+            }
+        }
+
         // Record in manifest
         manifest_->sst_seal(
-            0, // L0
+            0,
+            // L0
             "L0/" + sst_path.filename().string(),
             seal_result.entries,
             first_hex,

@@ -20,7 +20,7 @@
 // internal/src/engine/wal/WalWriter.cpp
 #include "engine/wal/WalWriter.hpp"
 #include "engine/wal/WalFraming.hpp"
-#include "core/buffer/OwnedBuffer.hpp"  // ← 追加
+#include "core/buffer/OwnedBuffer.hpp"
 #include <stdexcept>
 #include <chrono>
 #include <deque>
@@ -38,198 +38,186 @@
 namespace akkaradb::engine::wal {
     namespace {
         /**
- * Platform-specific file handle for direct I/O with fsync.
- * Handles partial write detection and recovery.
- */
+         * Platform-specific file handle for direct I/O with fsync.
+         * Handles partial write detection and recovery.
+         */
         class FileHandle {
-        public:
-#ifdef _WIN32
-            using NativeHandle = HANDLE;
-            inline static const NativeHandle INVALID = INVALID_HANDLE_VALUE;
-#else
-            using NativeHandle = int;
-            static constexpr NativeHandle INVALID = -1;
-#endif
+            public:
+                #ifdef _WIN32
+                using NativeHandle = HANDLE; inline static const NativeHandle INVALID = INVALID_HANDLE_VALUE;
+                #else
+                using NativeHandle = int;
+                static constexpr NativeHandle INVALID = -1;
+                #endif
 
-            FileHandle() : handle_{INVALID} {}
+                FileHandle() : handle_{INVALID} {}
 
-            ~FileHandle() { close(); }
+                ~FileHandle() { close(); }
 
-            FileHandle(const FileHandle&) = delete;
-            FileHandle& operator=(const FileHandle&) = delete;
+                FileHandle(const FileHandle&) = delete;
+                FileHandle& operator=(const FileHandle&) = delete;
 
-            FileHandle(FileHandle&& other) noexcept : handle_{other.handle_} { other.handle_ = INVALID; }
+                FileHandle(FileHandle&& other) noexcept : handle_{other.handle_} { other.handle_ = INVALID; }
 
-            FileHandle& operator=(FileHandle&& other) noexcept {
-                if (this != &other) {
-                    close();
-                    handle_ = other.handle_;
-                    other.handle_ = INVALID;
-                }
-                return *this;
-            }
-
-            [[nodiscard]] static FileHandle open(const std::filesystem::path& path) {
-                FileHandle fh;
-
-#ifdef _WIN32
-                fh.handle_ = ::CreateFileW(
-                    path.c_str(),
-                    GENERIC_WRITE,
-                    FILE_SHARE_READ,
-                    // Allow concurrent reads
-                    nullptr,
-                    OPEN_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL,
-                    nullptr
-                );
-
-                if (fh.handle_ == INVALID) { throw std::runtime_error("Failed to open WAL: " + path.string()); }
-
-                ::SetFilePointer(fh.handle_, 0, nullptr, FILE_END);
-#else
-                fh.handle_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-
-                if (fh.handle_ < 0) { throw std::runtime_error("Failed to open WAL: " + path.string()); }
-#endif
-
-                return fh;
-            }
-
-            // Handles partial writes and EINTR
-            void write(const uint8_t* data, size_t size) {
-                size_t total_written = 0;
-
-#ifdef _WIN32
-                while (total_written < size) {
-                    DWORD written = 0;
-                    const auto remaining = static_cast<DWORD>(size - total_written);
-
-                    if (!::WriteFile(handle_, data + total_written, remaining, &written, nullptr)) { throw std::runtime_error("WAL write failed"); }
-
-                    if (written == 0) { throw std::runtime_error("WAL write returned 0 bytes"); }
-
-                    total_written += written;
-                }
-#else
-                while (total_written < size) {
-                    const ssize_t written = ::write(handle_, data + total_written, size - total_written);
-
-                    if (written < 0) {
-                        if (errno == EINTR) continue; // Interrupted, retry
-                        throw std::runtime_error("WAL write failed: " + std::string(strerror(errno)));
+                FileHandle& operator=(FileHandle&& other) noexcept {
+                    if (this != &other) {
+                        close();
+                        handle_ = other.handle_;
+                        other.handle_ = INVALID;
                     }
-
-                    if (written == 0) { throw std::runtime_error("WAL write returned 0 bytes"); }
-
-                    total_written += static_cast<size_t>(written);
+                    return *this;
                 }
-#endif
 
-                // Verify complete write
-                if (total_written != size) {
-                    throw std::runtime_error(
-                        "WAL incomplete write: expected " + std::to_string(size) +
-                        " bytes, wrote " + std::to_string(total_written)
+                [[nodiscard]] static FileHandle open(const std::filesystem::path& path) {
+                    FileHandle fh;
+
+                    #ifdef _WIN32
+                    fh.handle_ = ::CreateFileW(
+                        path.c_str(),
+                        GENERIC_WRITE,
+                        FILE_SHARE_READ,
+                        // Allow concurrent reads
+                        nullptr,
+                        OPEN_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL,
+                        nullptr
+                    ); if (fh.handle_ == INVALID) { throw std::runtime_error("Failed to open WAL: " + path.string()); } ::SetFilePointer(
+                        fh.handle_,
+                        0,
+                        nullptr,
+                        FILE_END
                     );
+                    #else
+                    fh.handle_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+
+                    if (fh.handle_ < 0) { throw std::runtime_error("Failed to open WAL: " + path.string()); }
+                    #endif
+
+                    return fh;
                 }
-            }
 
-            void fsync_data() {
-#ifdef _WIN32
-                if (!::FlushFileBuffers(handle_)) { throw std::runtime_error("WAL fsync failed"); }
-#elif defined(__APPLE__)
-                if (::fcntl(handle_, F_FULLFSYNC) < 0) { throw std::runtime_error("WAL fsync failed"); }
-#else
-                if (::fdatasync(handle_) < 0) {
-                    throw std::runtime_error("WAL fsync failed");
-                }
-#endif
-            }
+                // Handles partial writes and EINTR
+                void write(const uint8_t* data, size_t size) {
+                    size_t total_written = 0;
 
-            void fsync_full() {
-#ifdef _WIN32
-                if (!::FlushFileBuffers(handle_)) { throw std::runtime_error("WAL fsync failed"); }
-#elif defined(__APPLE__)
-                if (::fcntl(handle_, F_FULLFSYNC) < 0) {
-                    throw std::runtime_error("WAL fsync failed");
-                }
-#else
-                if (::fsync(handle_) < 0) { throw std::runtime_error("WAL fsync failed"); }
-#endif
-            }
+                    #ifdef _WIN32
+                    while (total_written < size) {
+                        DWORD written = 0;
+                        const auto remaining = static_cast<DWORD>(size - total_written);
 
-            void truncate_file() {
-#ifdef _WIN32
-                ::SetFilePointer(handle_, 0, nullptr, FILE_BEGIN);
-                if (!::SetEndOfFile(handle_)) { throw std::runtime_error("WAL truncate failed"); }
-#else
-                if (::ftruncate(handle_, 0) < 0) {
-                    throw std::runtime_error("WAL truncate failed");
-                }
-#endif
-            }
+                        if (!::WriteFile(handle_, data + total_written, remaining, &written, nullptr)) { throw std::runtime_error("WAL write failed"); }
 
-            void close() noexcept {
-                if (handle_ != INVALID) {
-#ifdef _WIN32
-                    ::CloseHandle(handle_);
-#else
-                    ::close(handle_);
-#endif
-                    handle_ = INVALID;
-                }
-            }
+                        if (written == 0) { throw std::runtime_error("WAL write returned 0 bytes"); }
 
-        private:
-            NativeHandle handle_;
-        };
-
-        /**
- * Waiter for durable mode synchronization.
- * Uses busy-wait (similar to JVM's LockSupport) for lower latency.
- */
-        class Waiter {
-        public:
-            Waiter() : done_{false}, error_{nullptr} {}
-
-            void wait(std::chrono::microseconds timeout) {
-                const auto deadline = std::chrono::steady_clock::now() + timeout;
-
-                while (!done_.load(std::memory_order_acquire)) {
-                    if (std::chrono::steady_clock::now() >= deadline) {
-                        break;
+                        total_written += written;
                     }
-                    // Busy-wait with 10µs sleep (matches JVM's LockSupport.parkNanos(10_000))
-                    std::this_thread::sleep_for(std::chrono::microseconds(10));
+                    #else
+                    while (total_written < size) {
+                        const ssize_t written = ::write(handle_, data + total_written, size - total_written);
+
+                        if (written < 0) {
+                            if (errno == EINTR) continue; // Interrupted, retry
+                            throw std::runtime_error("WAL write failed: " + std::string(strerror(errno)));
+                        }
+
+                        if (written == 0) { throw std::runtime_error("WAL write returned 0 bytes"); }
+
+                        total_written += static_cast<size_t>(written);
+                    }
+                    #endif
+
+                    // Verify complete write
+                    if (total_written != size) {
+                        throw std::runtime_error("WAL incomplete write: expected " + std::to_string(size) + " bytes, wrote " + std::to_string(total_written));
+                    }
                 }
-            }
 
-            void signal() { done_.store(true, std::memory_order_release); }
+                void fsync_data() {
+                    #ifdef _WIN32
+                    if (!::FlushFileBuffers(handle_)) { throw std::runtime_error("WAL fsync failed"); }
+                    #elif defined(__APPLE__)
+                    if (::fcntl(handle_, F_FULLFSYNC) < 0) { throw std::runtime_error("WAL fsync failed"); }
+                    #else
+                    if (::fdatasync(handle_) < 0) { throw std::runtime_error("WAL fsync failed"); }
+                    #endif
+                }
 
-            void signal_error(std::exception_ptr e) {
-                error_ = e;
-                done_.store(true, std::memory_order_release);
-            }
+                void fsync_full() {
+                    #ifdef _WIN32
+                    if (!::FlushFileBuffers(handle_)) { throw std::runtime_error("WAL fsync failed"); }
+                    #elif defined(__APPLE__)
+                    if (::fcntl(handle_, F_FULLFSYNC) < 0) { throw std::runtime_error("WAL fsync failed"); }
+                    #else
+                    if (::fsync(handle_) < 0) { throw std::runtime_error("WAL fsync failed"); }
+                    #endif
+                }
 
-            [[nodiscard]] bool is_done() const noexcept {
-                return done_.load(std::memory_order_acquire);
-            }
+                void truncate_file() {
+                    #ifdef _WIN32
+                    ::SetFilePointer(handle_, 0, nullptr, FILE_BEGIN); if (!::SetEndOfFile(handle_)) { throw std::runtime_error("WAL truncate failed"); }
+                    #else
+                    if (::ftruncate(handle_, 0) < 0) { throw std::runtime_error("WAL truncate failed"); }
+                    #endif
+                }
 
-            void check_error() const { if (error_) { std::rethrow_exception(error_); } }
+                void close() noexcept {
+                    if (handle_ != INVALID) {
+                        #ifdef _WIN32
+                        ::CloseHandle(handle_);
+                        #else
+                        ::close(handle_);
+                        #endif
+                        handle_ = INVALID;
+                    }
+                }
 
-        private:
-            std::atomic<bool> done_;
-            std::exception_ptr error_;
+            private:
+                NativeHandle handle_;
         };
 
         /**
- * Command for queue-based coordination.
- *
- * OPTIMIZATION: Store OwnedBuffer directly instead of copying to vector.
- */
+         * Waiter for durable mode synchronization.
+         * Uses busy-wait (similar to JVM's LockSupport) for lower latency.
+         */
+        class Waiter {
+            public:
+                Waiter() : done_{false}, error_{nullptr} {}
+
+                void wait(std::chrono::microseconds timeout) {
+                    const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+                    while (!done_.load(std::memory_order_acquire)) {
+                        if (std::chrono::steady_clock::now() >= deadline) { break; }
+                        // Busy-wait with 10µs sleep (matches JVM's LockSupport.parkNanos(10_000))
+                        std::this_thread::sleep_for(std::chrono::microseconds(10));
+                    }
+                }
+
+                void signal() { done_.store(true, std::memory_order_release); }
+
+                void signal_error(std::exception_ptr e) {
+                    error_ = e;
+                    done_.store(true, std::memory_order_release);
+                }
+
+                [[nodiscard]] bool is_done() const noexcept { return done_.load(std::memory_order_acquire); }
+
+                void check_error() const { if (error_) { std::rethrow_exception(error_); } }
+
+            private:
+                std::atomic<bool> done_;
+                std::exception_ptr error_;
+        };
+
+        /**
+         * Command for queue-based coordination.
+         *
+         * OPTIMIZATION: Store OwnedBuffer directly instead of copying to vector.
+         */
         struct Command {
-            enum class Type { WRITE, FORCE_SYNC, TRUNCATE, SHUTDOWN };
+            enum class Type {
+                WRITE, FORCE_SYNC, TRUNCATE, SHUTDOWN
+            };
 
             Type type;
             core::OwnedBuffer frame; // ← std::vector<uint8_t> から変更
@@ -275,70 +263,54 @@ namespace akkaradb::engine::wal {
     } // anonymous namespace
 
     /**
- * WalWriter::Impl - Private implementation.
- */
+     * WalWriter::Impl - Private implementation.
+     */
     class WalWriter::Impl {
         public:
-            Impl(
-                const std::filesystem::path& wal_file,
-                size_t group_n,
-                size_t group_micros,
-                bool fast_mode
-            )
+            Impl(const std::filesystem::path& wal_file, size_t group_n, size_t group_micros, bool fast_mode)
                 : file_handle_{FileHandle::open(wal_file)},
                   group_n_{group_n},
                   group_micros_{group_micros},
-                  fast_mode_{fast_mode}
-                , next_lsn_{1}
-                , running_{true} {
-            // Start flusher thread
-            flusher_thread_ = std::thread([this] { this->flush_loop(); });
-        }
-
-        ~Impl() {
-            // Destructor should not call close() to avoid exceptions
-            // close() must be called explicitly
-        }
-
-        uint64_t append(const WalOp& op) {
-            if (!running_.load(std::memory_order_acquire)) {
-                throw std::runtime_error("WAL is closed");
+                  fast_mode_{fast_mode},
+                  next_lsn_{1},
+                  running_{true} {
+                // Start flusher thread
+                flusher_thread_ = std::thread([this] { this->flush_loop(); });
             }
 
-            // 1. Assign LSN
-            const uint64_t lsn = next_lsn_.fetch_add(1, std::memory_order_relaxed);
-
-            // 2. Encode frame (returns OwnedBuffer)
-            auto frame_buf = WalFraming::encode(op);
-
-            // ★ OPTIMIZATION: OwnedBufferを直接使う（vectorへのコピーなし）
-
-            // 3. Create waiter
-            auto waiter = std::make_shared<Waiter>();
-
-            // 4. Enqueue WITHOUT backpressure (unlimited queue)
-            {
-                std::lock_guard lock{queue_mutex_};
-                queue_.emplace_back(Command::write(std::move(frame_buf), waiter));
+            ~Impl() {
+                // Destructor should not call close() to avoid exceptions
+                // close() must be called explicitly
             }
-            queue_cv_.notify_one();
 
-            // 5. Wait for durability (durable mode only)
-            if (!fast_mode_) {
-                waiter->wait(std::chrono::microseconds(group_micros_ * 10));
-                if (!waiter->is_done()) {
-                    throw std::runtime_error("WAL fsync timeout");
+            uint64_t append(const WalOp& op) {
+                if (!running_.load(std::memory_order_acquire)) { throw std::runtime_error("WAL is closed"); }
+
+                const uint64_t lsn = next_lsn_.fetch_add(1, std::memory_order_relaxed);
+
+                auto frame_buf = WalFraming::encode(op);
+
+                // Only allocate Waiter when actually needed
+                std::shared_ptr<Waiter> waiter;
+                if (!fast_mode_) { waiter = std::make_shared<Waiter>(); }
+
+                {
+                    std::lock_guard lock{queue_mutex_};
+                    queue_.emplace_back(Command::write(std::move(frame_buf), waiter));
                 }
-                waiter->check_error(); // Throw if fsync failed
-            }
+                queue_cv_.notify_one();
 
-            return lsn;
+                if (!fast_mode_) {
+                    waiter->wait(std::chrono::microseconds(group_micros_ * 10));
+                    if (!waiter->is_done()) { throw std::runtime_error("WAL fsync timeout"); }
+                    waiter->check_error();
+                }
+
+                return lsn;
             }
 
             void force_sync() {
-                if (!running_.load(std::memory_order_acquire)) {
-                return;
-            }
+                if (!running_.load(std::memory_order_acquire)) { return; }
 
                 auto waiter = std::make_shared<Waiter>();
 
@@ -349,16 +321,12 @@ namespace akkaradb::engine::wal {
                 queue_cv_.notify_one();
 
                 waiter->wait(std::chrono::seconds(300));
-                if (!waiter->is_done()) {
-                    throw std::runtime_error("WAL forceSync timeout");
+                if (!waiter->is_done()) { throw std::runtime_error("WAL forceSync timeout"); }
+                waiter->check_error();
             }
-            waiter->check_error();
-        }
 
             void truncate() {
-                if (!running_.load(std::memory_order_acquire)) {
-                return;
-                }
+                if (!running_.load(std::memory_order_acquire)) { return; }
 
                 auto waiter = std::make_shared<Waiter>();
 
@@ -369,9 +337,7 @@ namespace akkaradb::engine::wal {
                 queue_cv_.notify_one();
 
                 waiter->wait(std::chrono::seconds(300));
-                if (!waiter->is_done()) {
-                throw std::runtime_error("WAL truncate timeout");
-            }
+                if (!waiter->is_done()) { throw std::runtime_error("WAL truncate timeout"); }
                 waiter->check_error();
             }
 
@@ -388,9 +354,7 @@ namespace akkaradb::engine::wal {
                 queue_cv_.notify_all();
 
                 // Wait for flusher thread to finish
-            if (flusher_thread_.joinable()) {
-                flusher_thread_.join();
-                }
+                if (flusher_thread_.joinable()) { flusher_thread_.join(); }
 
                 // Close file handle after thread terminates
                 file_handle_.close();
@@ -405,84 +369,74 @@ namespace akkaradb::engine::wal {
 
                 try {
                     while (running_.load(std::memory_order_acquire) || !is_queue_empty()) {
-                    std::unique_lock lock{queue_mutex_};
+                        std::unique_lock lock{queue_mutex_};
 
-                    // 1. Poll first command (with timeout)
-                    const auto timeout = std::chrono::microseconds(group_micros_);
-                    queue_cv_.wait_for(lock, timeout, [this]() {
-                        return !queue_.empty() || !running_.load(std::memory_order_acquire);
-                    });
+                        // 1. Poll first command (with timeout)
+                        const auto timeout = std::chrono::microseconds(group_micros_);
+                        queue_cv_.wait_for(lock, timeout, [this]() { return !queue_.empty() || !running_.load(std::memory_order_acquire); });
 
-                    if (!running_.load(std::memory_order_acquire) && queue_.empty()) { break; }
+                        if (!running_.load(std::memory_order_acquire) && queue_.empty()) { break; }
 
-                    if (queue_.empty()) {
-                        continue; // Timeout, retry
-                    }
-
-                    Command cmd = std::move(queue_.front());
-                    queue_.pop_front();
-
-                    lock.unlock();
-
-                    // 2. Process command
-                    if (cmd.type == Command::Type::WRITE) {
-                        write_batch.push_back(std::move(cmd));
-
-                        // 3. Drain additional Write commands (non-blocking)
-                        while (write_batch.size() < group_n_) {
-                            std::unique_lock drain_lock{queue_mutex_};
-                            if (queue_.empty()) {
-                                break;
-                            }
-
-                            Command next = std::move(queue_.front());
-                            queue_.pop_front();
-
-                            drain_lock.unlock();
-
-                            if (next.type == Command::Type::WRITE) {
-                                write_batch.push_back(std::move(next));
-                            }
-                            else {
-                                // Non-Write command: flush batch FIRST
-                                if (!write_batch.empty()) {
-                                    flush_write_batch(write_batch);
-                                    write_batch.clear();
-                                }
-
-                                // Then handle the command
-                                if (handle_command(next)) {
-                                    return; // SHUTDOWN received
-                                }
-                                break; // Exit drain loop
-                            }
+                        if (queue_.empty()) {
+                            continue; // Timeout, retry
                         }
 
-                        // 4. Flush write batch
-                        if (!write_batch.empty()) {
-                            flush_write_batch(write_batch);
-                            write_batch.clear();
+                        Command cmd = std::move(queue_.front());
+                        queue_.pop_front();
+
+                        lock.unlock();
+
+                        // 2. Process command
+                        if (cmd.type == Command::Type::WRITE) {
+                            write_batch.push_back(std::move(cmd));
+
+                            // 3. Drain additional Write commands (non-blocking)
+                            while (write_batch.size() < group_n_) {
+                                std::unique_lock drain_lock{queue_mutex_};
+                                if (queue_.empty()) { break; }
+
+                                Command next = std::move(queue_.front());
+                                queue_.pop_front();
+
+                                drain_lock.unlock();
+
+                                if (next.type == Command::Type::WRITE) { write_batch.push_back(std::move(next)); }
+                                else {
+                                    // Non-Write command: flush batch FIRST
+                                    if (!write_batch.empty()) {
+                                        flush_write_batch(write_batch);
+                                        write_batch.clear();
+                                    }
+
+                                    // Then handle the command
+                                    if (handle_command(next)) {
+                                        return; // SHUTDOWN received
+                                    }
+                                    break; // Exit drain loop
+                                }
+                            }
+
+                            // 4. Flush write batch
+                            if (!write_batch.empty()) {
+                                flush_write_batch(write_batch);
+                                write_batch.clear();
+                            }
                         }
-                    }
-                    else {
-                        // 5. Non-Write command at start: handle immediately
-                        if (handle_command(cmd)) {
-                            return; // SHUTDOWN received
+                        else {
+                            // 5. Non-Write command at start: handle immediately
+                            if (handle_command(cmd)) {
+                                return; // SHUTDOWN received
+                            }
                         }
                     }
                 }
-            }
-            catch (...) {
-                // Notify all pending waiters of the error
-                for (auto& cmd : write_batch) {
-                    if (cmd.waiter) {
-                        cmd.waiter->signal_error(std::current_exception());
-                    }
-                }
-                write_batch.clear();
+                catch (...) {
+                    // Notify all pending waiters of the error
+                    for (auto& cmd : write_batch) { if (cmd.waiter) { cmd.waiter->signal_error(std::current_exception()); } }
+                    write_batch.clear();
 
-                // Drain queue and notify all waiters
-                drain_queue_on_error();
+                    // Drain queue and notify all waiters
+                    drain_queue_on_error();
                 }
 
                 // Final fsync (best effort)
@@ -493,34 +447,29 @@ namespace akkaradb::engine::wal {
             }
 
             void flush_write_batch(std::vector<Command>& batch) {
-            std::exception_ptr batch_error = nullptr;
+                std::exception_ptr batch_error = nullptr;
 
-            try {
-                // Write all frames sequentially
-                for (auto& cmd : batch) {
-                    auto view = cmd.frame.view();
-                    file_handle_.write(
-                        reinterpret_cast<const uint8_t*>(view.data()),
-                        view.size()
-                    );
+                try {
+                    // Write all frames sequentially
+                    for (auto& cmd : batch) {
+                        auto view = cmd.frame.view();
+                        file_handle_.write(reinterpret_cast<const uint8_t*>(view.data()), view.size());
+                    }
+
+                    // Single fsync for entire batch (use force(false) - fdatasync)
+                    file_handle_.fsync_data();
+
+                    // Notify all waiters of success
+                    for (auto& cmd : batch) { if (cmd.waiter) { cmd.waiter->signal(); } }
                 }
+                catch (...) {
+                    batch_error = std::current_exception();
 
-                // Single fsync for entire batch (use force(false) - fdatasync)
-                file_handle_.fsync_data();
+                    // Notify all waiters of failure
+                    for (auto& cmd : batch) { if (cmd.waiter) { cmd.waiter->signal_error(batch_error); } }
 
-                // Notify all waiters of success
-                for (auto& cmd : batch) {
-                    if (cmd.waiter) { cmd.waiter->signal(); }
+                    throw; // Re-throw to crash flusher thread
                 }
-            }
-            catch (...) {
-                batch_error = std::current_exception();
-
-                // Notify all waiters of failure
-                for (auto& cmd : batch) { if (cmd.waiter) { cmd.waiter->signal_error(batch_error); } }
-
-                throw; // Re-throw to crash flusher thread
-            }
             }
 
             bool handle_command(Command& cmd) {
@@ -531,9 +480,9 @@ namespace akkaradb::engine::wal {
                         case Command::Type::FORCE_SYNC:
                             file_handle_.fsync_data();
                             if (cmd.waiter) cmd.waiter->signal();
-                    return false;
+                            return false;
 
-                case Command::Type::TRUNCATE:
+                        case Command::Type::TRUNCATE:
                             file_handle_.truncate_file();
                             file_handle_.fsync_full(); // Use force(true) for metadata
                             if (cmd.waiter) cmd.waiter->signal();
@@ -559,13 +508,7 @@ namespace akkaradb::engine::wal {
                     Command cmd = std::move(queue_.front());
                     queue_.pop_front();
 
-                    if (cmd.waiter) {
-                        cmd.waiter->signal_error(
-                            std::make_exception_ptr(
-                                std::runtime_error("WAL flusher thread terminated")
-                            )
-                        );
-                    }
+                    if (cmd.waiter) { cmd.waiter->signal_error(std::make_exception_ptr(std::runtime_error("WAL flusher thread terminated"))); }
                 }
             }
 
@@ -584,30 +527,19 @@ namespace akkaradb::engine::wal {
 
             std::mutex queue_mutex_;
             std::condition_variable queue_cv_;
-            std::deque<Command> queue_;  // Unlimited size
+            std::deque<Command> queue_; // Unlimited size
 
-        std::thread flusher_thread_;
+            std::thread flusher_thread_;
     };
 
     // ==================== WalWriter Public API ====================
 
-    std::unique_ptr<WalWriter> WalWriter::create(
-        const std::filesystem::path& wal_file,
-        size_t group_n,
-        size_t group_micros,
-        bool fast_mode
-    ) {
-        return std::unique_ptr<WalWriter>(new WalWriter(
-            wal_file, group_n, group_micros, fast_mode
-        ));
+    std::unique_ptr<WalWriter> WalWriter::create(const std::filesystem::path& wal_file, size_t group_n, size_t group_micros, bool fast_mode) {
+        return std::unique_ptr<WalWriter>(new WalWriter(wal_file, group_n, group_micros, fast_mode));
     }
 
-    WalWriter::WalWriter(
-        const std::filesystem::path& wal_file,
-        size_t group_n,
-        size_t group_micros,
-        bool fast_mode
-    ) : impl_{std::make_unique<Impl>(wal_file, group_n, group_micros, fast_mode)} {}
+    WalWriter::WalWriter(const std::filesystem::path& wal_file, size_t group_n, size_t group_micros, bool fast_mode)
+        : impl_{std::make_unique<Impl>(wal_file, group_n, group_micros, fast_mode)} {}
 
     WalWriter::~WalWriter() = default;
 

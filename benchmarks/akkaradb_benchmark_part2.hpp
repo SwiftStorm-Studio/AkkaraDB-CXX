@@ -237,8 +237,7 @@ namespace akkaradb::benchmark {
 
                     std::cout << report.to_string();
                     std::cout << "  False Positive Count: " << false_positives << " / " << key_count << std::endl;
-                    std::cout << "  False Positive Rate:  " << std::fixed << std::setprecision(2)
-                        << (false_positives * 100.0 / key_count) << "%" << std::endl;
+                    std::cout << "  False Positive Rate:  " << std::fixed << std::setprecision(2) << (false_positives * 100.0 / key_count) << "%" << std::endl;
                 }
                 catch (const std::exception& e) { std::cout << "Error: " << e.what() << std::endl; }
 
@@ -300,25 +299,20 @@ namespace akkaradb::benchmark {
 
                         results.emplace_back(range_size, elapsed_ms, avg_per_entry);
 
-                        std::cout << "✓ Range size " << std::setw(6) << range_size << ": "
-                            << std::setw(6) << elapsed_ms << " ms total, "
-                            << std::fixed << std::setprecision(1) << avg_per_entry << " µs/entry"
-                            << std::endl;
+                        std::cout << "✓ Range size " << std::setw(6) << range_size << ": " << std::setw(6) << elapsed_ms << " ms total, " << "returned=" <<
+                            count << ", " << std::fixed << std::setprecision(1) << avg_per_entry << " µs/entry" << std::endl;
                     }
 
                     db->close();
 
                     std::cout << "\n📋 Summary:" << std::endl;
                     print_dash(60);
-                    std::cout << std::left << std::setw(15) << "| Range Size"
-                        << std::right << std::setw(14) << "Time(ms)"
-                        << std::setw(20) << "Avg/Entry(µs) |" << std::endl;
+                    std::cout << std::left << std::setw(15) << "| Range Size" << std::right << std::setw(14) << "Time(ms)" << std::setw(20) << "Avg/Entry(µs) |"
+                        << std::endl;
                     print_dash(60);
 
                     for (const auto& [size, time_ms, avg_us] : results) {
-                        std::cout << std::left << "| " << std::setw(13) << size
-                            << std::right << std::setw(14) << time_ms
-                            << std::fixed << std::setprecision(1)
+                        std::cout << std::left << "| " << std::setw(13) << size << std::right << std::setw(14) << time_ms << std::fixed << std::setprecision(1)
                             << std::setw(20) << avg_us << " |" << std::endl;
                     }
                     print_dash(60);
@@ -406,9 +400,7 @@ namespace akkaradb::benchmark {
                                 db->get(key);
                                 auto op_end = std::chrono::high_resolution_clock::now();
 
-                                read_latencies.push_back(
-                                    std::chrono::duration_cast<std::chrono::nanoseconds>(op_end - op_start).count()
-                                );
+                                read_latencies.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(op_end - op_start).count());
                             }
                             else {
                                 // Write operation
@@ -419,9 +411,7 @@ namespace akkaradb::benchmark {
                                 db->put(key, value);
                                 auto op_end = std::chrono::high_resolution_clock::now();
 
-                                write_latencies.push_back(
-                                    std::chrono::duration_cast<std::chrono::nanoseconds>(op_end - op_start).count()
-                                );
+                                write_latencies.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(op_end - op_start).count());
                             }
                         }
 
@@ -437,20 +427,11 @@ namespace akkaradb::benchmark {
                         auto read_report = read_stats.report();
                         auto write_report = write_stats.report();
 
-                        results.push_back(
-                            {
-                                read_pct,
-                                write_pct,
-                                total_ops_per_sec,
-                                read_report.p99,
-                                write_report.p99
-                            }
-                        );
+                        results.push_back({read_pct, write_pct, total_ops_per_sec, read_report.p99, write_report.p99});
 
-                        std::cout << "✓ Read " << std::setw(3) << read_pct << "% / Write " << std::setw(3) << write_pct << "%: "
-                            << std::setw(10) << static_cast<size_t>(total_ops_per_sec) << " ops/sec, "
-                            << "Read p99: " << std::fixed << std::setprecision(1) << read_report.p99 << " µs, "
-                            << "Write p99: " << write_report.p99 << " µs" << std::endl;
+                        std::cout << "✓ Read " << std::setw(3) << read_pct << "% / Write " << std::setw(3) << write_pct << "%: " << std::setw(10) << static_cast
+                            <size_t>(total_ops_per_sec) << " ops/sec, " << "Read p99: " << std::fixed << std::setprecision(1) << read_report.p99 << " µs, " <<
+                            "Write p99: " << write_report.p99 << " µs" << std::endl;
                     }
                     catch (const std::exception& e) {
                         std::cout << "✗ Read " << read_pct << "% / Write " << write_pct << "% - Error: " << e.what() << std::endl;
@@ -461,20 +442,14 @@ namespace akkaradb::benchmark {
 
                 std::cout << "\n📋 Summary:" << std::endl;
                 print_dash(80);
-                std::cout << std::left << std::setw(10) << "| Read%"
-                    << std::setw(10) << "Write%"
-                    << std::right << std::setw(16) << "Total ops/sec"
-                    << std::setw(16) << "Read p99(µs)"
-                    << std::setw(16) << "Write p99(µs) |" << std::endl;
+                std::cout << std::left << std::setw(10) << "| Read%" << std::setw(10) << "Write%" << std::right << std::setw(16) << "Total ops/sec" <<
+                    std::setw(16) << "Read p99(µs)" << std::setw(16) << "Write p99(µs) |" << std::endl;
                 print_dash(80);
 
                 for (const auto& r : results) {
-                    std::cout << std::left << "| " << std::setw(8) << r.read_pct
-                        << std::setw(10) << r.write_pct
-                        << std::right << std::setw(16) << static_cast<size_t>(r.total_ops_per_sec)
-                        << std::fixed << std::setprecision(1)
-                        << std::setw(16) << r.read_p99
-                        << std::setw(16) << r.write_p99 << " |" << std::endl;
+                    std::cout << std::left << "| " << std::setw(8) << r.read_pct << std::setw(10) << r.write_pct << std::right << std::setw(16) << static_cast<
+                            size_t>(r.total_ops_per_sec) << std::fixed << std::setprecision(1) << std::setw(16) << r.read_p99 << std::setw(16) << r.write_p99 <<
+                        " |" << std::endl;
                 }
                 print_dash(80);
             }

@@ -27,6 +27,11 @@
 #include "sstable/SSTCompactor.hpp"
 #include "core/buffer/BufferPool.hpp"
 #include "core/record/MemRecord.hpp"
+#include "StripeLaneWriter.hpp"
+#include "format-akk/AkkStripeWriter.hpp"
+#include "format-akk/AkkStripeReader.hpp"
+#include "format-akk/AkkBlockUnpacker.hpp"
+#include "format-api/FlushPolicy.hpp"
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -75,6 +80,13 @@ namespace akkaradb::engine {
 
             // Buffer pool
             size_t buffer_pool_size = 256;
+
+            // Stripe
+            size_t stripe_k = 4; ///< Data lanes.
+            size_t stripe_m = 2; ///< Parity lanes (0 = disabled).
+            bool stripe_fast_mode = true; ///< Async fsync for stripes.
+            bool use_stripe_for_read = false; ///< Enable stripe fallback on get().
+            format::FlushPolicy stripe_flush_policy = format::FlushPolicy::default_policy();
         };
 
         /**
@@ -184,6 +196,12 @@ namespace akkaradb::engine {
         std::shared_ptr<manifest::Manifest> manifest_;
         std::shared_ptr<sstable::SSTCompactor> compactor_;
         std::shared_ptr<core::BufferPool> buffer_pool_;
+
+        // Stripe layer (optional; null when stripe_m == 0 and disabled at compile-time).
+        std::unique_ptr<StripeLaneWriter> stripe_store_;
+        std::unique_ptr<format::akk::AkkStripeWriter> stripe_writer_;
+        std::unique_ptr<format::akk::AkkStripeReader> stripe_reader_;
+        std::unique_ptr<format::akk::AkkBlockUnpacker> block_unpacker_;
 
         mutable std::mutex readers_mutex_;
         std::deque<std::unique_ptr<sstable::SSTableReader>> readers_;

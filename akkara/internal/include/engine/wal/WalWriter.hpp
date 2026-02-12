@@ -131,12 +131,7 @@ namespace akkaradb::engine::wal {
             [[nodiscard]] uint64_t next_lsn() const noexcept;
 
         private:
-            WalWriter(
-                const std::filesystem::path& wal_file,
-                size_t group_n,
-                size_t group_micros,
-                bool fast_mode
-            );
+            WalWriter(const std::filesystem::path& wal_file, size_t group_n, size_t group_micros, bool fast_mode);
 
             class Impl;
             std::unique_ptr<Impl> impl_;

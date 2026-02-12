@@ -135,6 +135,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTCompactor.hpp
 
         ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/StripeLaneWriter.hpp
 )
 
 # Internal implementation (internal/src)
@@ -178,6 +179,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/engine/sstable/SSTCompactor.cpp
 
         ${INTERNAL_SRC_DIR}/engine/AkkEngine.cpp
+        ${INTERNAL_SRC_DIR}/engine/StripeLaneWriter.cpp
 )
 
 # Include directories
