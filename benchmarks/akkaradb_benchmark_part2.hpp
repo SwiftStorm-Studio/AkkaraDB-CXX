@@ -38,7 +38,8 @@ namespace akkaradb::benchmark {
                             .wal_group_n = 512,
                             .wal_group_micros = 50'000,
                             .wal_fast_mode = true,
-                            .bloom_fp_rate = 0.01
+                            .bloom_fp_rate = 0.01,
+                            .disable_background_compaction = true
                         }
                     );
 
@@ -102,7 +103,8 @@ namespace akkaradb::benchmark {
                                 .wal_group_n = 512,
                                 .wal_group_micros = 50'000,
                                 .wal_fast_mode = true,
-                                .bloom_fp_rate = 0.01
+                                .bloom_fp_rate = 0.01,
+                                .disable_background_compaction = true
                             }
                         );
 
@@ -124,7 +126,8 @@ namespace akkaradb::benchmark {
                             .wal_group_n = 512,
                             .wal_group_micros = 50'000,
                             .wal_fast_mode = true,
-                            .bloom_fp_rate = 0.01
+                            .bloom_fp_rate = 0.01,
+                            .disable_background_compaction = true
                         }
                     );
 
@@ -187,7 +190,8 @@ namespace akkaradb::benchmark {
                                 .wal_group_n = 512,
                                 .wal_group_micros = 50'000,
                                 .wal_fast_mode = true,
-                                .bloom_fp_rate = 0.01
+                                .bloom_fp_rate = 0.01,
+                                .disable_background_compaction = true
                             }
                         );
 
@@ -210,7 +214,8 @@ namespace akkaradb::benchmark {
                             .wal_group_n = 512,
                             .wal_group_micros = 50'000,
                             .wal_fast_mode = true,
-                            .bloom_fp_rate = 0.01
+                            .bloom_fp_rate = 0.01,
+                            .disable_background_compaction = true
                         }
                     );
 
@@ -268,7 +273,8 @@ namespace akkaradb::benchmark {
                             .wal_group_n = 512,
                             .wal_group_micros = 50'000,
                             .wal_fast_mode = true,
-                            .bloom_fp_rate = 0.01
+                            .bloom_fp_rate = 0.01,
+                            .disable_background_compaction = true
                         }
                     );
 
@@ -366,7 +372,8 @@ namespace akkaradb::benchmark {
                                 .wal_group_n = 512,
                                 .wal_group_micros = 50'000,
                                 .wal_fast_mode = true,
-                                .bloom_fp_rate = 0.01
+                                .bloom_fp_rate = 0.01,
+                                .disable_background_compaction = true
                             }
                         );
 

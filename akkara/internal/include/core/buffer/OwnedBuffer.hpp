@@ -48,13 +48,13 @@ namespace akkaradb::core {
  * Thread-safety: NOT thread-safe. Caller must ensure exclusive access.
  */
     class OwnedBuffer {
-    public:
-        /**
+        public:
+            /**
      * Constructs an empty buffer.
      */
-        OwnedBuffer() noexcept = default;
+            OwnedBuffer() noexcept = default;
 
-        /**
+            /**
      * Allocates a new buffer with specified size and alignment.
      *
      * @param size Size in bytes
@@ -63,54 +63,64 @@ namespace akkaradb::core {
      * @throws std::bad_alloc if allocation fails
      * @throws std::invalid_argument if alignment is not power of 2
      */
-        [[nodiscard]] static OwnedBuffer allocate(size_t size, size_t alignment = 4096);
+            [[nodiscard]] static OwnedBuffer allocate(size_t size, size_t alignment = 4096);
 
-        /**
+            /**
      * Move constructor.
      */
-        OwnedBuffer(OwnedBuffer&&) noexcept = default;
+            OwnedBuffer(OwnedBuffer&& other) noexcept
+                : data_{std::move(other.data_)}, size_{other.size_} {
+                other.size_ = 0; // Reset source size so empty() stays consistent with data_
+            }
 
-        /**
+            /**
      * Move assignment operator.
      */
-        OwnedBuffer& operator=(OwnedBuffer&&) noexcept = default;
+            OwnedBuffer& operator=(OwnedBuffer&& other) noexcept {
+                if (this != &other) {
+                    data_ = std::move(other.data_);
+                    size_ = other.size_;
+                    other.size_ = 0; // Reset source size so empty() stays consistent with data_
+                }
+                return *this;
+            }
 
-        /**
+            /**
      * Deleted copy constructor (move-only).
      */
-        OwnedBuffer(const OwnedBuffer&) = delete;
+            OwnedBuffer(const OwnedBuffer&) = delete;
 
-        /**
+            /**
      * Deleted copy assignment operator (move-only).
      */
-        OwnedBuffer& operator=(const OwnedBuffer&) = delete;
+            OwnedBuffer& operator=(const OwnedBuffer&) = delete;
 
-        /**
+            /**
      * Returns a BufferView over the entire buffer (const).
      */
-        [[nodiscard]] BufferView view() const noexcept { return BufferView{data_.get(), size_}; }
+            [[nodiscard]] BufferView view() const noexcept { return BufferView{data_.get(), size_}; }
 
-        /**
+            /**
      * Returns a BufferView over the entire buffer (non-const).
      */
-        [[nodiscard]] BufferView view() noexcept { return BufferView{data_.get(), size_}; }
+            [[nodiscard]] BufferView view() noexcept { return BufferView{data_.get(), size_}; }
 
-        /**
+            /**
      * Returns the raw pointer to the buffer data.
      */
-        [[nodiscard]] std::byte* data() noexcept { return data_.get(); }
+            [[nodiscard]] std::byte* data() noexcept { return data_.get(); }
 
-        /**
+            /**
      * Returns the raw pointer to the buffer data (const).
      */
-        [[nodiscard]] const std::byte* data() const noexcept { return data_.get(); }
+            [[nodiscard]] const std::byte* data() const noexcept { return data_.get(); }
 
-        /**
+            /**
      * Returns the size of the buffer in bytes.
      */
-        [[nodiscard]] size_t size() const noexcept { return size_; }
+            [[nodiscard]] size_t size() const noexcept { return size_; }
 
-        /**
+            /**
      * Creates a deep copy of this buffer.
      *
      * Allocates new memory and copies all data.
@@ -118,25 +128,25 @@ namespace akkaradb::core {
      * @return New OwnedBuffer with copied data
      * @throws std::bad_alloc if allocation fails
      */
-        [[nodiscard]] OwnedBuffer clone() const {
-            if (empty()) { return OwnedBuffer{}; }
+            [[nodiscard]] OwnedBuffer clone() const {
+                if (empty()) { return OwnedBuffer{}; }
 
-            auto new_buf = allocate(size_);
-            std::memcpy(new_buf.data(), data_.get(), size_);
-            return new_buf;
-        }
+                auto new_buf = allocate(size_);
+                std::memcpy(new_buf.data(), data_.get(), size_);
+                return new_buf;
+            }
 
-        /**
+            /**
      * Returns true if the buffer is empty (size == 0).
      */
-        [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+            [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
 
-        /**
+            /**
      * Fills the entire buffer with zeros.
      */
-        void zero_fill() noexcept { if (data_ && size_ > 0) { std::memset(data_.get(), 0, size_); } }
+            void zero_fill() noexcept { if (data_ && size_ > 0) { std::memset(data_.get(), 0, size_); } }
 
-        /**
+            /**
      * Releases ownership of the buffer and returns the raw pointer.
      *
      * After calling this, the OwnedBuffer becomes empty and the caller
@@ -145,29 +155,29 @@ namespace akkaradb::core {
      *
      * @return Raw pointer to the buffer, or nullptr if empty
      */
-        [[nodiscard]] std::byte* release() noexcept {
-            size_ = 0;
-            return data_.release();
-        }
+            [[nodiscard]] std::byte* release() noexcept {
+                size_ = 0;
+                return data_.release();
+            }
 
-    private:
-        /**
+        private:
+            /**
      * Custom deleter for aligned memory.
      *
      * Uses platform-specific aligned deallocation:
      * - Windows: _aligned_free
      * - POSIX: free (works for both aligned_alloc and posix_memalign)
      */
-        struct AlignedDeleter {
-            void operator()(std::byte* ptr) const noexcept;
-        };
+            struct AlignedDeleter {
+                void operator()(std::byte* ptr) const noexcept;
+            };
 
-        std::unique_ptr<std::byte[], AlignedDeleter> data_;
-        size_t size_{0};
+            std::unique_ptr<std::byte[], AlignedDeleter> data_;
+            size_t size_{0};
 
-        /**
+            /**
      * Private constructor (use allocate() factory method).
      */
-        OwnedBuffer(std::byte* data, size_t size) noexcept : data_{data}, size_{size} {}
+            OwnedBuffer(std::byte* data, size_t size) noexcept : data_{data}, size_{size} {}
     };
 } // namespace akkaradb::core

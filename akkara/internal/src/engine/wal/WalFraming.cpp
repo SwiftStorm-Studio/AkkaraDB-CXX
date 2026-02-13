@@ -20,6 +20,8 @@
 // internal/src/engine/wal/WalFraming.cpp
 #include "engine/wal/WalFraming.hpp"
 #include <stdexcept>
+#include <vector>
+#include <cstring>
 
 namespace akkaradb::engine::wal {
     // ==================== Encoding ====================
@@ -31,6 +33,25 @@ namespace akkaradb::engine::wal {
         auto buffer = core::OwnedBuffer::allocate(total_size, 16);
         encode_into(op, buffer.view());
         return buffer;
+    }
+
+    core::OwnedBuffer WalFraming::encode_tls(const WalOp& op) {
+        // Thread-local staging buffer: grows to fit, never shrinks.
+        // Eliminates per-call malloc on the hot write path.
+        thread_local std::vector<uint8_t> tls_buf;
+
+        const size_t payload_len = op.serialized_size();
+        const size_t total_size = frame_size(payload_len);
+
+        if (tls_buf.size() < total_size) { tls_buf.resize(total_size); }
+
+        core::BufferView view{tls_buf.data(), total_size};
+        encode_into(op, view);
+
+        // Copy into an owned allocation for the WAL queue.
+        auto owned = core::OwnedBuffer::allocate(total_size, 16);
+        std::memcpy(owned.view().data(), tls_buf.data(), total_size);
+        return owned;
     }
 
     size_t WalFraming::encode_into(const WalOp& op, core::BufferView dst) {

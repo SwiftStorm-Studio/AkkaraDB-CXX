@@ -23,7 +23,6 @@
 
 #include <stdexcept>
 #include <algorithm>
-#include <cstring>
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -194,9 +193,12 @@ namespace akkaradb::engine {
                 const size_t n_data = stripe.data_blocks.size();
                 const size_t n_parity = stripe.parity_blocks.size();
 
-                if (n_data != k_) {
-                    throw std::runtime_error("StripeLaneWriter: stripe has " + std::to_string(n_data) + " data blocks; expected " + std::to_string(k_));
-                }
+                if (n_data == 0) { throw std::runtime_error("StripeLaneWriter: stripe has 0 data blocks"); }
+
+                // A partial stripe (n_data < k_) is allowed: occurs when a time-based
+                // flush fires before k_ blocks have accumulated. Parity is only valid
+                // when all k_ data blocks are present; skip parity writes for partial stripes.
+                const bool full_stripe = (n_data == k_);
 
                 // Write data lanes.
                 for (size_t i = 0; i < n_data; ++i) {
@@ -207,12 +209,14 @@ namespace akkaradb::engine {
                     }
                 }
 
-                // Write parity lanes.
-                for (size_t i = 0; i < n_parity; ++i) {
-                    const auto& blk = stripe.parity_blocks[i];
-                    if (blk.size() != block_size_) { throw std::runtime_error("StripeLaneWriter: parity block size mismatch"); }
-                    if (!lanes_[k_ + i].write_append(reinterpret_cast<const uint8_t*>(blk.data()), blk.size())) {
-                        throw std::runtime_error("StripeLaneWriter: I/O error writing parity lane " + std::to_string(i));
+                // Write parity lanes only when all k_ data blocks are present.
+                if (full_stripe) {
+                    for (size_t i = 0; i < n_parity; ++i) {
+                        const auto& blk = stripe.parity_blocks[i];
+                        if (blk.size() != block_size_) { throw std::runtime_error("StripeLaneWriter: parity block size mismatch"); }
+                        if (!lanes_[k_ + i].write_append(reinterpret_cast<const uint8_t*>(blk.data()), blk.size())) {
+                            throw std::runtime_error("StripeLaneWriter: I/O error writing parity lane " + std::to_string(i));
+                        }
                     }
                 }
 
@@ -305,7 +309,12 @@ namespace akkaradb::engine {
             void close() { close_all(); }
 
         private:
-            std::filesystem::path lane_path(size_t idx) const { return lane_dir_ / ("lane_" + std::to_string(idx) + ".akl"); }
+            std::filesystem::path lane_path(size_t idx) const {
+                const std::string ext = (idx < k_)
+                                            ? ".akd"
+                                            : ".akp";
+                return lane_dir_ / ("lane_" + std::to_string(idx) + ext);
+            }
 
             void force_all() {
                 for (auto& lane : lanes_) lane.force();
@@ -339,28 +348,19 @@ namespace akkaradb::engine {
 
     StripeLaneWriter::~StripeLaneWriter() = default;
 
-    void StripeLaneWriter::on_stripe_ready(format::StripeWriter::Stripe stripe) {
-    impl_->on_stripe_ready(std::move(stripe));
-}
+    void StripeLaneWriter::on_stripe_ready(format::StripeWriter::Stripe stripe) { impl_->on_stripe_ready(std::move(stripe)); }
 
-void StripeLaneWriter::force() { impl_->force(); }
+    void StripeLaneWriter::force() { impl_->force(); }
 
-StripeLaneWriter::RecoveryResult StripeLaneWriter::recover() const {
-    return impl_->recover();
-}
+    StripeLaneWriter::RecoveryResult StripeLaneWriter::recover() const { return impl_->recover(); }
 
-void StripeLaneWriter::truncate(int64_t stripe_count) {
-    impl_->truncate(stripe_count);
-}
+    void StripeLaneWriter::truncate(int64_t stripe_count) { impl_->truncate(stripe_count); }
 
-std::vector<core::OwnedBuffer> StripeLaneWriter::read_stripe_blocks(int64_t stripe_index) const {
-    return impl_->read_stripe_blocks(stripe_index);
-}
+    std::vector<core::OwnedBuffer> StripeLaneWriter::read_stripe_blocks(int64_t stripe_index) const { return impl_->read_stripe_blocks(stripe_index); }
 
-int64_t StripeLaneWriter::last_sealed_stripe()  const noexcept { return impl_->last_sealed_stripe();  }
-int64_t StripeLaneWriter::last_durable_stripe() const noexcept { return impl_->last_durable_stripe(); }
-size_t  StripeLaneWriter::total_lanes()         const noexcept { return impl_->total_lanes();         }
+    int64_t StripeLaneWriter::last_sealed_stripe() const noexcept { return impl_->last_sealed_stripe(); }
+    int64_t StripeLaneWriter::last_durable_stripe() const noexcept { return impl_->last_durable_stripe(); }
+    size_t StripeLaneWriter::total_lanes() const noexcept { return impl_->total_lanes(); }
 
-void StripeLaneWriter::close() { impl_->close(); }
-
+    void StripeLaneWriter::close() { impl_->close(); }
 } // namespace akkaradb::engine

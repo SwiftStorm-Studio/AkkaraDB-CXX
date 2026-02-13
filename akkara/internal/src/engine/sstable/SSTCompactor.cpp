@@ -51,11 +51,7 @@ namespace akkaradb::engine::sstable {
         /**
          * Gets current time in milliseconds.
          */
-        uint64_t now_millis() {
-            return std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()
-            ).count();
-        }
+        uint64_t now_millis() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
 
         /**
          * Generates UUID-like suffix.
@@ -83,10 +79,9 @@ namespace akkaradb::engine::sstable {
     ) {
         if (max_per_level == 0) { throw std::invalid_argument("SSTCompactor: max_per_level must be > 0"); }
 
-        return std::unique_ptr<SSTCompactor>(new SSTCompactor(
-            base_dir, std::move(manifest), std::move(buffer_pool),
-            max_per_level, ttl_millis, std::move(seq_clock)
-        ));
+        return std::unique_ptr<SSTCompactor>(
+            new SSTCompactor(base_dir, std::move(manifest), std::move(buffer_pool), max_per_level, ttl_millis, std::move(seq_clock))
+        );
     }
 
     SSTCompactor::SSTCompactor(
@@ -96,14 +91,29 @@ namespace akkaradb::engine::sstable {
         size_t max_per_level,
         uint64_t ttl_millis,
         SeqClockFn seq_clock
-    ) : base_dir_{std::move(base_dir)}
-        , manifest_{std::move(manifest)}
-        , buffer_pool_{std::move(buffer_pool)}
-        , max_per_level_{max_per_level}
-        , ttl_millis_{ttl_millis}
-        , seq_clock_{std::move(seq_clock)} {}
+    )
+        : base_dir_{std::move(base_dir)},
+          manifest_{std::move(manifest)},
+          buffer_pool_{std::move(buffer_pool)},
+          max_per_level_{max_per_level},
+          ttl_millis_{ttl_millis},
+          seq_clock_{std::move(seq_clock)} {}
 
     SSTCompactor::~SSTCompactor() = default;
+
+    bool SSTCompactor::compact_one() {
+        if (!std::filesystem::exists(base_dir_)) { std::filesystem::create_directories(base_dir_); }
+
+        auto levels = existing_levels();
+        for (int level : levels) {
+            auto files = list_sst_files(level);
+            if (files.size() > max_per_level_) {
+                compact_level(level);
+                return true; // Compacted one level; caller should re-schedule if needed.
+            }
+        }
+        return false; // Nothing to compact.
+    }
 
     void SSTCompactor::compact() {
         // Create base directory if not exists
@@ -151,19 +161,11 @@ namespace akkaradb::engine::sstable {
 
         // Check if this is bottom level
         auto levels = existing_levels();
-        const bool is_bottom = std::ranges::none_of(
-            levels
-            ,
-            [next_level](int l) { return l > next_level; }
-        );
+        const bool is_bottom = std::ranges::none_of(levels, [next_level](int l) { return l > next_level; });
 
         // Record compaction start in manifest
         std::vector<std::string> input_rel_paths;
-        for (const auto& path : all_inputs) {
-            input_rel_paths.push_back(
-                std::filesystem::relative(path, base_dir_).string()
-            );
-        }
+        for (const auto& path : all_inputs) { input_rel_paths.push_back(std::filesystem::relative(path, base_dir_).string()); }
         manifest_->compaction_start(level, input_rel_paths);
 
         // Compact
@@ -174,14 +176,7 @@ namespace akkaradb::engine::sstable {
 
         // Record compaction end in manifest
         const auto output_rel = std::filesystem::relative(output, base_dir_).string();
-        manifest_->compaction_end(
-            next_level,
-            output_rel,
-            input_rel_paths,
-            entries,
-            first_key_hex,
-            last_key_hex
-        );
+        manifest_->compaction_end(next_level, output_rel, input_rel_paths, entries, first_key_hex, last_key_hex);
     }
 
     SSTCompactor::CompactResult SSTCompactor::compact_into(
@@ -220,17 +215,10 @@ namespace akkaradb::engine::sstable {
         auto seal_result = writer->seal();
         writer->close();
 
-        return CompactResult{
-            seal_result.entries,
-            first_hex,
-            last_hex
-        };
+        return CompactResult{seal_result.entries, first_hex, last_hex};
     }
 
-    std::vector<core::MemRecord> SSTCompactor::merge(
-        std::vector<std::unique_ptr<SSTableReader>>& readers,
-        bool is_bottom_level
-    ) {
+    std::vector<core::MemRecord> SSTCompactor::merge(std::vector<std::unique_ptr<SSTableReader>>& readers, bool is_bottom_level) {
         std::vector<core::MemRecord> result;
 
         if (readers.empty()) { return result; }
@@ -312,11 +300,7 @@ namespace akkaradb::engine::sstable {
         return result;
     }
 
-    bool SSTCompactor::should_drop_tombstone(
-        const core::MemRecord& record,
-        uint64_t now_millis,
-        bool is_bottom_level
-    ) const {
+    bool SSTCompactor::should_drop_tombstone(const core::MemRecord& record, uint64_t now_millis, bool is_bottom_level) const {
         if (!record.is_tombstone()) { return false; }
 
         // Can only drop at bottom level
@@ -377,7 +361,7 @@ namespace akkaradb::engine::sstable {
         std::vector<std::filesystem::path> files;
 
         for (const auto& entry : std::filesystem::directory_iterator(level_dir)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".sst") { files.push_back(entry.path()); }
+            if (entry.is_regular_file() && entry.path().extension() == ".aksst") { files.push_back(entry.path()); }
         }
 
         // Sort by filename
@@ -401,7 +385,7 @@ namespace akkaradb::engine::sstable {
         const auto suffix = generate_suffix();
 
         std::stringstream ss;
-        ss << "L" << level << "_" << ts << "_" << suffix << ".sst";
+        ss << "L" << level << "_" << ts << "_" << suffix << ".aksst";
         return ss.str();
     }
 

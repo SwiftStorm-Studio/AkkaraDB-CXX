@@ -117,9 +117,23 @@ namespace akkaradb {
 
                 // Compaction
                 size_t max_sst_per_level = 4;
+                /// Milliseconds of write-idle time before background compaction starts.
+                uint64_t compact_idle_ms = 5000;
+                /// Milliseconds since last compaction before a forced run. 0 = disabled.
+                uint64_t compact_force_ms = 30000;
+                /// [NOT RECOMMENDED] Disable background compaction. For benchmarking only.
+                bool disable_background_compaction = false;
 
                 // Buffer pool
                 size_t buffer_pool_size = 256;
+
+                // Stripe (set stripe_m = 0 to disable stripe redundancy)
+                size_t stripe_k = 4; ///< Data lanes.
+                size_t stripe_m = 2; ///< Parity lanes. 0 = disabled.
+                bool stripe_fast_mode = true; ///< Async fsync for stripe lanes.
+                bool use_stripe_for_read = false; ///< Fallback to stripe on get() miss.
+                size_t stripe_flush_max_blocks = 32; ///< Group-commit block count.
+                uint64_t stripe_flush_max_micros = 500; ///< Group-commit timeout (µs).
             };
 
             /**

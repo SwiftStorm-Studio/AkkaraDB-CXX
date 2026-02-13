@@ -37,6 +37,7 @@
 #include <vector>
 #include <deque>
 #include <mutex>
+#include <shared_mutex>
 #include <optional>
 
 namespace akkaradb::engine {
@@ -56,40 +57,49 @@ namespace akkaradb::engine {
      * Thread-safety: Thread-safe for concurrent reads/writes.
      */
     class AkkEngine {
-    public:
-        /**
+        public:
+            /**
          * Configuration options.
          */
-        struct Options {
-            std::filesystem::path base_dir;
+            struct Options {
+                std::filesystem::path base_dir;
 
-            // MemTable
-            size_t memtable_shard_count = 4;
-            size_t memtable_threshold_bytes = 64 * 1024 * 1024;
+                // MemTable
+                size_t memtable_shard_count = 4;
+                size_t memtable_threshold_bytes = 64 * 1024 * 1024;
 
-            // WAL
-            size_t wal_group_n = 64;
-            uint64_t wal_group_micros = 1000;
-            bool wal_fast_mode = true;
+                // WAL
+                size_t wal_group_n = 64;
+                uint64_t wal_group_micros = 1000;
+                bool wal_fast_mode = true;
 
-            // SSTable
-            double bloom_fp_rate = 0.01;
+                // SSTable
+                double bloom_fp_rate = 0.01;
 
-            // Compaction
-            size_t max_sst_per_level = 4;
+                // Compaction
+                size_t max_sst_per_level = 4;
+                /// Milliseconds of write-idle time before background compaction starts.
+            /// Set to 0 to compact immediately after every flush.
+                uint64_t compact_idle_ms = 5000;
+                /// Milliseconds since the last compaction before a forced compaction runs,
+            /// regardless of write activity. Set to 0 to disable forced compaction.
+                uint64_t compact_force_ms = 30000;
+                /// [NOT RECOMMENDED] Disable background compaction entirely.
+            /// Startup/shutdown compaction still runs. For benchmarking only.
+                bool disable_background_compaction = false;
 
-            // Buffer pool
-            size_t buffer_pool_size = 256;
+                // Buffer pool
+                size_t buffer_pool_size = 256;
 
-            // Stripe
-            size_t stripe_k = 4; ///< Data lanes.
-            size_t stripe_m = 2; ///< Parity lanes (0 = disabled).
-            bool stripe_fast_mode = true; ///< Async fsync for stripes.
-            bool use_stripe_for_read = false; ///< Enable stripe fallback on get().
-            format::FlushPolicy stripe_flush_policy = format::FlushPolicy::default_policy();
-        };
+                // Stripe
+                size_t stripe_k = 4; ///< Data lanes.
+                size_t stripe_m = 2; ///< Parity lanes (0 = disabled).
+                bool stripe_fast_mode = true; ///< Async fsync for stripes.
+                bool use_stripe_for_read = false; ///< Enable stripe fallback on get().
+                format::FlushPolicy stripe_flush_policy = format::FlushPolicy::default_policy();
+            };
 
-        /**
+            /**
          * Opens or creates a database.
          *
          * Recovery sequence:
@@ -102,41 +112,36 @@ namespace akkaradb::engine {
          * @return Unique pointer to AkkaraDB instance
          * @throws std::runtime_error on failure
          */
-        [[nodiscard]] static std::unique_ptr<AkkEngine> open(const Options& opts);
+            [[nodiscard]] static std::unique_ptr<AkkEngine> open(const Options& opts);
 
-        ~AkkEngine();
+            ~AkkEngine();
 
-        /**
+            /**
          * Inserts or updates a key-value pair.
          *
          * @param key Key bytes
          * @param value Value bytes
          * @return Assigned sequence number
          */
-        [[nodiscard]] uint64_t put(
-            std::span<const uint8_t> key,
-            std::span<const uint8_t> value
-        );
+            [[nodiscard]] uint64_t put(std::span<const uint8_t> key, std::span<const uint8_t> value);
 
-        /**
+            /**
          * Deletes a key (tombstone).
          *
          * @param key Key bytes
          * @return Assigned sequence number
          */
-        [[nodiscard]] uint64_t del(std::span<const uint8_t> key);
+            [[nodiscard]] uint64_t del(std::span<const uint8_t> key);
 
-        /**
+            /**
          * Retrieves value for key.
          *
          * @param key Key bytes
          * @return Value if found, nullopt otherwise
          */
-        [[nodiscard]] std::optional<std::vector<uint8_t>> get(
-            std::span<const uint8_t> key
-        );
+            [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::span<const uint8_t> key);
 
-        /**
+            /**
          * Compare-and-swap operation.
          *
          * @param key Key bytes
@@ -144,66 +149,72 @@ namespace akkaradb::engine {
          * @param new_value New value (nullopt for delete)
          * @return true if successful, false if seq mismatch
          */
-        [[nodiscard]] bool compare_and_swap(
-            std::span<const uint8_t> key,
-            uint64_t expected_seq,
-            const std::optional<std::span<const uint8_t>>& new_value
-        );
+            [[nodiscard]] bool compare_and_swap(std::span<const uint8_t> key, uint64_t expected_seq, const std::optional<std::span<const uint8_t>>& new_value);
 
-        /**
+            /**
          * Range query [start_key, end_key).
          *
          * @param start_key Inclusive start
          * @param end_key Exclusive end (nullopt = EOF)
          * @return Vector of records
          */
-        [[nodiscard]] std::vector<core::MemRecord> range(
-            std::span<const uint8_t> start_key,
-            std::optional<std::span<const uint8_t>> end_key = std::nullopt
-        );
+            [[nodiscard]] std::vector<core::MemRecord> range(
+                std::span<const uint8_t> start_key,
+                std::optional<std::span<const uint8_t>> end_key = std::nullopt
+            );
 
-        /**
+            /**
          * Forces flush of MemTable to SSTable.
          */
-        void flush();
+            void flush();
 
-        /**
+            /**
          * Closes database (calls flush first).
          */
-        void close();
+            void close();
 
-        /**
+            /**
          * Returns last assigned sequence number.
          */
-        [[nodiscard]] uint64_t last_seq() const;
+            [[nodiscard]] uint64_t last_seq() const;
 
-    private:
-        AkkEngine(
-            Options opts,
-            std::unique_ptr<memtable::MemTable> memtable,
-            std::unique_ptr<wal::WalWriter> wal,
-            std::shared_ptr<manifest::Manifest> manifest,
-            std::shared_ptr<sstable::SSTCompactor> compactor,
-            std::shared_ptr<core::BufferPool> buffer_pool
-        );
+        private:
+            AkkEngine(
+                Options opts,
+                std::unique_ptr<memtable::MemTable> memtable,
+                std::unique_ptr<wal::WalWriter> wal,
+                std::shared_ptr<manifest::Manifest> manifest,
+                std::shared_ptr<sstable::SSTCompactor> compactor,
+                std::shared_ptr<core::BufferPool> buffer_pool
+            );
 
-        void rebuild_readers();
-        void on_flush(std::vector<core::MemRecord> batch);
+            void rebuild_readers();
+            void on_flush(std::vector<core::MemRecord> batch);
+            void notify_flush_done(); // Called after each flush; triggers idle-based compaction.
 
-        Options opts_;
-        std::unique_ptr<memtable::MemTable> memtable_;
-        std::unique_ptr<wal::WalWriter> wal_;
-        std::shared_ptr<manifest::Manifest> manifest_;
-        std::shared_ptr<sstable::SSTCompactor> compactor_;
-        std::shared_ptr<core::BufferPool> buffer_pool_;
+            Options opts_;
+            std::unique_ptr<memtable::MemTable> memtable_;
+            std::unique_ptr<wal::WalWriter> wal_;
+            std::shared_ptr<manifest::Manifest> manifest_;
+            std::shared_ptr<sstable::SSTCompactor> compactor_;
+            std::shared_ptr<core::BufferPool> buffer_pool_;
 
-        // Stripe layer (optional; null when stripe_m == 0 and disabled at compile-time).
-        std::unique_ptr<StripeLaneWriter> stripe_store_;
-        std::unique_ptr<format::akk::AkkStripeWriter> stripe_writer_;
-        std::unique_ptr<format::akk::AkkStripeReader> stripe_reader_;
-        std::unique_ptr<format::akk::AkkBlockUnpacker> block_unpacker_;
+            // Stripe layer (optional; null when stripe_m == 0 and disabled at compile-time).
+            std::unique_ptr<StripeLaneWriter> stripe_store_;
+            std::unique_ptr<format::akk::AkkStripeWriter> stripe_writer_;
+            std::unique_ptr<format::akk::AkkStripeReader> stripe_reader_;
+            std::unique_ptr<format::akk::AkkBlockUnpacker> block_unpacker_;
 
-        mutable std::mutex readers_mutex_;
-        std::deque<std::unique_ptr<sstable::SSTableReader>> readers_;
+            mutable std::shared_mutex readers_mutex_;
+            std::deque<std::unique_ptr<sstable::SSTableReader>> readers_;
+
+            // Background compaction thread.
+            std::mutex compact_mutex_;
+            std::condition_variable compact_cv_;
+            bool compact_pending_{false}; // At least one flush has occurred since last compaction.
+            bool compact_running_{false};
+            std::chrono::steady_clock::time_point last_flush_time_{};
+            std::chrono::steady_clock::time_point last_compact_time_{};
+            std::thread compact_thread_;
     };
 } // namespace akkaradb::engine

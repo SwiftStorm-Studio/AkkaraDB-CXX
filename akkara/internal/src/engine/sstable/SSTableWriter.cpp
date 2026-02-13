@@ -19,145 +19,123 @@
 
 // internal/src/engine/sstable/SSTableWriter.cpp
 #include "engine/sstable/SSTableWriter.hpp"
+#include "engine/sstable/AKSSFooter.hpp"
 
 namespace akkaradb::engine::sstable {
+    std::unique_ptr<SSTableWriter> SSTableWriter::create(
+        std::filesystem::path& file_path,
+        std::shared_ptr<core::BufferPool> buffer_pool,
+        uint64_t expected_entries,
+        double bloom_fp_rate
+    ) { return std::unique_ptr<SSTableWriter>(new SSTableWriter(file_path, std::move(buffer_pool), expected_entries, bloom_fp_rate)); }
 
-std::unique_ptr<SSTableWriter> SSTableWriter::create(
-    std::filesystem::path& file_path,
-    std::shared_ptr<core::BufferPool> buffer_pool,
-    uint64_t expected_entries,
-    double bloom_fp_rate
-) {
-    return std::unique_ptr<SSTableWriter>(new SSTableWriter(
-        file_path,
-        std::move(buffer_pool),
-        expected_entries,
-        bloom_fp_rate
-    ));
-}
+    SSTableWriter::SSTableWriter(
+        std::filesystem::path& file_path,
+        std::shared_ptr<core::BufferPool> buffer_pool,
+        uint64_t expected_entries,
+        double bloom_fp_rate
+    )
+        : file_path_{file_path},
+          buffer_pool_{std::move(buffer_pool)},
+          total_entries_{0},
+          index_builder_{256},
+          bloom_builder_{BloomFilter::Builder::create(expected_entries, bloom_fp_rate)} {
+        // Create parent directory
+        if (file_path_.has_parent_path()) { std::filesystem::create_directories(file_path_.parent_path()); }
 
-SSTableWriter::SSTableWriter(
-    std::filesystem::path& file_path,
-    std::shared_ptr<core::BufferPool> buffer_pool,
-    uint64_t expected_entries,
-    double bloom_fp_rate
-) : file_path_{file_path}
-    , buffer_pool_{std::move(buffer_pool)}
-    , total_entries_{0}
-    , index_builder_{256}
-    , bloom_builder_{BloomFilter::Builder::create(expected_entries, bloom_fp_rate)} {
-    // Create parent directory
-    if (file_path_.has_parent_path()) { std::filesystem::create_directories(file_path_.parent_path()); }
+        // Open file
+        file_.open(file_path_, std::ios::binary | std::ios::trunc);
+        if (!file_) { throw std::runtime_error("SSTableWriter: failed to create file"); }
 
-    // Open file
-    file_.open(file_path_, std::ios::binary | std::ios::trunc);
-    if (!file_) { throw std::runtime_error("SSTableWriter: failed to create file"); }
+        // Create packer with callback that returns buffer to pool after writing
+        packer_ = format::akk::AkkBlockPacker::create([this](core::OwnedBuffer block) { this->on_block_ready(std::move(block)); }, buffer_pool_);
 
-    // Create packer with callback that returns buffer to pool after writing
-    packer_ = format::akk::AkkBlockPacker::create(
-        [this](core::OwnedBuffer block) { this->on_block_ready(std::move(block)); },
-        buffer_pool_
-    );
-
-    packer_->begin_block();
-}
-
-SSTableWriter::~SSTableWriter() {
-    try { close(); }
-    catch (...) {
-        // Destructor must not throw
-    }
-}
-
-void SSTableWriter::write(const core::MemRecord& record) {
-    // Try to append to current block
-    if (!packer_->try_append(record)) {
-        // Block full, seal and retry
-        packer_->end_block();
         packer_->begin_block();
-
-        if (!packer_->try_append(record)) { throw std::runtime_error("SSTableWriter: record too large for block"); }
     }
 
-    // Capture first key of current block
-    if (pending_first_key_.empty()) {
-        auto key_span = record.key();
-        pending_first_key_.assign(key_span.begin(), key_span.end());
+    SSTableWriter::~SSTableWriter() {
+        try { close(); }
+        catch (...) {
+            // Destructor must not throw
+        }
     }
 
-    // Add to bloom filter
-    bloom_builder_.add_key(record.key());
+    void SSTableWriter::write(const core::MemRecord& record) {
+        // Try to append to current block
+        if (!packer_->try_append(record)) {
+            // Block full, seal and retry
+            packer_->end_block();
+            packer_->begin_block();
 
-    ++total_entries_;
-}
+            if (!packer_->try_append(record)) { throw std::runtime_error("SSTableWriter: record too large for block"); }
+        }
 
-void SSTableWriter::write_all(const std::vector<core::MemRecord>& records) { for (const auto& record : records) { write(record); } }
+        // Capture first key of current block
+        if (pending_first_key_.empty()) {
+            auto key_span = record.key();
+            pending_first_key_.assign(key_span.begin(), key_span.end());
+        }
 
-SSTableWriter::SealResult SSTableWriter::seal() {
-    // Flush any pending block
-    packer_->flush();
+        // Add to bloom filter
+        bloom_builder_.add_key(record.key());
 
-    // Record current position for index
-    const uint64_t index_off = static_cast<uint64_t>(file_.tellp());
+        ++total_entries_;
+    }
 
-    // Write index block
-    auto index_data = index_builder_.build();
-    file_.write(reinterpret_cast<const char*>(index_data.data()),
-                static_cast<std::streamsize>(index_data.size()));
+    void SSTableWriter::write_all(const std::vector<core::MemRecord>& records) { for (const auto& record : records) { write(record); } }
 
-    // Record current position for bloom
-    const uint64_t bloom_off = static_cast<uint64_t>(file_.tellp());
+    SSTableWriter::SealResult SSTableWriter::seal() {
+        // Flush any pending block
+        packer_->flush();
 
-    // Write bloom filter
-    auto bloom = bloom_builder_.build();
-    auto bloom_data = bloom.serialize();
-    file_.write(reinterpret_cast<const char*>(bloom_data.data()),
-                static_cast<std::streamsize>(bloom_data.size()));
+        // Record current position for index
+        const auto index_off = static_cast<uint64_t>(file_.tellp());
 
-    // Write footer (32 bytes)
-    // [magic:4][version:4][index_off:8][bloom_off:8][entries:8]
-    constexpr uint32_t MAGIC = 0x53534B41; // 'AKSS'
-    constexpr uint32_t VERSION = 1;
+        // Write index block
+        auto index_data = index_builder_.build();
+        file_.write(reinterpret_cast<const char*>(index_data.data()), static_cast<std::streamsize>(index_data.size()));
 
-    file_.write(reinterpret_cast<const char*>(&MAGIC), sizeof(MAGIC));
-    file_.write(reinterpret_cast<const char*>(&VERSION), sizeof(VERSION));
-    file_.write(reinterpret_cast<const char*>(&index_off), sizeof(index_off));
-    file_.write(reinterpret_cast<const char*>(&bloom_off), sizeof(bloom_off));
-    file_.write(reinterpret_cast<const char*>(&total_entries_), sizeof(total_entries_));
+        // Record current position for bloom
+        const auto bloom_off = static_cast<uint64_t>(file_.tellp());
 
-    file_.flush();
+        // Write bloom filter
+        auto bloom = bloom_builder_.build();
+        auto bloom_data = bloom.serialize();
+        file_.write(reinterpret_cast<const char*>(bloom_data.data()), static_cast<std::streamsize>(bloom_data.size()));
 
-    return SealResult{
-        .index_off = index_off,
-        .bloom_off = bloom_off,
-        .entries = total_entries_
-    };
-}
+        // Write footer via AKSSFooter to guarantee layout matches the spec:
+        // [magic:4][version:1][pad:3][index_off:8][bloom_off:8][entries:4][crc32c:4]
+        const auto footer_buf = AKSSFooter::write_to_buffer(AKSSFooter::Footer{index_off, bloom_off, static_cast<uint32_t>(total_entries_)});
+        file_.write(reinterpret_cast<const char*>(footer_buf.data()), static_cast<std::streamsize>(footer_buf.size()));
 
-void SSTableWriter::close() { if (file_.is_open()) { file_.close(); } }
+        file_.flush();
 
-/**
+        return SealResult{.index_off = index_off, .bloom_off = bloom_off, .entries = total_entries_};
+    }
+
+    void SSTableWriter::close() { if (file_.is_open()) { file_.close(); } }
+
+    /**
  * Callback when a block is ready from packer.
  *
  * IMPROVEMENT: After writing to file, return buffer to pool for reuse.
  * This significantly improves memory efficiency and reduces allocations.
  */
-void SSTableWriter::on_block_ready(core::OwnedBuffer block) {
-    // Record block offset for index
-    const uint64_t block_offset = static_cast<uint64_t>(file_.tellp());
+    void SSTableWriter::on_block_ready(core::OwnedBuffer block) {
+        // Record block offset for index
+        const auto block_offset = static_cast<uint64_t>(file_.tellp());
 
-    // Add to index: first_key -> offset
-    if (!pending_first_key_.empty()) {
-        index_builder_.add(pending_first_key_, block_offset);
-        pending_first_key_.clear();
+        // Add to index: first_key -> offset
+        if (!pending_first_key_.empty()) {
+            index_builder_.add(pending_first_key_, block_offset);
+            pending_first_key_.clear();
+        }
+
+        // Write block to file
+        file_.write(reinterpret_cast<const char*>(block.data()), static_cast<std::streamsize>(block.size()));
+
+        // IMPROVEMENT: Return buffer to pool for reuse instead of deallocation
+        // This reduces memory churn and improves performance
+        buffer_pool_->release(std::move(block));
     }
-
-    // Write block to file
-    file_.write(reinterpret_cast<const char*>(block.data()),
-                static_cast<std::streamsize>(block.size()));
-
-    // IMPROVEMENT: Return buffer to pool for reuse instead of deallocation
-    // This reduces memory churn and improves performance
-    buffer_pool_->release(std::move(block));
-}
 } // namespace akkaradb::engine::sstable

@@ -46,36 +46,36 @@ namespace akkaradb::engine::wal {
  * Thread-safety: Frame encoding/decoding is stateless and thread-safe.
  */
     class WalFraming {
-    public:
-        /**
+        public:
+            /**
      * Magic number: "WALF" (0x57414C46).
      */
-        static constexpr uint32_t FRAME_MAGIC = 0x57414C46;
+            static constexpr uint32_t FRAME_MAGIC = 0x57414C46;
 
-        /**
+            /**
      * Frame header size: [magic:u32][payloadLen:u32].
      */
-        static constexpr size_t FRAME_HEADER_SIZE = sizeof(uint32_t) * 2;
+            static constexpr size_t FRAME_HEADER_SIZE = sizeof(uint32_t) * 2;
 
-        /**
+            /**
      * Frame footer size: [crc32c:u32].
      */
-        static constexpr size_t FRAME_FOOTER_SIZE = sizeof(uint32_t);
+            static constexpr size_t FRAME_FOOTER_SIZE = sizeof(uint32_t);
 
-        /**
+            /**
      * Total overhead per frame (header + footer).
      */
-        static constexpr size_t FRAME_OVERHEAD = FRAME_HEADER_SIZE + FRAME_FOOTER_SIZE;
+            static constexpr size_t FRAME_OVERHEAD = FRAME_HEADER_SIZE + FRAME_FOOTER_SIZE;
 
-        /**
+            /**
      * Computes the total frame size for a given payload length.
      *
      * @param payload_len Payload length in bytes
      * @return Total frame size (header + payload + footer)
      */
-        [[nodiscard]] static constexpr size_t frame_size(size_t payload_len) noexcept { return FRAME_OVERHEAD + payload_len; }
+            [[nodiscard]] static constexpr size_t frame_size(size_t payload_len) noexcept { return FRAME_OVERHEAD + payload_len; }
 
-        /**
+            /**
      * Encodes a WalOp into a framed buffer.
      *
      * Layout: [magic][payloadLen][payload][crc32c]
@@ -83,9 +83,19 @@ namespace akkaradb::engine::wal {
      * @param op Operation to encode
      * @return Owned buffer containing the complete frame
      */
-        [[nodiscard]] static core::OwnedBuffer encode(const WalOp& op);
+            [[nodiscard]] static core::OwnedBuffer encode(const WalOp& op);
 
-        /**
+            /**
+     * Encodes a WalOp using a thread-local staging buffer, avoiding per-call malloc.
+     * The returned OwnedBuffer owns a fresh allocation copied from the TLS buffer.
+     * Safe to call from multiple threads concurrently.
+     *
+     * @param op Operation to encode
+     * @return Owned buffer containing the complete frame
+     */
+            [[nodiscard]] static core::OwnedBuffer encode_tls(const WalOp& op);
+
+            /**
      * Encodes a WalOp into an existing buffer.
      *
      * @param op Operation to encode
@@ -93,9 +103,9 @@ namespace akkaradb::engine::wal {
      * @return Number of bytes written
      * @throws std::out_of_range if buffer is too small
      */
-        static size_t encode_into(const WalOp& op, core::BufferView dst);
+            static size_t encode_into(const WalOp& op, core::BufferView dst);
 
-        /**
+            /**
      * Decodes a frame from a buffer.
      *
      * Validates magic, CRC, and deserializes the payload.
@@ -103,9 +113,9 @@ namespace akkaradb::engine::wal {
      * @param src Source buffer containing a complete frame
      * @return Decoded WalOp, or std::nullopt if invalid/corrupted
      */
-        [[nodiscard]] static std::optional<WalOp> decode(core::BufferView src);
+            [[nodiscard]] static std::optional<WalOp> decode(core::BufferView src);
 
-        /**
+            /**
      * Validates a frame without deserializing the payload.
      *
      * Checks magic and CRC32C.
@@ -113,9 +123,9 @@ namespace akkaradb::engine::wal {
      * @param src Source buffer
      * @return true if frame is valid
      */
-        [[nodiscard]] static bool validate(core::BufferView src) noexcept;
+            [[nodiscard]] static bool validate(core::BufferView src) noexcept;
 
-        /**
+            /**
      * Attempts to read the frame length from a buffer.
      *
      * This is useful for determining if a full frame is available
@@ -124,16 +134,16 @@ namespace akkaradb::engine::wal {
      * @param src Source buffer (must have at least FRAME_HEADER_SIZE bytes)
      * @return Total frame size (header + payload + footer), or std::nullopt if header is invalid
      */
-        [[nodiscard]] static std::optional<size_t> try_read_frame_length(core::BufferView src) noexcept;
+            [[nodiscard]] static std::optional<size_t> try_read_frame_length(core::BufferView src) noexcept;
 
-    private:
-        /**
+        private:
+            /**
      * Computes CRC32C over [magic][payloadLen][payload].
      *
      * @param frame_view Buffer view starting at magic
      * @param total_len Total length (header + payload, excluding CRC)
      * @return CRC32C checksum
      */
-        [[nodiscard]] static uint32_t compute_frame_crc(core::BufferView frame_view, size_t total_len) noexcept;
+            [[nodiscard]] static uint32_t compute_frame_crc(core::BufferView frame_view, size_t total_len) noexcept;
     };
 } // namespace akkaradb::engine::wal

@@ -31,75 +31,75 @@ namespace akkaradb::engine::sstable {
  * SipHash-2-4 with custom seed (for Bloom filter).
  */
         class SipHash24 {
-        public:
-            explicit SipHash24(uint64_t seed) noexcept {
-                v0_ = 0x736f6d6570736575ULL ^ seed;
-                v1_ = 0x646f72616e646f6dULL ^ seed;
-                v2_ = 0x6c7967656e657261ULL ^ seed;
-                v3_ = 0x7465646279746573ULL ^ seed;
-            }
-
-            void update(const uint8_t* data, size_t len) noexcept {
-                const auto* ptr = data;
-                const auto* end = data + len;
-
-                // Process 8-byte chunks
-                while (ptr + 8 <= end) {
-                    uint64_t m;
-                    std::memcpy(&m, ptr, 8);
-                    compress(m);
-                    ptr += 8;
+            public:
+                explicit SipHash24(uint64_t seed) noexcept {
+                    v0_ = 0x736f6d6570736575ULL ^ seed;
+                    v1_ = 0x646f72616e646f6dULL ^ seed;
+                    v2_ = 0x6c7967656e657261ULL ^ seed;
+                    v3_ = 0x7465646279746573ULL ^ seed;
                 }
 
-                // Handle remaining bytes
-                tail_len_ = end - ptr;
-                std::memcpy(tail_.data(), ptr, tail_len_);
-            }
+                void update(const uint8_t* data, size_t len) noexcept {
+                    const auto* ptr = data;
+                    const auto* end = data + len;
 
-            [[nodiscard]] uint64_t finalize(size_t total_len) noexcept {
-                // Pad tail
-                uint64_t b = total_len << 56;
-                for (size_t i = 0; i < tail_len_; ++i) { b |= static_cast<uint64_t>(tail_[i]) << (i * 8); }
-                compress(b);
+                    // Process 8-byte chunks
+                    while (ptr + 8 <= end) {
+                        uint64_t m;
+                        std::memcpy(&m, ptr, 8);
+                        compress(m);
+                        ptr += 8;
+                    }
 
-                v2_ ^= 0xff;
-                for (int i = 0; i < 4; ++i) { round(); }
+                    // Handle remaining bytes
+                    tail_len_ = end - ptr;
+                    std::memcpy(tail_.data(), ptr, tail_len_);
+                }
 
-                return v0_ ^ v1_ ^ v2_ ^ v3_;
-            }
+                [[nodiscard]] uint64_t finalize(size_t total_len) noexcept {
+                    // Pad tail
+                    uint64_t b = total_len << 56;
+                    for (size_t i = 0; i < tail_len_; ++i) { b |= static_cast<uint64_t>(tail_[i]) << (i * 8); }
+                    compress(b);
 
-        private:
-            void compress(uint64_t m) noexcept {
-                v3_ ^= m;
-                for (int i = 0; i < 2; ++i) { round(); }
-                v0_ ^= m;
-            }
+                    v2_ ^= 0xff;
+                    for (int i = 0; i < 4; ++i) { round(); }
 
-            void round() noexcept {
-                v0_ += v1_;
-                v1_ = rotl(v1_, 13);
-                v1_ ^= v0_;
-                v0_ = rotl(v0_, 32);
+                    return v0_ ^ v1_ ^ v2_ ^ v3_;
+                }
 
-                v2_ += v3_;
-                v3_ = rotl(v3_, 16);
-                v3_ ^= v2_;
+            private:
+                void compress(uint64_t m) noexcept {
+                    v3_ ^= m;
+                    for (int i = 0; i < 2; ++i) { round(); }
+                    v0_ ^= m;
+                }
 
-                v0_ += v3_;
-                v3_ = rotl(v3_, 21);
-                v3_ ^= v0_;
+                void round() noexcept {
+                    v0_ += v1_;
+                    v1_ = rotl(v1_, 13);
+                    v1_ ^= v0_;
+                    v0_ = rotl(v0_, 32);
 
-                v2_ += v1_;
-                v1_ = rotl(v1_, 17);
-                v1_ ^= v2_;
-                v2_ = rotl(v2_, 32);
-            }
+                    v2_ += v3_;
+                    v3_ = rotl(v3_, 16);
+                    v3_ ^= v2_;
 
-            static constexpr uint64_t rotl(uint64_t x, int b) noexcept { return (x << b) | (x >> (64 - b)); }
+                    v0_ += v3_;
+                    v3_ = rotl(v3_, 21);
+                    v3_ ^= v0_;
 
-            uint64_t v0_, v1_, v2_, v3_;
-            std::array<uint8_t, 8> tail_{};
-            size_t tail_len_{0};
+                    v2_ += v1_;
+                    v1_ = rotl(v1_, 17);
+                    v1_ ^= v2_;
+                    v2_ = rotl(v2_, 32);
+                }
+
+                static constexpr uint64_t rotl(uint64_t x, int b) noexcept { return (x << b) | (x >> (64 - b)); }
+
+                uint64_t v0_, v1_, v2_, v3_;
+                std::array<uint8_t, 8> tail_{};
+                size_t tail_len_{0};
         };
 
         /**
@@ -141,16 +141,8 @@ namespace akkaradb::engine::sstable {
 
     // ==================== BloomFilter ====================
 
-    BloomFilter::BloomFilter(
-        uint32_t m_bits,
-        uint8_t k,
-        uint64_t seed,
-        std::vector<uint64_t> words
-    ) : m_bits_{m_bits}
-        , mask_{m_bits - 1}
-        , k_{k}
-        , seed_{seed}
-        , words_{std::move(words)} {}
+    BloomFilter::BloomFilter(uint32_t m_bits, uint8_t k, uint64_t seed, std::vector<uint64_t> words)
+        : m_bits_{m_bits}, mask_{m_bits - 1}, k_{k}, seed_{seed}, words_{std::move(words)} {}
 
     BloomFilter BloomFilter::read_from(core::BufferView buffer) {
         if (buffer.size() < HEADER_SIZE) { throw std::runtime_error("BloomFilter: buffer too small for header"); }
@@ -250,16 +242,15 @@ namespace akkaradb::engine::sstable {
 
     // ==================== BloomFilter::Builder ====================
 
-    BloomFilter::Builder BloomFilter::Builder::create(
-        uint64_t expected_insertions,
-        double fp_rate,
-        uint64_t seed
-    ) {
+    BloomFilter::Builder BloomFilter::Builder::create(uint64_t expected_insertions, double fp_rate, uint64_t seed) {
         if (expected_insertions == 0) { throw std::invalid_argument("BloomFilter: expected_insertions must be > 0"); }
         if (fp_rate <= 0.0 || fp_rate >= 0.5) { throw std::invalid_argument("BloomFilter: fp_rate out of range"); }
 
         const uint64_t raw_bits = optimal_bits(expected_insertions, fp_rate);
-        const uint32_t m_bits = round_up_pow2(raw_bits);
+        // Cap at 2^26 bits (64 MiB) to prevent uint32_t overflow.
+        // Above this size a single Bloom filter is impractical; accuracy degrades gracefully.
+        constexpr uint64_t MAX_BITS = 1ULL << 26;
+        const uint32_t m_bits = round_up_pow2((std::min)(raw_bits, MAX_BITS));
         uint8_t k = optimal_hashes(m_bits, expected_insertions);
 
         // Clamp k to [1, 16]
@@ -269,11 +260,7 @@ namespace akkaradb::engine::sstable {
         return Builder{m_bits, k, seed};
     }
 
-    BloomFilter::Builder::Builder(uint32_t m_bits, uint8_t k, uint64_t seed) : m_bits_{m_bits}
-                                                                               , mask_{m_bits - 1}
-                                                                               , k_{k}
-                                                                               , seed_{seed}
-                                                                               , words_(m_bits / 64, 0) {}
+    BloomFilter::Builder::Builder(uint32_t m_bits, uint8_t k, uint64_t seed) : m_bits_{m_bits}, mask_{m_bits - 1}, k_{k}, seed_{seed}, words_(m_bits / 64, 0) {}
 
     BloomFilter::Builder& BloomFilter::Builder::add_fp64(uint64_t fp64) {
         const uint64_t h1 = mix64(fp64);

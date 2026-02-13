@@ -91,10 +91,7 @@ namespace akkaradb::benchmark {
 
                 // Percentile helper (nanos -> micros)
                 auto percentile = [&](double p) -> double {
-                    const size_t idx = std::min(
-                        static_cast<size_t>((p / 100.0) * (count - 1)),
-                        count - 1
-                    );
+                    const size_t idx = std::min(static_cast<size_t>((p / 100.0) * (count - 1)), count - 1);
                     return sorted[idx] / 1000.0; // nanos -> micros
                 };
 
@@ -121,8 +118,7 @@ namespace akkaradb::benchmark {
     // ==================== Utility Functions ====================
 
     inline std::filesystem::path create_temp_dir(const std::string& prefix) {
-        auto temp_dir = std::filesystem::temp_directory_path() /
-            (prefix + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
+        auto temp_dir = std::filesystem::temp_directory_path() / (prefix + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(temp_dir);
         return temp_dir;
     }
@@ -187,7 +183,8 @@ namespace akkaradb::benchmark {
                                 .wal_group_n = cfg.wal_group_n,
                                 .wal_group_micros = cfg.wal_group_micros,
                                 .wal_fast_mode = true,
-                                .bloom_fp_rate = 0.01
+                                .bloom_fp_rate = 0.01,
+                                .disable_background_compaction = true
                             }
                         );
 
@@ -217,9 +214,9 @@ namespace akkaradb::benchmark {
                         results.emplace_back(cfg, report);
 
                         std::cout << "✓ " << cfg.description << std::endl;
-                        std::cout << "  ops/sec: " << std::setw(10) << static_cast<size_t>(report.ops_per_sec)
-                            << ", p50: " << std::fixed << std::setprecision(1) << report.p50
-                            << " µs, p99: " << report.p99 << " µs" << std::endl;
+                        std::cout << "  ops/sec: " << std::setw(10) << static_cast<size_t>(report.ops_per_sec) << ", p50: " << std::fixed << std::setprecision(
+                            1
+                        ) << report.p50 << " µs, p99: " << report.p99 << " µs" << std::endl;
                         std::cout << std::endl;
                     }
                     catch (const std::exception& e) { std::cout << "✗ " << cfg.description << " - Error: " << e.what() << std::endl; }
@@ -230,20 +227,14 @@ namespace akkaradb::benchmark {
                 // Summary table
                 std::cout << "\n📋 Summary Table:" << std::endl;
                 print_dash(100);
-                std::cout << std::left << std::setw(45) << "| Configuration"
-                    << std::right << std::setw(12) << "ops/sec"
-                    << std::setw(10) << "p50(µs)"
-                    << std::setw(10) << "p90(µs)"
-                    << std::setw(10) << "p99(µs) |" << std::endl;
+                std::cout << std::left << std::setw(45) << "| Configuration" << std::right << std::setw(12) << "ops/sec" << std::setw(10) << "p50(µs)" <<
+                    std::setw(10) << "p90(µs)" << std::setw(10) << "p99(µs) |" << std::endl;
                 print_dash(100);
 
                 for (const auto& [cfg, report] : results) {
-                    std::cout << std::left << "| " << std::setw(43) << cfg.description
-                        << std::right << std::setw(12) << static_cast<size_t>(report.ops_per_sec)
-                        << std::fixed << std::setprecision(1)
-                        << std::setw(10) << report.p50
-                        << std::setw(10) << report.p90
-                        << std::setw(10) << report.p99 << " |" << std::endl;
+                    std::cout << std::left << "| " << std::setw(43) << cfg.description << std::right << std::setw(12) << static_cast<size_t>(report.ops_per_sec)
+                        << std::fixed << std::setprecision(1) << std::setw(10) << report.p50 << std::setw(10) << report.p90 << std::setw(10) << report.p99 <<
+                        " |" << std::endl;
                 }
                 print_dash(100);
             }
@@ -267,7 +258,7 @@ namespace akkaradb::benchmark {
                     std::vector<int64_t> latencies(key_count);
 
                     try {
-                        auto db = akkaradb::AkkaraDB::open(
+                        auto db = AkkaraDB::open(
                             {
                                 .base_dir = base_dir.string(),
                                 .memtable_shard_count = 4,
@@ -275,7 +266,8 @@ namespace akkaradb::benchmark {
                                 .wal_group_n = 512,
                                 .wal_group_micros = 50'000,
                                 .wal_fast_mode = true,
-                                .bloom_fp_rate = 0.01
+                                .bloom_fp_rate = 0.01,
+                                .disable_background_compaction = true
                             }
                         );
 
@@ -301,10 +293,9 @@ namespace akkaradb::benchmark {
                         auto report = stats.report();
                         results.emplace_back(key_count, total_time, report);
 
-                        std::cout << "✓ " << std::setw(10) << key_count << " keys: "
-                            << std::fixed << std::setprecision(2) << total_time << "s, "
-                            << std::setw(10) << static_cast<size_t>(report.ops_per_sec) << " ops/sec, "
-                            << "p99: " << std::setprecision(1) << report.p99 << " µs" << std::endl;
+                        std::cout << "✓ " << std::setw(10) << key_count << " keys: " << std::fixed << std::setprecision(2) << total_time << "s, " <<
+                            std::setw(10) << static_cast<size_t>(report.ops_per_sec) << " ops/sec, " << "p99: " << std::setprecision(1) << report.p99 << " µs"
+                            << std::endl;
                     }
                     catch (const std::exception& e) { std::cout << "✗ " << key_count << " keys - Error: " << e.what() << std::endl; }
 
@@ -313,21 +304,15 @@ namespace akkaradb::benchmark {
 
                 std::cout << "\n📋 Summary:" << std::endl;
                 print_dash(80);
-                std::cout << std::left << std::setw(15) << "| Key Count"
-                    << std::right << std::setw(12) << "Time(s)"
-                    << std::setw(14) << "ops/sec"
-                    << std::setw(12) << "p50(µs)"
-                    << std::setw(12) << "p99(µs) |" << std::endl;
+                std::cout << std::left << std::setw(15) << "| Key Count" << std::right << std::setw(12) << "Time(s)" << std::setw(14) << "ops/sec" << std::setw(
+                    12
+                ) << "p50(µs)" << std::setw(12) << "p99(µs) |" << std::endl;
                 print_dash(80);
 
                 for (const auto& [count, time, report] : results) {
-                    std::cout << std::left << "| " << std::setw(13) << count
-                        << std::right << std::fixed << std::setprecision(2)
-                        << std::setw(12) << time
-                        << std::setw(14) << static_cast<size_t>(report.ops_per_sec)
-                        << std::setprecision(1)
-                        << std::setw(12) << report.p50
-                        << std::setw(12) << report.p99 << " |" << std::endl;
+                    std::cout << std::left << "| " << std::setw(13) << count << std::right << std::fixed << std::setprecision(2) << std::setw(12) << time <<
+                        std::setw(14) << static_cast<size_t>(report.ops_per_sec) << std::setprecision(1) << std::setw(12) << report.p50 << std::setw(12) <<
+                        report.p99 << " |" << std::endl;
                 }
                 print_dash(80);
             }
@@ -351,7 +336,7 @@ namespace akkaradb::benchmark {
                     std::vector<int64_t> latencies(key_count);
 
                     try {
-                        auto db = akkaradb::AkkaraDB::open(
+                        auto db = AkkaraDB::open(
                             {
                                 .base_dir = base_dir.string(),
                                 .memtable_shard_count = 4,
@@ -359,7 +344,8 @@ namespace akkaradb::benchmark {
                                 .wal_group_n = 512,
                                 .wal_group_micros = 50'000,
                                 .wal_fast_mode = true,
-                                .bloom_fp_rate = 0.01
+                                .bloom_fp_rate = 0.01,
+                                .disable_background_compaction = true
                             }
                         );
 
@@ -388,13 +374,10 @@ namespace akkaradb::benchmark {
                         auto report = stats.report();
                         results.emplace_back(value_size, report);
 
-                        double throughput_mbps = (key_count * value_size) /
-                            (key_count / report.ops_per_sec) / (1024.0 * 1024.0);
+                        double throughput_mbps = (key_count * value_size) / (key_count / report.ops_per_sec) / (1024.0 * 1024.0);
 
-                        std::cout << "✓ " << std::setw(6) << value_size << " B: "
-                            << std::setw(10) << static_cast<size_t>(report.ops_per_sec) << " ops/sec, "
-                            << "p99: " << std::fixed << std::setprecision(1) << std::setw(8) << report.p99 << " µs, "
-                            << throughput_mbps << " MB/s" << std::endl;
+                        std::cout << "✓ " << std::setw(6) << value_size << " B: " << std::setw(10) << static_cast<size_t>(report.ops_per_sec) << " ops/sec, " <<
+                            "p99: " << std::fixed << std::setprecision(1) << std::setw(8) << report.p99 << " µs, " << throughput_mbps << " MB/s" << std::endl;
                     }
                     catch (const std::exception& e) { std::cout << "✗ " << value_size << " B - Error: " << e.what() << std::endl; }
 
@@ -403,23 +386,16 @@ namespace akkaradb::benchmark {
 
                 std::cout << "\n📋 Summary:" << std::endl;
                 print_dash(80);
-                std::cout << std::left << std::setw(15) << "| Value Size"
-                    << std::right << std::setw(14) << "ops/sec"
-                    << std::setw(12) << "p50(µs)"
-                    << std::setw(12) << "p99(µs)"
-                    << std::setw(18) << "Throughput(MB/s) |" << std::endl;
+                std::cout << std::left << std::setw(15) << "| Value Size" << std::right << std::setw(14) << "ops/sec" << std::setw(12) << "p50(µs)" <<
+                    std::setw(12) << "p99(µs)" << std::setw(18) << "Throughput(MB/s) |" << std::endl;
                 print_dash(80);
 
                 for (const auto& [size, report] : results) {
-                    double throughput_mbps = (100'000 * size) /
-                        (100'000.0 / report.ops_per_sec) / (1024.0 * 1024.0);
+                    double throughput_mbps = (100'000 * size) / (100'000.0 / report.ops_per_sec) / (1024.0 * 1024.0);
 
-                    std::cout << std::left << "| " << std::setw(13) << size
-                        << std::right << std::setw(14) << static_cast<size_t>(report.ops_per_sec)
-                        << std::fixed << std::setprecision(1)
-                        << std::setw(12) << report.p50
-                        << std::setw(12) << report.p99
-                        << std::setw(18) << throughput_mbps << " |" << std::endl;
+                    std::cout << std::left << "| " << std::setw(13) << size << std::right << std::setw(14) << static_cast<size_t>(report.ops_per_sec) <<
+                        std::fixed << std::setprecision(1) << std::setw(12) << report.p50 << std::setw(12) << report.p99 << std::setw(18) << throughput_mbps <<
+                        " |" << std::endl;
                 }
                 print_dash(80);
             }

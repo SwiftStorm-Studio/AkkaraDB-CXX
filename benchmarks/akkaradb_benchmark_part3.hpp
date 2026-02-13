@@ -34,7 +34,8 @@ namespace akkaradb::benchmark {
                                 .wal_group_n = 512,
                                 .wal_group_micros = 50'000,
                                 .wal_fast_mode = true,
-                                .bloom_fp_rate = 0.01
+                                .bloom_fp_rate = 0.01,
+                                .disable_background_compaction = true
                             }
                         );
 
@@ -73,9 +74,8 @@ namespace akkaradb::benchmark {
 
                         results.emplace_back(threads, ops_per_sec);
 
-                        std::cout << "✓ " << std::setw(2) << threads << " threads: "
-                            << std::setw(12) << static_cast<size_t>(ops_per_sec) << " ops/sec"
-                            << std::endl;
+                        std::cout << "✓ " << std::setw(2) << threads << " threads: " << std::setw(12) << static_cast<size_t>(ops_per_sec) << " ops/sec" <<
+                            std::endl;
                     }
                     catch (const std::exception& e) { std::cout << "✗ " << threads << " threads - Error: " << e.what() << std::endl; }
 
@@ -88,21 +88,16 @@ namespace akkaradb::benchmark {
 
                 std::cout << "\n📋 Summary:" << std::endl;
                 print_dash(60);
-                std::cout << std::left << std::setw(12) << "| Threads"
-                    << std::right << std::setw(16) << "ops/sec"
-                    << std::setw(14) << "Scale"
-                    << std::setw(12) << "Efficiency |" << std::endl;
+                std::cout << std::left << std::setw(12) << "| Threads" << std::right << std::setw(16) << "ops/sec" << std::setw(14) << "Scale" << std::setw(12)
+                    << "Efficiency |" << std::endl;
                 print_dash(60);
 
                 for (const auto& [threads, ops] : results) {
                     double scale = ops / baseline;
                     double efficiency = (scale / threads) * 100.0;
 
-                    std::cout << std::left << "| " << std::setw(10) << threads
-                        << std::right << std::setw(16) << static_cast<size_t>(ops)
-                        << std::fixed << std::setprecision(2)
-                        << std::setw(14) << scale << "x"
-                        << std::setw(11) << efficiency << "% |" << std::endl;
+                    std::cout << std::left << "| " << std::setw(10) << threads << std::right << std::setw(16) << static_cast<size_t>(ops) << std::fixed <<
+                        std::setprecision(2) << std::setw(14) << scale << "x" << std::setw(11) << efficiency << "% |" << std::endl;
                 }
                 print_dash(60);
             }

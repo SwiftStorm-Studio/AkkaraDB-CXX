@@ -22,6 +22,7 @@
 
 #include "engine/AkkEngine.hpp"
 #include "core/record/MemRecord.hpp"
+#include "format-api/FlushPolicy.hpp"
 #include <stdexcept>
 #include <utility>
 
@@ -29,32 +30,28 @@ namespace akkaradb {
     // ==================== Record::Impl ====================
 
     class Record::Impl {
-    public:
-        explicit Impl(core::MemRecord internal_record) : internal_{std::move(internal_record)} {}
+        public:
+            explicit Impl(core::MemRecord internal_record) : internal_{std::move(internal_record)} {}
 
-        [[nodiscard]] std::span<const uint8_t> key() const noexcept { return internal_.key(); }
+            [[nodiscard]] std::span<const uint8_t> key() const noexcept { return internal_.key(); }
 
-        [[nodiscard]] std::span<const uint8_t> value() const noexcept { return internal_.value(); }
+            [[nodiscard]] std::span<const uint8_t> value() const noexcept { return internal_.value(); }
 
-        [[nodiscard]] uint64_t seq() const noexcept { return internal_.seq(); }
+            [[nodiscard]] uint64_t seq() const noexcept { return internal_.seq(); }
 
-        [[nodiscard]] uint8_t flags() const noexcept { return internal_.flags(); }
+            [[nodiscard]] uint8_t flags() const noexcept { return internal_.flags(); }
 
-        [[nodiscard]] bool is_tombstone() const noexcept { return internal_.is_tombstone(); }
+            [[nodiscard]] bool is_tombstone() const noexcept { return internal_.is_tombstone(); }
 
-        [[nodiscard]] size_t approx_size_bytes() const noexcept { return internal_.approx_size(); }
+            [[nodiscard]] size_t approx_size_bytes() const noexcept { return internal_.approx_size(); }
 
-    private:
-        core::MemRecord internal_;
+        private:
+            core::MemRecord internal_;
     };
 
     // ==================== Record Public API ====================
 
-    Record::Record(void* internal_record) : impl_{
-        std::make_unique<Impl>(
-            std::move(*static_cast<core::MemRecord*>(internal_record))
-        )
-    } {}
+    Record::Record(void* internal_record) : impl_{std::make_unique<Impl>(std::move(*static_cast<core::MemRecord*>(internal_record)))} {}
 
     Record::~Record() noexcept = default;
 
@@ -76,87 +73,74 @@ namespace akkaradb {
     // ==================== AkkaraDB::Impl ====================
 
     class AkkaraDB::Impl {
-    public:
-        explicit Impl(std::unique_ptr<engine::AkkEngine> internal_db) : internal_db_{std::move(internal_db)} {
-            if (!internal_db_) { throw std::runtime_error("AkkaraDB: failed to initialize database"); }
-        }
+        public:
+            explicit Impl(std::unique_ptr<engine::AkkEngine> internal_db)
+                : internal_db_{std::move(internal_db)} { if (!internal_db_) { throw std::runtime_error("AkkaraDB: failed to initialize database"); } }
 
-        [[nodiscard]] uint64_t put(
-            std::span<const uint8_t> key,
-            std::span<const uint8_t> value
-        ) {
-            check_open();
-            return internal_db_->put(key, value);
-        }
-
-        [[nodiscard]] uint64_t del(std::span<const uint8_t> key) {
-            check_open();
-            return internal_db_->del(key);
-        }
-
-        [[nodiscard]] std::optional<std::vector<uint8_t>> get(
-            std::span<const uint8_t> key
-        ) {
-            check_open();
-            return internal_db_->get(key);
-        }
-
-        [[nodiscard]] bool compare_and_swap(
-            std::span<const uint8_t> key,
-            uint64_t expected_seq,
-            const std::optional<std::span<const uint8_t>>& new_value
-        ) {
-            check_open();
-            return internal_db_->compare_and_swap(key, expected_seq, new_value);
-        }
-
-        [[nodiscard]] std::vector<Record> range(
-            std::span<const uint8_t> start_key,
-            const std::optional<std::span<const uint8_t>>& end_key
-        ) {
-            check_open();
-
-            // Get internal records
-            auto internal_records = internal_db_->range(start_key, end_key);
-
-            // Convert to public Record
-            std::vector < Record > public_records;
-            public_records.reserve(internal_records.size());
-
-            for (auto& internal_rec : internal_records) {
-                // Use friend constructor
-                public_records.push_back(Record{static_cast<void*>(&internal_rec)});
+            [[nodiscard]] uint64_t put(std::span<const uint8_t> key, std::span<const uint8_t> value) {
+                check_open();
+                return internal_db_->put(key, value);
             }
 
-            return public_records;
-        }
+            [[nodiscard]] uint64_t del(std::span<const uint8_t> key) {
+                check_open();
+                return internal_db_->del(key);
+            }
 
-        [[nodiscard]] uint64_t last_seq() const {
-            check_open();
-            return internal_db_->last_seq();
-        }
+            [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::span<const uint8_t> key) {
+                check_open();
+                return internal_db_->get(key);
+            }
 
-        void flush() {
-            check_open();
-            internal_db_->flush();
-        }
+            [[nodiscard]] bool compare_and_swap(std::span<const uint8_t> key, uint64_t expected_seq, const std::optional<std::span<const uint8_t>>& new_value) {
+                check_open();
+                return internal_db_->compare_and_swap(key, expected_seq, new_value);
+            }
 
-        void close() noexcept {
-            if (internal_db_) {
-                try { internal_db_->close(); }
-                catch (...) {
-                    // Suppress exceptions
+            [[nodiscard]] std::vector<Record> range(std::span<const uint8_t> start_key, const std::optional<std::span<const uint8_t>>& end_key) {
+                check_open();
+
+                // Get internal records
+                auto internal_records = internal_db_->range(start_key, end_key);
+
+                // Convert to public Record
+                std::vector < Record > public_records;
+                public_records.reserve(internal_records.size());
+
+                for (auto& internal_rec : internal_records) {
+                    // Use friend constructor
+                    public_records.push_back(Record{static_cast<void*>(&internal_rec)});
                 }
-                internal_db_.reset();
+
+                return public_records;
             }
-        }
 
-        [[nodiscard]] bool is_closed() const noexcept { return internal_db_ == nullptr; }
+            [[nodiscard]] uint64_t last_seq() const {
+                check_open();
+                return internal_db_->last_seq();
+            }
 
-    private:
-        void check_open() const { if (!internal_db_) { throw std::runtime_error("AkkaraDB: database is closed"); } }
+            void flush() {
+                check_open();
+                internal_db_->flush();
+            }
 
-        std::unique_ptr<engine::AkkEngine> internal_db_;
+            void close() noexcept {
+                if (internal_db_) {
+                    try { internal_db_->close(); }
+                    catch (...) {
+                        // Suppress exceptions
+                    }
+                    internal_db_.reset();
+                }
+            }
+
+            [[nodiscard]] bool is_closed() const noexcept { return internal_db_ == nullptr; }
+
+        private:
+            void check_open() const { if (!internal_db_) { throw std::runtime_error("AkkaraDB: database is closed"); } }
+
+            std::unique_ptr<engine::AkkEngine> internal_db_;
     };
 
     // ==================== AkkaraDB Public API ====================
@@ -171,7 +155,15 @@ namespace akkaradb {
             .wal_fast_mode = opts.wal_fast_mode,
             .bloom_fp_rate = opts.bloom_fp_rate,
             .max_sst_per_level = opts.max_sst_per_level,
-            .buffer_pool_size = opts.buffer_pool_size
+            .compact_idle_ms = opts.compact_idle_ms,
+            .compact_force_ms = opts.compact_force_ms,
+            .disable_background_compaction = opts.disable_background_compaction,
+            .buffer_pool_size = opts.buffer_pool_size,
+            .stripe_k = opts.stripe_k,
+            .stripe_m = opts.stripe_m,
+            .stripe_fast_mode = opts.stripe_fast_mode,
+            .use_stripe_for_read = opts.use_stripe_for_read,
+            .stripe_flush_policy = format::FlushPolicy{.max_blocks = opts.stripe_flush_max_blocks, .max_micros = opts.stripe_flush_max_micros,},
         };
 
         auto internal_db = engine::AkkEngine::open(internal_opts);
@@ -190,10 +182,7 @@ namespace akkaradb {
     AkkaraDB::AkkaraDB(AkkaraDB&&) noexcept = default;
     AkkaraDB& AkkaraDB::operator=(AkkaraDB&&) noexcept = default;
 
-    uint64_t AkkaraDB::put(
-        std::span<const uint8_t> key,
-        std::span<const uint8_t> value
-    ) {
+    uint64_t AkkaraDB::put(std::span<const uint8_t> key, std::span<const uint8_t> value) {
         if (!impl_) { throw std::runtime_error("AkkaraDB: database is closed"); }
         return impl_->put(key, value);
     }
@@ -203,26 +192,17 @@ namespace akkaradb {
         return impl_->del(key);
     }
 
-    std::optional<std::vector<uint8_t>> AkkaraDB::get(
-        std::span<const uint8_t> key
-    ) {
+    std::optional<std::vector<uint8_t>> AkkaraDB::get(std::span<const uint8_t> key) {
         if (!impl_) { throw std::runtime_error("AkkaraDB: database is closed"); }
         return impl_->get(key);
     }
 
-    bool AkkaraDB::compare_and_swap(
-        std::span<const uint8_t> key,
-        uint64_t expected_seq,
-        const std::optional<std::span<const uint8_t>>& new_value
-    ) {
+    bool AkkaraDB::compare_and_swap(std::span<const uint8_t> key, uint64_t expected_seq, const std::optional<std::span<const uint8_t>>& new_value) {
         if (!impl_) { throw std::runtime_error("AkkaraDB: database is closed"); }
         return impl_->compare_and_swap(key, expected_seq, new_value);
     }
 
-    std::vector<Record> AkkaraDB::range(
-        std::span<const uint8_t> start_key,
-        const std::optional<std::span<const uint8_t>>& end_key
-    ) {
+    std::vector<Record> AkkaraDB::range(std::span<const uint8_t> start_key, const std::optional<std::span<const uint8_t>>& end_key) {
         if (!impl_) { throw std::runtime_error("AkkaraDB: database is closed"); }
         return impl_->range(start_key, end_key);
     }
