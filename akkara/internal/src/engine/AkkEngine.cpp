@@ -381,11 +381,19 @@ namespace akkaradb::engine {
     }
 
     bool AkkEngine::compare_and_swap(std::span<const uint8_t> key, uint64_t expected_seq, const std::optional<std::span<const uint8_t>>& new_value) {
-        // Get current record
+        // Check MemTable first.
         auto current = memtable_->get(key);
 
+        // If not in MemTable, fall back to SSTable lookup.
+        // CAS on a flushed key is only valid if the record is still readable via get().
         if (!current) {
-            return false; // Key doesn't exist
+            auto sst_val = get(key);
+            if (!sst_val.has_value()) {
+                return false; // Key not found anywhere.
+            }
+            // CAS against a flushed record: seq must match but we cannot update
+            // atomically across MemTable/SST. Treat as CAS failure to be safe.
+            return false;
         }
 
         if (current->seq() != expected_seq) {
@@ -396,13 +404,11 @@ namespace akkaradb::engine {
         const uint64_t new_seq = memtable_->next_seq();
 
         if (new_value.has_value()) {
-            // Update
             auto op = wal::WalOp::put(key, *new_value, new_seq);
             wal_->append(op);
             memtable_->put(key, *new_value, new_seq);
         }
         else {
-            // Delete
             auto op = wal::WalOp::del(key, new_seq);
             wal_->append(op);
             memtable_->remove(key, new_seq);
@@ -482,7 +488,7 @@ namespace akkaradb::engine {
         manifest_->checkpoint(
             std::optional<std::string>("flush"),
             stripe_store_
-                ? std::optional<int64_t>(stripe_store_->last_sealed_stripe())
+                ? std::optional(stripe_store_->last_sealed_stripe())
                 : std::nullopt,
             std::optional(memtable_->last_seq())
         );
@@ -583,8 +589,7 @@ namespace akkaradb::engine {
             return;
         }
 
-        // Sort by key
-        std::ranges::sort(batch, [](const auto& a, const auto& b) { return a.compare_key(b) < 0; });
+        // Note: batch is already sorted by Flusher::run() before calling on_flush().
 
         // Generate filename
         const auto l0_dir = opts_.base_dir / "sst" / "L0";
@@ -657,6 +662,6 @@ namespace akkaradb::engine {
         notify_flush_done();
 
         // Checkpoint
-        manifest_->checkpoint(std::optional<std::string>("memFlush"), std::nullopt, std::optional<uint64_t>(batch.back().seq()));
+        manifest_->checkpoint(std::optional<std::string>("memFlush"), std::nullopt, std::optional(batch.back().seq()));
     }
 } // namespace akkaradb::engine

@@ -54,22 +54,24 @@ namespace akkaradb::engine::memtable {
 
             Shard() : approx_bytes_{0}, next_imm_id_{0} {}
 
-            void put(core::MemRecord record) {
+            // Returns true if the shard exceeded the flush threshold after this put.
+            bool put(core::MemRecord record) {
                 std::unique_lock lock{mutex_};
 
-                // Use insert_or_replace pattern: try to insert first, then replace if exists.
                 auto [it, inserted] = active_.emplace(record, std::monostate{});
                 if (inserted) { approx_bytes_ += record.approx_size(); }
                 else {
-                    // Key exists: update in-place by replacing the node.
                     approx_bytes_ -= it->first.approx_size();
                     approx_bytes_ += record.approx_size();
-                    // extract + re-insert with new value (avoids second tree traversal).
                     auto node = active_.extract(it);
                     node.key() = std::move(record);
                     active_.insert(std::move(node));
                 }
+
+                return approx_bytes_ > threshold_bytes_;
             }
+
+            void set_threshold(size_t threshold) noexcept { threshold_bytes_ = threshold; }
 
             std::shared_ptr<const core::MemRecord> get(std::span<const uint8_t> key) const {
                 std::shared_lock lock{mutex_};
@@ -143,6 +145,7 @@ namespace akkaradb::engine::memtable {
             std::deque<std::pair<uint64_t, Map>> immutables_;
             size_t approx_bytes_;
             uint64_t next_imm_id_;
+            size_t threshold_bytes_{0};
     };
 
     /**
@@ -317,23 +320,27 @@ namespace akkaradb::engine::memtable {
                   } {
                 if (shard_count_ < 2 || shard_count_ > 8) throw std::invalid_argument("MemTable: shard_count must be 2-8");
                 shards_.reserve(shard_count_);
-                for (size_t i = 0; i < shard_count_; ++i) shards_.push_back(std::make_unique<Shard>());
+                for (size_t i = 0; i < shard_count_; ++i) {
+                    auto shard = std::make_unique<Shard>();
+                    shard->set_threshold(threshold_bytes_per_shard_);
+                    shards_.push_back(std::move(shard));
+                }
             }
 
             void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq) {
                 const size_t shard_idx = hash_key(key) % shard_count_;
                 auto record = core::MemRecord::create(key, value, seq);
-                shards_[shard_idx]->put(std::move(record));
+                const bool over_threshold = shards_[shard_idx]->put(std::move(record));
                 advance_seq_gen(seq);
-                if (shards_[shard_idx]->approx_bytes() > threshold_bytes_per_shard_) trigger_flush(shard_idx);
+                if (over_threshold) trigger_flush(shard_idx);
             }
 
             void remove(std::span<const uint8_t> key, uint64_t seq) {
                 const size_t shard_idx = hash_key(key) % shard_count_;
                 auto record = core::MemRecord::tombstone(key, seq);
-                shards_[shard_idx]->put(std::move(record));
+                const bool over_threshold = shards_[shard_idx]->put(std::move(record));
                 advance_seq_gen(seq);
-                if (shards_[shard_idx]->approx_bytes() > threshold_bytes_per_shard_) trigger_flush(shard_idx);
+                if (over_threshold) trigger_flush(shard_idx);
             }
 
             std::shared_ptr<const core::MemRecord> get(std::span<const uint8_t> key) const {

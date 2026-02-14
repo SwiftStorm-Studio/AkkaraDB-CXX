@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
+#include <mutex>
 
 namespace akkaradb::engine::sstable {
     // ==================== BlockCache ====================
@@ -29,7 +30,7 @@ namespace akkaradb::engine::sstable {
     BlockCache::BlockCache(size_t max_blocks) : max_blocks_{max_blocks} {}
 
     std::shared_ptr<core::OwnedBuffer> BlockCache::get(uint64_t offset) {
-        std::lock_guard lock{mutex_};
+        std::unique_lock lock{mutex_};
 
         auto it = cache_.find(offset);
         if (it == cache_.end()) { return nullptr; }
@@ -72,10 +73,7 @@ namespace akkaradb::engine::sstable {
 
     // ==================== SSTableReader ====================
 
-    std::unique_ptr<SSTableReader> SSTableReader::open(
-        const std::filesystem::path& file_path,
-        bool verify_footer_crc
-    ) {
+    std::unique_ptr<SSTableReader> SSTableReader::open(const std::filesystem::path& file_path, bool verify_footer_crc) {
         // Open file
         std::ifstream file(file_path, std::ios::binary);
         if (!file) { throw std::runtime_error("SSTableReader: failed to open file"); }
@@ -96,7 +94,9 @@ namespace akkaradb::engine::sstable {
                           : AKSSFooter::read_from(footer_buf.view());
 
         // Read IndexBlock
-        const uint64_t index_end = footer.bloom_off > 0 ? footer.bloom_off : (file_size - AKSSFooter::SIZE);
+        const uint64_t index_end = footer.bloom_off > 0
+                                       ? footer.bloom_off
+                                       : (file_size - AKSSFooter::SIZE);
         const uint64_t index_len = index_end - footer.index_off;
 
         if (index_len < 16 || index_len > (1ULL << 31)) { throw std::runtime_error("SSTableReader: invalid index length"); }
@@ -123,22 +123,16 @@ namespace akkaradb::engine::sstable {
 
         file.close();
 
-        return std::unique_ptr<SSTableReader>(new SSTableReader(
-            file_path, footer, std::move(index), std::move(bloom)
-        ));
+        return std::unique_ptr<SSTableReader>(new SSTableReader(file_path, footer, std::move(index), std::move(bloom)));
     }
 
-    SSTableReader::SSTableReader(
-        std::filesystem::path file_path,
-        const AKSSFooter::Footer& footer,
-        IndexBlock index,
-        std::optional<BloomFilter> bloom
-    ) : file_path_{std::move(file_path)}
-        , footer_{footer}
-        , index_{std::move(index)}
-        , bloom_{std::move(bloom)}
-        , unpacker_{format::akk::AkkBlockUnpacker::create()}
-        , cache_{512} {
+    SSTableReader::SSTableReader(std::filesystem::path file_path, const AKSSFooter::Footer& footer, IndexBlock index, std::optional<BloomFilter> bloom)
+        : file_path_{std::move(file_path)},
+          footer_{footer},
+          index_{std::move(index)},
+          bloom_{std::move(bloom)},
+          unpacker_{format::akk::AkkBlockUnpacker::create()},
+          cache_{512} {
         file_.open(file_path_, std::ios::binary);
         if (!file_) { throw std::runtime_error("SSTableReader: failed to reopen file"); }
 
@@ -171,16 +165,15 @@ namespace akkaradb::engine::sstable {
         return std::vector(value_span.begin(), value_span.end());
     }
 
-    SSTableReader::RangeIterator::RangeIterator(
-        SSTableReader* reader,
-        std::span<const uint8_t> start_key,
-        std::optional<std::span<const uint8_t>> end_key
-    ) : reader_{reader}
-        , start_key_(start_key.begin(), start_key.end())
-        , end_key_(end_key.has_value()
-                       ? std::optional(std::vector(end_key->begin(), end_key->end()))
-                       : std::nullopt)
-        , current_entry_idx_{0} {
+    SSTableReader::RangeIterator::RangeIterator(SSTableReader* reader, std::span<const uint8_t> start_key, std::optional<std::span<const uint8_t>> end_key)
+        : reader_{reader},
+          start_key_(start_key.begin(), start_key.end()),
+          end_key_(
+              end_key.has_value()
+                  ? std::optional(std::vector(end_key->begin(), end_key->end()))
+                  : std::nullopt
+          ),
+          current_entry_idx_{0} {
         // Find starting block
         const int64_t start_block_off = reader_->index_.lookup(start_key);
         if (start_block_off < 0) {
@@ -189,9 +182,10 @@ namespace akkaradb::engine::sstable {
         }
 
         const auto& entries = reader_->index_.entries();
-        auto entry_it = std::ranges::find_if(entries, [start_block_off](const IndexBlock::Entry& e) {
-            return static_cast<int64_t>(e.block_offset) == start_block_off;
-        });
+        auto entry_it = std::ranges::find_if(
+            entries,
+            [start_block_off](const IndexBlock::Entry& e) { return static_cast<int64_t>(e.block_offset) == start_block_off; }
+        );
 
         if (entry_it != entries.end()) {
             current_entry_idx_ = std::distance(entries.begin(), entry_it);
@@ -208,7 +202,11 @@ namespace akkaradb::engine::sstable {
 
         while (true) {
             // Try current cursor
-            if (current_cursor_ && current_cursor_->has_next()) {
+            if (current_cursor_&& current_cursor_
+            ->
+            has_next()
+            )
+            {
                 auto record_opt = current_cursor_->try_next();
                 if (!record_opt) {
                     break; // Advance to next block
@@ -244,15 +242,11 @@ namespace akkaradb::engine::sstable {
         return std::nullopt;
     }
 
-    SSTableReader::RangeIterator SSTableReader::range_iter(
-        std::span<const uint8_t> start_key,
-        const std::optional<std::span<const uint8_t>>& end_key
-    ) { return RangeIterator{this, start_key, end_key}; }
+    SSTableReader::RangeIterator SSTableReader::range_iter(std::span<const uint8_t> start_key, const std::optional<std::span<const uint8_t>>& end_key) {
+        return RangeIterator{this, start_key, end_key};
+    }
 
-    std::vector<SSTableReader::RangeRecord> SSTableReader::range(
-        std::span<const uint8_t> start_key,
-        const std::optional<std::span<const uint8_t>>& end_key
-    ) {
+    std::vector<SSTableReader::RangeRecord> SSTableReader::range(std::span<const uint8_t> start_key, const std::optional<std::span<const uint8_t>>& end_key) {
         std::vector<RangeRecord> results;
 
         auto iter = range_iter(start_key, end_key);
@@ -264,11 +258,7 @@ namespace akkaradb::engine::sstable {
             auto rec_key = record.key();
             auto rec_value = record.value();
 
-            results.push_back(RangeRecord{
-                std::vector(rec_key.begin(), rec_key.end()),
-                std::vector(rec_value.begin(), rec_value.end()),
-                record.header()
-            });
+            results.push_back(RangeRecord{std::vector(rec_key.begin(), rec_key.end()), std::vector(rec_value.begin(), rec_value.end()), record.header()});
         }
 
         return results;
@@ -280,35 +270,30 @@ namespace akkaradb::engine::sstable {
     }
 
     std::shared_ptr<core::OwnedBuffer> SSTableReader::load_block(uint64_t offset) {
-        // Check cache (zero-copy via shared_ptr)
+        // Cache hit: no I/O needed.
         if (auto cached = cache_.get(offset)) { return cached; }
 
-        // Read from file
+        // Cache miss: read from file under file_mutex_ (ifstream is not thread-safe).
         constexpr size_t BLOCK_SIZE = 32 * 1024;
         auto block_buf = core::OwnedBuffer::allocate(BLOCK_SIZE);
 
-        file_.seekg(offset);
-        file_.read(
-            reinterpret_cast<char*>(block_buf.view().data()),
-            BLOCK_SIZE
-        );
+        {
+            std::lock_guard file_lock{file_mutex_};
+            file_.seekg(static_cast<std::streamoff>(offset));
+            file_.read(reinterpret_cast<char*>(block_buf.view().data()), BLOCK_SIZE);
+            if (!file_) { throw std::runtime_error("SSTableReader: failed to read block"); }
+        }
 
-        if (!file_) { throw std::runtime_error("SSTableReader: failed to read block"); }
-
-        // Validate
+        // Validate outside the file lock.
         if (!unpacker_->validate(block_buf.view())) { throw std::runtime_error("SSTableReader: block validation failed"); }
 
-        // Wrap in shared_ptr and cache
         auto block_ptr = std::make_shared<core::OwnedBuffer>(std::move(block_buf));
         cache_.put(offset, block_ptr);
 
         return block_ptr;
     }
 
-    std::optional<core::RecordView> SSTableReader::find_in_block(
-        core::BufferView block,
-        std::span<const uint8_t> key
-    ) {
+    std::optional<core::RecordView> SSTableReader::find_in_block(core::BufferView block, std::span<const uint8_t> key) {
         auto cursor = unpacker_->cursor(block);
 
         while (cursor->has_next()) {

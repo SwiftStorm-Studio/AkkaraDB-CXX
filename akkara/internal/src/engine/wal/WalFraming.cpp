@@ -45,12 +45,12 @@ namespace akkaradb::engine::wal {
 
         if (tls_buf.size() < total_size) { tls_buf.resize(total_size); }
 
-        core::BufferView view{tls_buf.data(), total_size};
+        core::BufferView view{reinterpret_cast<std::byte*>(tls_buf.data()), total_size};
         encode_into(op, view);
 
         // Copy into an owned allocation for the WAL queue.
         auto owned = core::OwnedBuffer::allocate(total_size, 16);
-        std::memcpy(owned.view().data(), tls_buf.data(), total_size);
+        std::memcpy(owned.view().data(), reinterpret_cast<const std::byte*>(tls_buf.data()), total_size);
         return owned;
     }
 

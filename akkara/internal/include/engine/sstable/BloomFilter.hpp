@@ -143,7 +143,7 @@ namespace akkaradb::engine::sstable {
         BloomFilter(uint32_t m_bits, uint8_t k, uint64_t seed, std::vector<uint64_t> words);
 
         static uint64_t mix64(uint64_t x) noexcept;
-        static uint64_t fingerprint64(std::span<const uint8_t> key, uint64_t seed);
+        static uint64_t fingerprint64(std::span<const uint8_t> key, uint64_t seed) noexcept;
 
         uint32_t m_bits_;
         uint32_t mask_;

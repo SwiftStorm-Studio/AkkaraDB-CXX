@@ -200,9 +200,7 @@ namespace akkaradb::engine::wal {
         };
 
         struct Command {
-            enum class Type {
-                WRITE, FORCE_SYNC, TRUNCATE, SHUTDOWN
-            };
+            enum class Type { WRITE, FORCE_SYNC, TRUNCATE, SHUTDOWN };
 
             Type type;
             core::OwnedBuffer frame;
@@ -272,16 +270,16 @@ namespace akkaradb::engine::wal {
                 std::shared_ptr<Waiter> waiter;
                 if (!fast_mode_) { waiter = std::make_shared<Waiter>(); }
 
-                // queue_mutex_ guards queue_ exclusively. queue_size_ is updated atomically
-                // so flush_loop can avoid a spurious wait_for wakeup.
-                const size_t prev_size = [&] {
+                // Enqueue and notify under mutex.
+                // notify_one() is called inside the lock so the flusher cannot miss
+                // the wakeup between checking queue_.empty() and sleeping.
+                {
                     std::lock_guard lock{queue_mutex_};
+                    const size_t prev_size = queue_size_.fetch_add(1, std::memory_order_relaxed);
                     queue_.emplace_back(Command::write(std::move(frame_buf), waiter));
-                    return queue_size_.fetch_add(1, std::memory_order_relaxed);
-                }();
-
-                // Notify only when queue was empty (0 → 1 transition).
-                if (prev_size == 0) { queue_cv_.notify_one(); }
+                    // Notify only on 0 → 1 transition to avoid thundering-herd wakeups.
+                    if (prev_size == 0) { queue_cv_.notify_one(); }
+                }
 
                 if (!fast_mode_) {
                     waiter->wait(std::chrono::microseconds(group_micros_ * 10));
@@ -344,47 +342,61 @@ namespace akkaradb::engine::wal {
             void flush_loop() {
                 std::vector<Command> write_batch;
                 write_batch.reserve(group_n_);
+                // Local swap buffer: drain queue_ into here under a brief lock,
+                // then process entirely without holding the mutex.
+                std::deque<Command> local;
 
                 try {
                     while (true) {
-                        std::unique_lock lock{queue_mutex_};
+                        // Wait for work.
+                        {
+                            std::unique_lock lock{queue_mutex_};
+                            const auto timeout = std::chrono::microseconds(group_micros_);
+                            queue_cv_.wait_for(lock, timeout, [this]() {
+                                return !queue_.empty() || !running_.load(std::memory_order_acquire);
+                            });
 
-                        const auto timeout = std::chrono::microseconds(group_micros_);
-                        queue_cv_.wait_for(lock, timeout, [this]() { return !queue_.empty() || !running_.load(std::memory_order_acquire); });
+                            if (!running_.load(std::memory_order_acquire) && queue_.empty()) { break; }
+                            if (queue_.empty()) { continue; }
 
-                        if (!running_.load(std::memory_order_acquire) && queue_.empty()) { break; }
-                        if (queue_.empty()) { continue; }
+                            // Swap entire queue out in O(1) — producers unblocked immediately.
+                            std::swap(queue_, local);
+                            queue_size_.store(0, std::memory_order_relaxed);
+                        } // mutex released here
 
-                        // Pop the first command.
-                        Command cmd = std::move(queue_.front());
-                        queue_.pop_front();
-                        queue_size_.fetch_sub(1, std::memory_order_relaxed);
+                        // Process local batch without holding queue_mutex_.
+                        bool shutdown = false;
+                        while (!local.empty() && !shutdown) {
+                            Command& front = local.front();
 
-                        if (cmd.type == Command::Type::WRITE) {
-                            write_batch.push_back(std::move(cmd));
-
-                            // Drain additional WRITE commands up to group_n_ (non-blocking).
-                            while (write_batch.size() < group_n_ && !queue_.empty()) {
-                                Command& front = queue_.front();
-                                if (front.type != Command::Type::WRITE) { break; }
+                            if (front.type == Command::Type::WRITE) {
                                 write_batch.push_back(std::move(front));
-                                queue_.pop_front();
-                                queue_size_.fetch_sub(1, std::memory_order_relaxed);
-                            }
+                                local.pop_front();
 
-                            lock.unlock();
-                            flush_write_batch(write_batch);
-                            write_batch.clear();
+                                // Accumulate consecutive WRITEs up to group_n_.
+                                while (!local.empty()
+                                       && local.front().type == Command::Type::WRITE
+                                       && write_batch.size() < group_n_) {
+                                    write_batch.push_back(std::move(local.front()));
+                                    local.pop_front();
+                                }
+
+                                flush_write_batch(write_batch);
+                                write_batch.clear();
+                            } else {
+                                local.pop_front();
+                                shutdown = handle_command(front);
+                            }
                         }
-                        else {
-                            lock.unlock();
-                            if (handle_command(cmd)) { return; } // SHUTDOWN
-                        }
+
+                        if (shutdown) { break; }
                     }
                 }
                 catch (...) {
                     for (auto& c : write_batch) { if (c.waiter) { c.waiter->signal_error(std::current_exception()); } }
                     write_batch.clear();
+                    for (auto& c : local)       { if (c.waiter) { c.waiter->signal_error(std::current_exception()); } }
+                    local.clear();
                     drain_queue_on_error();
                 }
 
@@ -479,4 +491,5 @@ namespace akkaradb::engine::wal {
     void WalWriter::truncate() { impl_->truncate(); }
     void WalWriter::close() { impl_->close(); }
     uint64_t WalWriter::next_lsn() const noexcept { return impl_->next_lsn(); }
+
 } // namespace akkaradb::engine::wal

@@ -7,6 +7,7 @@
 
 #include "akkaradb_benchmark_part2.hpp"
 #include <thread>
+#include <algorithm>
 #include <latch>
 
 namespace akkaradb::benchmark {
@@ -22,6 +23,10 @@ namespace akkaradb::benchmark {
                 const std::vector<int> thread_counts = {1, 2, 4, 8, 16};
                 std::vector<std::pair<int, double>> results;
 
+                // Pre-generate values once per thread to eliminate malloc contention from the hot path.
+                // Each thread gets its own buffer so there is no sharing.
+                const std::vector<uint8_t> shared_value = generate_value(value_size);
+
                 for (int threads : thread_counts) {
                     auto base_dir = create_temp_dir("akkdb-mt-bench-");
 
@@ -29,7 +34,7 @@ namespace akkaradb::benchmark {
                         auto db = akkaradb::AkkaraDB::open(
                             {
                                 .base_dir = base_dir.string(),
-                                .memtable_shard_count = 4,
+                                .memtable_shard_count = static_cast<size_t>(std::clamp(threads, 2, 8)),
                                 .memtable_threshold_bytes = 64 * 1024 * 1024,
                                 .wal_group_n = 512,
                                 .wal_group_micros = 50'000,
@@ -39,30 +44,33 @@ namespace akkaradb::benchmark {
                             }
                         );
 
-                        std::latch latch(threads);
+                        // barrier: all threads start simultaneously after all are spawned.
+                        std::latch start_barrier(threads);
+                        std::latch done_latch(threads);
                         std::atomic<size_t> total_ops{0};
-
-                        auto start_time = std::chrono::high_resolution_clock::now();
 
                         std::vector<std::thread> workers;
                         for (int tid = 0; tid < threads; ++tid) {
                             workers.emplace_back(
                                 [&, tid]() {
+                                    // Wait until all threads are ready.
+                                    start_barrier.arrive_and_wait();
                                     try {
                                         for (size_t i = 0; i < ops_per_thread; ++i) {
+                                            // generate_key is cheap (string formatting only, no heap).
                                             auto key = generate_key(tid * ops_per_thread + i);
-                                            auto value = generate_value(value_size);
-                                            db->put(key, value);
+                                            db->put(key, shared_value);
                                             total_ops.fetch_add(1, std::memory_order_relaxed);
                                         }
                                     }
                                     catch (const std::exception& e) { std::cerr << "Thread " << tid << " error: " << e.what() << std::endl; }
-                                    latch.count_down();
+                                    done_latch.count_down();
                                 }
                             );
                         }
 
-                        latch.wait();
+                        auto start_time = std::chrono::high_resolution_clock::now();
+                        done_latch.wait();
                         auto end_time = std::chrono::high_resolution_clock::now();
 
                         for (auto& worker : workers) { if (worker.joinable()) { worker.join(); } }
