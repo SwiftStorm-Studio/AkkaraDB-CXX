@@ -75,15 +75,8 @@ namespace akkaradb::engine::wal {
                     FileHandle fh;
 
                     #ifdef _WIN32
-                    fh.handle_ = ::CreateFileW(
-                        path.c_str(),
-                        GENERIC_WRITE,
-                        FILE_SHARE_READ,
-                        nullptr,
-                        OPEN_ALWAYS,
-                        FILE_ATTRIBUTE_NORMAL,
-                        nullptr
-                    ); if (fh.handle_ == INVALID) { throw std::runtime_error("Failed to open WAL: " + path.string()); } ::SetFilePointer(
+                    fh.handle_ = ::CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr); if (fh.
+                        handle_ == INVALID) { throw std::runtime_error("Failed to open WAL: " + path.string()); } ::SetFilePointer(
                         fh.handle_,
                         0,
                         nullptr,
@@ -147,8 +140,7 @@ namespace akkaradb::engine::wal {
 
                 void truncate_file() {
                     #ifdef _WIN32
-                    ::SetFilePointer(handle_, 0, nullptr, FILE_BEGIN);
-                    if (!::SetEndOfFile(handle_)) { throw std::runtime_error("WAL truncate failed"); }
+                    ::SetFilePointer(handle_, 0, nullptr, FILE_BEGIN); if (!::SetEndOfFile(handle_)) { throw std::runtime_error("WAL truncate failed"); }
                     #else
                     if (::ftruncate(handle_, 0) < 0) { throw std::runtime_error("WAL truncate failed"); }
                     #endif
@@ -200,7 +192,9 @@ namespace akkaradb::engine::wal {
         };
 
         struct Command {
-            enum class Type { WRITE, FORCE_SYNC, TRUNCATE, SHUTDOWN };
+            enum class Type {
+                WRITE, FORCE_SYNC, TRUNCATE, SHUTDOWN
+            };
 
             Type type;
             core::OwnedBuffer frame;
@@ -253,9 +247,7 @@ namespace akkaradb::engine::wal {
                   fast_mode_{fast_mode},
                   next_lsn_{1},
                   running_{true},
-                  queue_size_{0} {
-                flusher_thread_ = std::thread([this] { this->flush_loop(); });
-            }
+                  queue_size_{0} { flusher_thread_ = std::thread([this] { this->flush_loop(); }); }
 
             ~Impl() {}
 
@@ -282,7 +274,11 @@ namespace akkaradb::engine::wal {
                 }
 
                 if (!fast_mode_) {
-                    waiter->wait(std::chrono::microseconds(group_micros_ * 10));
+                    // Timeout for synchronous mode: use configured value * 10, with minimum of 1 second
+                    const auto timeout_us = group_micros_ > 0
+                                                ? std::chrono::microseconds(group_micros_ * 10)
+                                                : std::chrono::seconds(1); // Fallback for group_micros_ = 0
+                    waiter->wait(timeout_us);
                     if (!waiter->is_done()) { throw std::runtime_error("WAL fsync timeout"); }
                     waiter->check_error();
                 }
@@ -352,9 +348,7 @@ namespace akkaradb::engine::wal {
                         {
                             std::unique_lock lock{queue_mutex_};
                             const auto timeout = std::chrono::microseconds(group_micros_);
-                            queue_cv_.wait_for(lock, timeout, [this]() {
-                                return !queue_.empty() || !running_.load(std::memory_order_acquire);
-                            });
+                            queue_cv_.wait_for(lock, timeout, [this]() { return !queue_.empty() || !running_.load(std::memory_order_acquire); });
 
                             if (!running_.load(std::memory_order_acquire) && queue_.empty()) { break; }
                             if (queue_.empty()) { continue; }
@@ -374,16 +368,15 @@ namespace akkaradb::engine::wal {
                                 local.pop_front();
 
                                 // Accumulate consecutive WRITEs up to group_n_.
-                                while (!local.empty()
-                                       && local.front().type == Command::Type::WRITE
-                                       && write_batch.size() < group_n_) {
+                                while (!local.empty() && local.front().type == Command::Type::WRITE && write_batch.size() < group_n_) {
                                     write_batch.push_back(std::move(local.front()));
                                     local.pop_front();
                                 }
 
                                 flush_write_batch(write_batch);
                                 write_batch.clear();
-                            } else {
+                            }
+                            else {
                                 local.pop_front();
                                 shutdown = handle_command(front);
                             }
@@ -395,7 +388,7 @@ namespace akkaradb::engine::wal {
                 catch (...) {
                     for (auto& c : write_batch) { if (c.waiter) { c.waiter->signal_error(std::current_exception()); } }
                     write_batch.clear();
-                    for (auto& c : local)       { if (c.waiter) { c.waiter->signal_error(std::current_exception()); } }
+                    for (auto& c : local) { if (c.waiter) { c.waiter->signal_error(std::current_exception()); } }
                     local.clear();
                     drain_queue_on_error();
                 }
@@ -491,5 +484,4 @@ namespace akkaradb::engine::wal {
     void WalWriter::truncate() { impl_->truncate(); }
     void WalWriter::close() { impl_->close(); }
     uint64_t WalWriter::next_lsn() const noexcept { return impl_->next_lsn(); }
-
 } // namespace akkaradb::engine::wal

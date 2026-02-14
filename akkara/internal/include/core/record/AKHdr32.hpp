@@ -1,8 +1,8 @@
 /*
-* AkkEngine
+* AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -24,7 +24,7 @@
 #include <array>
 
 namespace akkaradb::core {
-#pragma pack(push, 1)
+    #pragma pack(push, 1)
     /**
  * AKHdr32 - 32-byte fixed-size record header for AkkEngine format.
  *
@@ -118,15 +118,9 @@ namespace akkaradb::core {
      * @param flags Flags (FLAG_NORMAL or FLAG_TOMBSTONE)
      * @return Initialized header
      */
-        [[nodiscard]] static AKHdr32 create(
-            const uint8_t* key,
-            size_t key_len,
-            size_t value_len,
-            uint64_t seq,
-            uint8_t flags = FLAG_NORMAL
-        ) noexcept;
+        [[nodiscard]] static AKHdr32 create(const uint8_t* key, size_t key_len, size_t value_len, uint64_t seq, uint8_t flags = FLAG_NORMAL) noexcept;
     };
-#pragma pack(pop)
+    #pragma pack(pop)
 
     // Static assertions outside the struct (after pack(pop))
     static_assert(sizeof(AKHdr32) == 32, "AKHdr32 must be exactly 32 bytes");

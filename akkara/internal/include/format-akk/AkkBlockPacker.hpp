@@ -1,8 +1,8 @@
 /*
-* AkkEngine
+* AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -51,66 +51,60 @@ namespace akkaradb::format::akk {
      * Thread-safety: NOT thread-safe. Single producer only.
      */
     class AkkBlockPacker : public BlockPacker {
-    public:
-        /**
+        public:
+            /**
          * Block size constant (32 KiB).
          */
-        static constexpr size_t BLOCK_SIZE = 32 * 1024;
+            static constexpr size_t BLOCK_SIZE = 32 * 1024;
 
-        /**
+            /**
          * Overhead per block (payloadLen + CRC32C).
          */
-        static constexpr size_t BLOCK_OVERHEAD = sizeof(uint32_t) * 2;
+            static constexpr size_t BLOCK_OVERHEAD = sizeof(uint32_t) * 2;
 
-        /**
+            /**
          * Maximum payload size.
          */
-        static constexpr size_t MAX_PAYLOAD = BLOCK_SIZE - BLOCK_OVERHEAD;
+            static constexpr size_t MAX_PAYLOAD = BLOCK_SIZE - BLOCK_OVERHEAD;
 
-        /**
+            /**
          * Creates an AkkBlockPacker.
          *
          * @param callback Callback invoked when a block is ready
          * @param pool Buffer pool for allocating blocks
          * @return Unique pointer to packer
          */
-        [[nodiscard]] static std::unique_ptr<AkkBlockPacker> create(
-            BlockReadyCallback callback,
-            std::shared_ptr<core::BufferPool> pool
-        );
+            [[nodiscard]] static std::unique_ptr<AkkBlockPacker> create(BlockReadyCallback callback, std::shared_ptr<core::BufferPool> pool);
 
-        ~AkkBlockPacker() override;
+            ~AkkBlockPacker() override;
 
-        void begin_block() override;
+            void begin_block() override;
 
-        [[nodiscard]] bool try_append(
-            std::span<const uint8_t> key,
-            std::span<const uint8_t> value,
-            uint64_t seq,
-            uint8_t flags,
-            uint64_t key_fp64,
-            uint64_t mini_key
-        ) override;
+            [[nodiscard]] bool try_append(
+                std::span<const uint8_t> key,
+                std::span<const uint8_t> value,
+                uint64_t seq,
+                uint8_t flags,
+                uint64_t key_fp64,
+                uint64_t mini_key
+            ) override;
 
-        bool try_append(const core::MemRecord& record);
+            bool try_append(const core::MemRecord& record);
 
-        void end_block() override;
+            void end_block() override;
 
-        void flush() override;
+            void flush() override;
 
-        [[nodiscard]] size_t block_size() const noexcept override { return BLOCK_SIZE; }
+            [[nodiscard]] size_t block_size() const noexcept override { return BLOCK_SIZE; }
 
-        [[nodiscard]] size_t remaining() const noexcept override;
+            [[nodiscard]] size_t remaining() const noexcept override;
 
-        [[nodiscard]] size_t record_count() const noexcept override;
+            [[nodiscard]] size_t record_count() const noexcept override;
 
-    private:
-        AkkBlockPacker(
-            BlockReadyCallback callback,
-            std::shared_ptr<core::BufferPool> pool
-        );
+        private:
+            AkkBlockPacker(BlockReadyCallback callback, std::shared_ptr<core::BufferPool> pool);
 
-        class Impl;
-        std::unique_ptr<Impl> impl_;
+            class Impl;
+            std::unique_ptr<Impl> impl_;
     };
 } // namespace akkaradb::format::akk

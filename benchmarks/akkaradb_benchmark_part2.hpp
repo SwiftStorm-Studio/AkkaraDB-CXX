@@ -6,6 +6,8 @@
 #pragma once
 
 #include "akkaradb_benchmark.hpp"
+#include "../akkara/internal/include/core/record/MemRecord.hpp"
+#include "../akkara/internal/include/engine/memtable/BPTree.hpp"
 
 namespace akkaradb::benchmark {
     // 4. Read Benchmark - MemTable vs SST
@@ -24,6 +26,16 @@ namespace akkaradb::benchmark {
         private:
             void run_memtable_read(size_t key_count, size_t value_size) {
                 std::cout << "\n--- MemTable Read ---" << std::endl;
+
+                // Print BPTree configuration
+                std::cout << "🔧 BPTree Config:" << std::endl;
+                std::cout << "  MemRecord size: " << sizeof(core::MemRecord) << " bytes" << std::endl;
+
+                // Need to create a dummy instance to get the static values
+                using MapType = engine::memtable::BPTree<core::MemRecord, std::monostate>;
+                std::cout << "  LEAF_ORDER: " << MapType::leaf_order() << std::endl;
+                std::cout << "  INTERNAL_ORDER: " << MapType::internal_order() << std::endl;
+
                 auto base_dir = create_temp_dir("akkdb-read-mem-");
                 LatencyStats stats("MemTable Read");
                 std::vector<int64_t> latencies(key_count);

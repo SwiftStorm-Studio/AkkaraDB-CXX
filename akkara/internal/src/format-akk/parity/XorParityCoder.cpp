@@ -26,9 +26,7 @@
 namespace akkaradb::format {
     std::unique_ptr<XorParityCoder> XorParityCoder::create() { return std::make_unique<akk::XorParityCoderImpl>(); }
 
-    std::vector<core::OwnedBuffer> XorParityCoder::encode(
-        std::span<const core::BufferView> data_blocks
-    ) {
+    std::vector<core::OwnedBuffer> XorParityCoder::encode(std::span<const core::BufferView> data_blocks) {
         if (data_blocks.empty()) { throw std::invalid_argument("XorParityCoder::encode: no data blocks"); }
 
         // Compute XOR of all data blocks
@@ -39,10 +37,7 @@ namespace akkaradb::format {
         return result;
     }
 
-    bool XorParityCoder::verify(
-        std::span<const core::BufferView> data_blocks,
-        std::span<const core::BufferView> parity_blocks
-    ) const noexcept {
+    bool XorParityCoder::verify(std::span<const core::BufferView> data_blocks, std::span<const core::BufferView> parity_blocks) const noexcept {
         if (data_blocks.empty() || parity_blocks.size() != 1) { return false; }
 
         try {
@@ -53,11 +48,7 @@ namespace akkaradb::format {
             const auto& stored_parity = parity_blocks[0];
             if (expected_parity.size() != stored_parity.size()) { return false; }
 
-            return std::memcmp(
-                expected_parity.data(),
-                stored_parity.data(),
-                expected_parity.size()
-            ) == 0;
+            return std::memcmp(expected_parity.data(), stored_parity.data(), expected_parity.size()) == 0;
         }
         catch (...) { return false; }
     }
@@ -94,9 +85,7 @@ namespace akkaradb::format {
 } // namespace akkaradb::format
 
 namespace akkaradb::format::akk {
-    core::OwnedBuffer XorParityCoderImpl::compute_xor(
-        std::span<const core::BufferView> blocks
-    ) {
+    core::OwnedBuffer XorParityCoderImpl::compute_xor(std::span<const core::BufferView> blocks) {
         if (blocks.empty()) { throw std::invalid_argument("compute_xor: no blocks provided"); }
 
         // Validate all blocks are same size
@@ -121,12 +110,16 @@ namespace akkaradb::format::akk {
             return; // Size mismatch, should not happen
         }
 
-        auto* dst_ptr = reinterpret_cast<uint64_t*>(dst.data());
-        const auto* src_ptr = reinterpret_cast<const uint64_t*>(src.data());
         const size_t count = dst.size() / sizeof(uint64_t);
 
-        // XOR in 64-bit chunks for performance
-        for (size_t i = 0; i < count; ++i) { dst_ptr[i] ^= src_ptr[i]; }
+        // XOR in 64-bit chunks for performance (using memcpy for alignment safety)
+        for (size_t i = 0; i < count; ++i) {
+            uint64_t dst_val, src_val;
+            std::memcpy(&dst_val, dst.data() + i * sizeof(uint64_t), sizeof(uint64_t));
+            std::memcpy(&src_val, src.data() + i * sizeof(uint64_t), sizeof(uint64_t));
+            dst_val ^= src_val;
+            std::memcpy(dst.data() + i * sizeof(uint64_t), &dst_val, sizeof(uint64_t));
+        }
 
         // Handle remaining bytes
         if (const size_t remaining = dst.size() % sizeof(uint64_t); remaining > 0) {
@@ -135,9 +128,7 @@ namespace akkaradb::format::akk {
             const auto* src_bytes = src.data() + offset;
 
             for (size_t i = 0; i < remaining; ++i) {
-                dst_bytes[i] = static_cast<std::byte>(
-                    static_cast<uint8_t>(dst_bytes[i]) ^ static_cast<uint8_t>(src_bytes[i])
-                );
+                dst_bytes[i] = static_cast<std::byte>(static_cast<uint8_t>(dst_bytes[i]) ^ static_cast<uint8_t>(src_bytes[i]));
             }
         }
     }

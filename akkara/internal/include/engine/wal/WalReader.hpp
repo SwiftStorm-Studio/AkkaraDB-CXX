@@ -1,8 +1,8 @@
 /*
-* AkkEngine
+* AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -58,73 +58,76 @@ namespace akkaradb::engine::wal {
      * Thread-safety: NOT thread-safe.
      */
     class WalReader {
-    public:
-        /**
+        public:
+            /**
          * Error type encountered during reading.
          */
-        enum class ErrorType {
-            NONE, ///< No error
-            TRUNCATED_FRAME, ///< Incomplete frame at end of file
-            INVALID_MAGIC, ///< Frame magic mismatch
-            CRC_MISMATCH, ///< CRC validation failed
-            MALFORMED_OP, ///< Operation deserialization failed
-            IO_ERROR ///< File I/O error
-        };
+            enum class ErrorType {
+                NONE,
+                ///< No error
+                TRUNCATED_FRAME,
+                ///< Incomplete frame at end of file
+                INVALID_MAGIC,
+                ///< Frame magic mismatch
+                CRC_MISMATCH,
+                ///< CRC validation failed
+                MALFORMED_OP,
+                ///< Operation deserialization failed
+                IO_ERROR ///< File I/O error
+            };
 
-        /**
+            /**
          * Opens a WAL file for reading.
          *
          * @param wal_file Path to WAL file
          * @return Unique pointer to reader
          * @throws std::runtime_error if file cannot be opened
          */
-        [[nodiscard]] static std::unique_ptr<WalReader> open(
-            const std::filesystem::path& wal_file
-        );
+            [[nodiscard]] static std::unique_ptr<WalReader> open(const std::filesystem::path& wal_file);
 
-        ~WalReader();
+            ~WalReader();
 
-        /**
+            /**
          * Reads the next operation from the WAL.
          *
          * @return WalOp if successful, std::nullopt if end-of-file or error
          */
-        [[nodiscard]] std::optional<WalOp> next();
+            [[nodiscard]] std::optional<WalOp> next();
 
-        /**
+            /**
          * Checks if an error occurred during reading.
          */
-        [[nodiscard]] bool has_error() const noexcept;
+            [[nodiscard]] bool has_error() const noexcept;
 
-        /**
+            /**
          * Returns the type of error encountered.
          */
-        [[nodiscard]] ErrorType error_type() const noexcept;
+            [[nodiscard]] ErrorType error_type() const noexcept;
 
-        /**
+            /**
          * Returns the file position where the error occurred.
          */
-        [[nodiscard]] uint64_t error_position() const noexcept;
+            [[nodiscard]] uint64_t error_position() const noexcept;
 
-        /**
+            /**
          * Returns the current file position (bytes read so far).
          */
-        [[nodiscard]] uint64_t current_position() const noexcept;
+            [[nodiscard]] uint64_t current_position() const noexcept;
 
-        /**
+            /**
          * Returns the total file size.
          */
-        [[nodiscard]] uint64_t file_size() const noexcept;
+            [[nodiscard]] uint64_t file_size() const noexcept;
 
-        /**
+            /**
          * Returns the number of operations successfully read.
          */
-        [[nodiscard]] uint64_t operations_read() const noexcept;
+            [[nodiscard]] uint64_t operations_read() const noexcept;
 
-    private:
-        explicit WalReader(const std::filesystem::path& wal_file);
+        private:
+            explicit WalReader(const std::filesystem::path& wal_file);
 
-        class Impl;
-        std::unique_ptr<Impl> impl_;
+            class Impl;
+            std::unique_ptr<Impl> impl_;
     };
 } // namespace akkaradb::engine::wal

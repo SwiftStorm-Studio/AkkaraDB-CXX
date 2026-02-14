@@ -30,43 +30,46 @@ namespace akkaradb::format::akk {
      *   P0 = D[0] ⊕ D[2] ⊕ D[4] ⊕ ... (even indices)
      *   P1 = D[1] ⊕ D[3] ⊕ D[5] ⊕ ... (odd indices)
      *
-     * Can recover from up to 2 block failures:
-     * - If 1 block missing: Use corresponding parity
-     * - If 2 blocks missing: Use both parities
+     * Recovery capability:
+     * - Can recover up to 2 blocks, BUT only if they are from DIFFERENT parity groups
+     * - ✅ Can recover: D[0] (even) + D[1] (odd), D[2] (even) + D[3] (odd)
+     * - ❌ CANNOT recover: D[0] (even) + D[2] (even), D[1] (odd) + D[3] (odd)
+     *
+     * This means the coder can tolerate:
+     * - Any single block failure (100% coverage)
+     * - Two block failures: 50% of cases (only when failures are in different groups)
+     *
+     * For true "any 2 blocks" recovery, use Reed-Solomon codes instead.
      *
      * Thread-safety: Fully thread-safe (stateless).
      */
     class DualXorParityCoderImpl : public DualXorParityCoder {
-    public:
-        DualXorParityCoderImpl() = default;
-        ~DualXorParityCoderImpl() override = default;
+        public:
+            DualXorParityCoderImpl() = default;
+            ~DualXorParityCoderImpl() override = default;
 
-        /**
+            /**
          * Computes XOR of blocks at even indices.
          *
          * @param blocks Input blocks
          * @return XOR of D[0] ⊕ D[2] ⊕ D[4] ⊕ ...
          */
-        [[nodiscard]] static core::OwnedBuffer compute_even_xor(
-            std::span<const core::BufferView> blocks
-        );
+            [[nodiscard]] static core::OwnedBuffer compute_even_xor(std::span<const core::BufferView> blocks);
 
-        /**
+            /**
          * Computes XOR of blocks at odd indices.
          *
          * @param blocks Input blocks
          * @return XOR of D[1] ⊕ D[3] ⊕ D[5] ⊕ ...
          */
-        [[nodiscard]] static core::OwnedBuffer compute_odd_xor(
-            std::span<const core::BufferView> blocks
-        );
+            [[nodiscard]] static core::OwnedBuffer compute_odd_xor(std::span<const core::BufferView> blocks);
 
-        /**
+            /**
          * XORs source into destination (in-place).
          *
          * @param dst Destination buffer (modified)
          * @param src Source buffer
          */
-        static void xor_into(core::BufferView dst, core::BufferView src) noexcept;
+            static void xor_into(core::BufferView dst, core::BufferView src) noexcept;
     };
 } // namespace akkaradb::format::akk

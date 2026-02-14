@@ -19,6 +19,7 @@
 
 // internal/src/engine/sstable/IndexBlock.cpp
 #include "engine/sstable/IndexBlock.hpp"
+#include "core/CRC32C.hpp"
 #include <algorithm>
 #include <stdexcept>
 #include <cstring>
@@ -35,23 +36,6 @@ namespace akkaradb::engine::sstable {
                 hash *= 0x01000193;
             }
             return hash;
-        }
-
-        /**
-         * CRC32C computation.
-         */
-        uint32_t crc32c(const uint8_t* data, size_t size) {
-            auto crc = 0xFFFFFFFF;
-            for (size_t i = 0; i < size; ++i) {
-                crc ^= static_cast<uint32_t>(data[i]);
-                for (auto j = 0; j < 8; ++j) {
-                    const uint32_t mask = (crc & 1)
-                                              ? 0xFFFFFFFF
-                                              : 0;
-                    crc = (crc >> 1) ^ (0x82F63B78 & mask);
-                }
-            }
-            return ~crc;
         }
     } // anonymous namespace
 
@@ -88,7 +72,7 @@ namespace akkaradb::engine::sstable {
 
         // Verify CRC
         const uint32_t stored_crc = *reinterpret_cast<const uint32_t*>(data + HEADER_SIZE + entries_size);
-        const uint32_t computed_crc = crc32c(data, HEADER_SIZE + entries_size);
+        const uint32_t computed_crc = core::CRC32C::compute(data, HEADER_SIZE + entries_size);
         if (stored_crc != computed_crc) { throw std::runtime_error("IndexBlock: CRC mismatch"); }
 
         // Parse entries
@@ -116,23 +100,25 @@ namespace akkaradb::engine::sstable {
         // Normalize search key
         auto key32 = normalize_key(key);
 
-        // Binary search (lower_bound)
-        auto it = std::lower_bound(
+        // Binary search (upper_bound)
+        // upper_bound returns the first entry whose first_key32 is GREATER than the search key.
+        // The key we're looking for is in the previous block.
+        auto it = std::upper_bound(
             entries_.begin(),
             entries_.end(),
             key32,
-            [](const Entry& entry, const std::array<uint8_t, KEY_SIZE>& search_key) {
-                return std::ranges::lexicographical_compare(entry.first_key32, search_key);
+            [](const std::array<uint8_t, KEY_SIZE>& search_key, const Entry& entry) {
+                return std::ranges::lexicographical_compare(search_key, entry.first_key32);
             }
         );
 
-        // If exact match or key > last entry, return that block
-        if (it != entries_.end()) { return static_cast<int64_t>(it->block_offset); }
+        // If upper_bound returns begin(), the key is before the first block
+        // In this case, check the first block (it might still be there if it's the only block)
+        if (it == entries_.begin()) { return static_cast<int64_t>(entries_.front().block_offset); }
 
-        // Key is greater than all entries, check last block
-        if (!entries_.empty()) { return static_cast<int64_t>(entries_.back().block_offset); }
-
-        return -1;
+        // Otherwise, go back one entry (the block that contains keys < search_key)
+        --it;
+        return static_cast<int64_t>(it->block_offset);
     }
 
     std::array<uint8_t, IndexBlock::KEY_SIZE> IndexBlock::normalize_key(std::span<const uint8_t> key) {
@@ -163,10 +149,7 @@ namespace akkaradb::engine::sstable {
         return add_key32(key32, block_offset);
     }
 
-    IndexBlock::Builder& IndexBlock::Builder::add_key32(
-        const std::array<uint8_t, KEY_SIZE>& first_key32,
-        uint64_t block_offset
-    ) {
+    IndexBlock::Builder& IndexBlock::Builder::add_key32(const std::array<uint8_t, KEY_SIZE>& first_key32, uint64_t block_offset) {
         entries_.emplace_back(block_offset, first_key32);
         return *this;
     }
@@ -196,7 +179,7 @@ namespace akkaradb::engine::sstable {
         }
 
         // Write CRC
-        const uint32_t crc = crc32c(data, HEADER_SIZE + entries_size);
+        const uint32_t crc = core::CRC32C::compute(data, HEADER_SIZE + entries_size);
         std::memcpy(data + HEADER_SIZE + entries_size, &crc, 4);
 
         return buffer;

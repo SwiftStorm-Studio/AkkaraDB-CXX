@@ -27,9 +27,7 @@
 namespace akkaradb::format {
     std::unique_ptr<DualXorParityCoder> DualXorParityCoder::create() { return std::make_unique<akk::DualXorParityCoderImpl>(); }
 
-    std::vector<core::OwnedBuffer> DualXorParityCoder::encode(
-        std::span<const core::BufferView> data_blocks
-    ) {
+    std::vector<core::OwnedBuffer> DualXorParityCoder::encode(std::span<const core::BufferView> data_blocks) {
         if (data_blocks.empty()) { throw std::invalid_argument("DualXorParityCoder::encode: no data blocks"); }
 
         // Compute P0 (even indices) and P1 (odd indices)
@@ -42,10 +40,7 @@ namespace akkaradb::format {
         return result;
     }
 
-    bool DualXorParityCoder::verify(
-        std::span<const core::BufferView> data_blocks,
-        std::span<const core::BufferView> parity_blocks
-    ) const noexcept {
+    bool DualXorParityCoder::verify(std::span<const core::BufferView> data_blocks, std::span<const core::BufferView> parity_blocks) const noexcept {
         if (data_blocks.empty() || parity_blocks.size() != 2) { return false; }
 
         try {
@@ -54,12 +49,14 @@ namespace akkaradb::format {
             auto expected_p1 = akk::DualXorParityCoderImpl::compute_odd_xor(data_blocks);
 
             // Compare P0
-            if (expected_p0.size() != parity_blocks[0].size() ||
-                std::memcmp(expected_p0.data(), parity_blocks[0].data(), expected_p0.size()) != 0) { return false; }
+            if (expected_p0.size() != parity_blocks[0].size() || std::memcmp(expected_p0.data(), parity_blocks[0].data(), expected_p0.size()) != 0) {
+                return false;
+            }
 
             // Compare P1
-            if (expected_p1.size() != parity_blocks[1].size() ||
-                std::memcmp(expected_p1.data(), parity_blocks[1].data(), expected_p1.size()) != 0) { return false; }
+            if (expected_p1.size() != parity_blocks[1].size() || std::memcmp(expected_p1.data(), parity_blocks[1].data(), expected_p1.size()) != 0) {
+                return false;
+            }
 
             return true;
         }
@@ -158,9 +155,7 @@ namespace akkaradb::format {
 } // namespace akkaradb::format
 
 namespace akkaradb::format::akk {
-    core::OwnedBuffer DualXorParityCoderImpl::compute_even_xor(
-        std::span<const core::BufferView> blocks
-    ) {
+    core::OwnedBuffer DualXorParityCoderImpl::compute_even_xor(std::span<const core::BufferView> blocks) {
         if (blocks.empty()) { throw std::invalid_argument("compute_even_xor: no blocks provided"); }
 
         const size_t block_size = blocks[0].size();
@@ -177,12 +172,12 @@ namespace akkaradb::format::akk {
         return result;
     }
 
-    core::OwnedBuffer DualXorParityCoderImpl::compute_odd_xor(
-        std::span<const core::BufferView> blocks
-    ) {
+    core::OwnedBuffer DualXorParityCoderImpl::compute_odd_xor(std::span<const core::BufferView> blocks) {
         if (blocks.size() < 2) {
             // No odd-indexed blocks
-            const size_t block_size = blocks.empty() ? 0 : blocks[0].size();
+            const size_t block_size = blocks.empty()
+                                          ? 0
+                                          : blocks[0].size();
             auto result = core::OwnedBuffer::allocate(block_size, 4096);
             result.zero_fill();
             return result;
@@ -205,12 +200,16 @@ namespace akkaradb::format::akk {
     void DualXorParityCoderImpl::xor_into(core::BufferView dst, core::BufferView src) noexcept {
         if (dst.size() != src.size()) { return; }
 
-        auto* dst_ptr = reinterpret_cast<uint64_t*>(dst.data());
-        const auto* src_ptr = reinterpret_cast<const uint64_t*>(src.data());
         const size_t count = dst.size() / sizeof(uint64_t);
 
-        // XOR in 64-bit chunks
-        for (size_t i = 0; i < count; ++i) { dst_ptr[i] ^= src_ptr[i]; }
+        // XOR in 64-bit chunks (using memcpy for alignment safety)
+        for (size_t i = 0; i < count; ++i) {
+            uint64_t dst_val, src_val;
+            std::memcpy(&dst_val, dst.data() + i * sizeof(uint64_t), sizeof(uint64_t));
+            std::memcpy(&src_val, src.data() + i * sizeof(uint64_t), sizeof(uint64_t));
+            dst_val ^= src_val;
+            std::memcpy(dst.data() + i * sizeof(uint64_t), &dst_val, sizeof(uint64_t));
+        }
 
         // Handle remaining bytes
         if (const size_t remaining = dst.size() % sizeof(uint64_t); remaining > 0) {
@@ -219,9 +218,7 @@ namespace akkaradb::format::akk {
             const auto* src_bytes = src.data() + offset;
 
             for (size_t i = 0; i < remaining; ++i) {
-                dst_bytes[i] = static_cast<std::byte>(
-                    static_cast<uint8_t>(dst_bytes[i]) ^ static_cast<uint8_t>(src_bytes[i])
-                );
+                dst_bytes[i] = static_cast<std::byte>(static_cast<uint8_t>(dst_bytes[i]) ^ static_cast<uint8_t>(src_bytes[i]));
             }
         }
     }

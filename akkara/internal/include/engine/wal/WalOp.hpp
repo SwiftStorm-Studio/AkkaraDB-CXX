@@ -26,6 +26,7 @@
 #include <span>
 #include <string_view>
 #include <optional>
+#include <vector>
 
 namespace akkaradb::engine::wal {
     enum class OpType : uint8_t {
@@ -35,27 +36,34 @@ namespace akkaradb::engine::wal {
     class WalOp {
         public:
             [[nodiscard]] static WalOp put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq) noexcept {
-                return WalOp{OpType::PUT, seq, key, value};
+                return WalOp{OpType::PUT, seq, std::vector(key.begin(), key.end()), std::vector(value.begin(), value.end())};
             }
 
             [[nodiscard]] static WalOp put(std::string_view key, std::string_view value, uint64_t seq) noexcept {
                 return WalOp{
                     OpType::PUT,
                     seq,
-                    std::span{reinterpret_cast<const uint8_t*>(key.data()), key.size()},
-                    std::span{reinterpret_cast<const uint8_t*>(value.data()), value.size()}
+                    std::vector(reinterpret_cast<const uint8_t*>(key.data()), reinterpret_cast<const uint8_t*>(key.data()) + key.size()),
+                    std::vector(reinterpret_cast<const uint8_t*>(value.data()), reinterpret_cast<const uint8_t*>(value.data()) + value.size())
                 };
             }
 
-            [[nodiscard]] static WalOp del(std::span<const uint8_t> key, uint64_t seq) noexcept { return WalOp{OpType::DELETE, seq, key, {}}; }
+            [[nodiscard]] static WalOp del(std::span<const uint8_t> key, uint64_t seq) noexcept {
+                return WalOp{OpType::DELETE, seq, std::vector(key.begin(), key.end()), {}};
+            }
 
             [[nodiscard]] static WalOp del(std::string_view key, uint64_t seq) noexcept {
-                return WalOp{OpType::DELETE, seq, std::span{reinterpret_cast<const uint8_t*>(key.data()), key.size()}, {}};
+                return WalOp{
+                    OpType::DELETE,
+                    seq,
+                    std::vector(reinterpret_cast<const uint8_t*>(key.data()), reinterpret_cast<const uint8_t*>(key.data()) + key.size()),
+                    {}
+                };
             }
 
             [[nodiscard]] static WalOp checkpoint(uint64_t seq) noexcept { return WalOp{OpType::CHECKPOINT, seq, {}, {}}; }
 
-            // アクセサ（変更なし）
+            // Accessors now return spans over owned data
             [[nodiscard]] OpType op_type() const noexcept { return op_type_; }
             [[nodiscard]] uint64_t seq() const noexcept { return seq_; }
 
@@ -75,12 +83,12 @@ namespace akkaradb::engine::wal {
             [[nodiscard]] static std::optional<WalOp> deserialize(core::BufferView src);
 
         private:
-            WalOp(OpType op_type, uint64_t seq, std::span<const uint8_t> key, std::span<const uint8_t> value) noexcept
-                : op_type_{op_type}, seq_{seq}, key_{key}, value_{value} {}
+            WalOp(OpType op_type, uint64_t seq, std::vector<uint8_t> key, std::vector<uint8_t> value) noexcept
+                : op_type_{op_type}, seq_{seq}, key_{std::move(key)}, value_{std::move(value)} {}
 
             OpType op_type_;
             uint64_t seq_;
-            std::span<const uint8_t> key_;
-            std::span<const uint8_t> value_;
+            std::vector<uint8_t> key_; // Now owns the data
+            std::vector<uint8_t> value_; // Now owns the data
     };
 } // namespace akkaradb::engine::wal

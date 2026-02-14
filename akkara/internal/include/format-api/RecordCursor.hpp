@@ -1,8 +1,8 @@
 /*
-* AkkEngine
+* AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -56,33 +56,33 @@ namespace akkaradb::format {
      * Thread-safety: NOT thread-safe.
      */
     class RecordCursor {
-    public:
-        virtual ~RecordCursor() = default;
+        public:
+            virtual ~RecordCursor() = default;
 
-        /**
+            /**
          * Checks if more records are available.
          *
          * @return true if try_next() will return a record
          */
-        [[nodiscard]] virtual bool has_next() const noexcept = 0;
+            [[nodiscard]] virtual bool has_next() const noexcept = 0;
 
-        /**
+            /**
          * Reads the next record.
          *
          * @return RecordView if successful, std::nullopt if malformed or end
          */
-        [[nodiscard]] virtual std::optional<core::RecordView> try_next() = 0;
+            [[nodiscard]] virtual std::optional<core::RecordView> try_next() = 0;
 
-        /**
+            /**
          * Convenience method that throws on malformed data.
          *
          * @return RecordView
          * @throws std::runtime_error if no more records or malformed
          */
-        [[nodiscard]] core::RecordView next() {
-            auto opt = try_next();
-            if (!opt) { throw std::runtime_error("RecordCursor::next: no more records or malformed data"); }
-            return *opt;
-        }
+            [[nodiscard]] core::RecordView next() {
+                auto opt = try_next();
+                if (!opt) { throw std::runtime_error("RecordCursor::next: no more records or malformed data"); }
+                return *opt;
+            }
     };
 } // namespace akkaradb::format

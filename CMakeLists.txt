@@ -97,6 +97,9 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/core/record/RecordView.hpp
         ${INTERNAL_INCLUDE_DIR}/core/record/MemRecord.hpp
 
+        # Core - CRC
+        ${INTERNAL_INCLUDE_DIR}/core/CRC32C.hpp
+
         # Format - API
         ${INTERNAL_INCLUDE_DIR}/format-api/BlockPacker.hpp
         ${INTERNAL_INCLUDE_DIR}/format-api/BlockUnpacker.hpp
@@ -123,6 +126,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalReader.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalRecovery.hpp
 
+        ${INTERNAL_INCLUDE_DIR}/engine/memtable/BPTree.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/memtable/MemTable.hpp
 
         ${INTERNAL_INCLUDE_DIR}/engine/manifest/Manifest.hpp
@@ -149,6 +153,9 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/core/record/AKHdr32.cpp
         ${INTERNAL_SRC_DIR}/core/record/RecordView.cpp
         ${INTERNAL_SRC_DIR}/core/record/MemRecord.cpp
+
+        # Core - CRC
+        ${INTERNAL_SRC_DIR}/core/CRC32C.cpp
 
         # Format - Implementation
         ${INTERNAL_SRC_DIR}/format-akk/AkkBlockPacker.cpp
@@ -268,6 +275,7 @@ target_include_directories(akkaradb_benchmark
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
         ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_DIR}/include
 )
 
 # Set output directory

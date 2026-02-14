@@ -2,7 +2,7 @@
  * AkkEngine
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -60,38 +60,42 @@ namespace akkaradb::core {
      * concurrently from multiple threads.
      */
     class BufferPool {
-    public:
-        /**
+        public:
+            /**
          * Pool statistics for monitoring.
          */
-        struct Stats {
-            uint64_t total_acquired{0}; ///< Total buffers acquired
-            uint64_t total_released{0}; ///< Total buffers released
-            uint64_t tls_hits{0}; ///< Acquisitions from TLS (fast path)
-            uint64_t shard_hits{0}; ///< Acquisitions from global shard
-            uint64_t allocations{0}; ///< Fresh allocations (cold path)
-            size_t current_pooled{0}; ///< Current buffers in global pool
-            size_t peak_allocated{0}; ///< Peak simultaneous allocations
+            struct Stats {
+                uint64_t total_acquired{0}; ///< Total buffers acquired
+                uint64_t total_released{0}; ///< Total buffers released
+                uint64_t tls_hits{0}; ///< Acquisitions from TLS (fast path)
+                uint64_t shard_hits{0}; ///< Acquisitions from global shard
+                uint64_t allocations{0}; ///< Fresh allocations (cold path)
+                size_t current_pooled{0}; ///< Current buffers in global pool
+                size_t peak_allocated{0}; ///< Peak simultaneous allocations
 
-            /**
+                /**
              * Returns TLS hit rate (0.0 to 1.0).
              * Higher is better - indicates lock-free fast path usage.
              */
-            [[nodiscard]] double tls_hit_rate() const noexcept {
-                const auto total = tls_hits + shard_hits + allocations;
-                return total > 0 ? static_cast<double>(tls_hits) / total : 0.0;
-            }
+                [[nodiscard]] double tls_hit_rate() const noexcept {
+                    const auto total = tls_hits + shard_hits + allocations;
+                    return total > 0
+                               ? static_cast<double>(tls_hits) / total
+                               : 0.0;
+                }
 
-            /**
+                /**
              * Returns overall pool hit rate (TLS + shard hits).
              */
-            [[nodiscard]] double pool_hit_rate() const noexcept {
-                const auto total = tls_hits + shard_hits + allocations;
-                return total > 0 ? static_cast<double>(tls_hits + shard_hits) / total : 0.0;
-            }
-        };
+                [[nodiscard]] double pool_hit_rate() const noexcept {
+                    const auto total = tls_hits + shard_hits + allocations;
+                    return total > 0
+                               ? static_cast<double>(tls_hits + shard_hits) / total
+                               : 0.0;
+                }
+            };
 
-        /**
+            /**
          * Creates a new BufferPool.
          *
          * @param block_size Size of each buffer in bytes
@@ -101,30 +105,26 @@ namespace akkaradb::core {
          * @throws std::bad_alloc if allocation fails
          * @throws std::invalid_argument if alignment is invalid
          */
-        [[nodiscard]] static std::unique_ptr<BufferPool> create(
-            size_t block_size = 32 * 1024,
-            size_t alignment = 4096,
-            size_t max_pooled = 256
-        );
+            [[nodiscard]] static std::unique_ptr<BufferPool> create(size_t block_size = 32 * 1024, size_t alignment = 4096, size_t max_pooled = 256);
 
-        /**
+            /**
          * Destructor.
          */
-        ~BufferPool();
+            ~BufferPool();
 
-        /**
+            /**
          * Non-copyable.
          */
-        BufferPool(const BufferPool&) = delete;
-        BufferPool& operator=(const BufferPool&) = delete;
+            BufferPool(const BufferPool&) = delete;
+            BufferPool& operator=(const BufferPool&) = delete;
 
-        /**
+            /**
          * Non-movable (shared state with TLS).
          */
-        BufferPool(BufferPool&&) = delete;
-        BufferPool& operator=(BufferPool&&) = delete;
+            BufferPool(BufferPool&&) = delete;
+            BufferPool& operator=(BufferPool&&) = delete;
 
-        /**
+            /**
          * Acquires a buffer from the pool or allocates a new one.
          *
          * Fast path: Returns from thread-local cache (no locks).
@@ -134,9 +134,9 @@ namespace akkaradb::core {
          * @return An OwnedBuffer of size block_size
          * @throws std::bad_alloc if allocation fails
          */
-        [[nodiscard]] OwnedBuffer acquire(bool skip_zero_fill = false);
+            [[nodiscard]] OwnedBuffer acquire(bool skip_zero_fill = false);
 
-        /**
+            /**
          * Acquires multiple buffers in a single operation.
          *
          * More efficient than calling acquire() repeatedly when multiple
@@ -148,18 +148,18 @@ namespace akkaradb::core {
          * @return Vector of OwnedBuffers
          * @throws std::bad_alloc if allocation fails
          */
-        [[nodiscard]] std::vector<OwnedBuffer> acquire_batch(size_t count, bool skip_zero_fill = false);
+            [[nodiscard]] std::vector<OwnedBuffer> acquire_batch(size_t count, bool skip_zero_fill = false);
 
-        /**
+            /**
          * Releases multiple buffers back to the pool.
          *
          * More efficient than calling release() repeatedly.
          *
          * @param buffers Buffers to release (moved)
          */
-        void release_batch(std::vector<OwnedBuffer>&& buffers) noexcept;
+            void release_batch(std::vector<OwnedBuffer>&& buffers) noexcept;
 
-        /**
+            /**
          * Releases a buffer back to the pool.
          *
          * Fast path: Returns to thread-local cache (no locks).
@@ -169,9 +169,9 @@ namespace akkaradb::core {
          *
          * @param buffer Buffer to release (moved)
          */
-        void release(OwnedBuffer&& buffer) noexcept;
+            void release(OwnedBuffer&& buffer) noexcept;
 
-        /**
+            /**
      * Returns current pool statistics.
      *
      * Thread-safe: Can be called concurrently with other operations.
@@ -179,28 +179,28 @@ namespace akkaradb::core {
      *
      * @return Pool statistics snapshot
      */
-        [[nodiscard]] Stats stats() const noexcept;
+            [[nodiscard]] Stats stats() const noexcept;
 
-        /**
+            /**
      * Returns the configured block size.
      */
-        [[nodiscard]] size_t block_size() const noexcept;
+            [[nodiscard]] size_t block_size() const noexcept;
 
-        /**
+            /**
      * Returns the configured alignment.
      */
-        [[nodiscard]] size_t alignment() const noexcept;
+            [[nodiscard]] size_t alignment() const noexcept;
 
-    private:
-        /**
+        private:
+            /**
      * Private constructor (use create() factory method).
      */
-        BufferPool(size_t block_size, size_t alignment, size_t max_pooled);
+            BufferPool(size_t block_size, size_t alignment, size_t max_pooled);
 
-        /**
+            /**
      * Pimpl: Implementation class (defined in .cpp).
      */
-        class Impl;
-        std::unique_ptr<Impl> impl_;
+            class Impl;
+            std::unique_ptr<Impl> impl_;
     };
 } // namespace akkaradb::core

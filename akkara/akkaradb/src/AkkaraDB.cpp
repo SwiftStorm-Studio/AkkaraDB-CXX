@@ -25,6 +25,7 @@
 #include "format-api/FlushPolicy.hpp"
 #include <stdexcept>
 #include <utility>
+#include <shared_mutex>
 
 namespace akkaradb {
     // ==================== Record::Impl ====================
@@ -78,26 +79,31 @@ namespace akkaradb {
                 : internal_db_{std::move(internal_db)} { if (!internal_db_) { throw std::runtime_error("AkkaraDB: failed to initialize database"); } }
 
             [[nodiscard]] uint64_t put(std::span<const uint8_t> key, std::span<const uint8_t> value) {
+                std::shared_lock lock{mutex_};
                 check_open();
                 return internal_db_->put(key, value);
             }
 
             [[nodiscard]] uint64_t del(std::span<const uint8_t> key) {
+                std::shared_lock lock{mutex_};
                 check_open();
                 return internal_db_->del(key);
             }
 
             [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::span<const uint8_t> key) {
+                std::shared_lock lock{mutex_};
                 check_open();
                 return internal_db_->get(key);
             }
 
             [[nodiscard]] bool compare_and_swap(std::span<const uint8_t> key, uint64_t expected_seq, const std::optional<std::span<const uint8_t>>& new_value) {
+                std::shared_lock lock{mutex_};
                 check_open();
                 return internal_db_->compare_and_swap(key, expected_seq, new_value);
             }
 
             [[nodiscard]] std::vector<Record> range(std::span<const uint8_t> start_key, const std::optional<std::span<const uint8_t>>& end_key) {
+                std::shared_lock lock{mutex_};
                 check_open();
 
                 // Get internal records
@@ -116,16 +122,19 @@ namespace akkaradb {
             }
 
             [[nodiscard]] uint64_t last_seq() const {
+                std::shared_lock lock{mutex_};
                 check_open();
                 return internal_db_->last_seq();
             }
 
             void flush() {
+                std::shared_lock lock{mutex_};
                 check_open();
                 internal_db_->flush();
             }
 
             void close() noexcept {
+                std::unique_lock lock{mutex_};
                 if (internal_db_) {
                     try { internal_db_->close(); }
                     catch (...) {
@@ -135,11 +144,15 @@ namespace akkaradb {
                 }
             }
 
-            [[nodiscard]] bool is_closed() const noexcept { return internal_db_ == nullptr; }
+            [[nodiscard]] bool is_closed() const noexcept {
+                std::shared_lock lock{mutex_};
+                return internal_db_ == nullptr;
+            }
 
         private:
             void check_open() const { if (!internal_db_) { throw std::runtime_error("AkkaraDB: database is closed"); } }
 
+            mutable std::shared_mutex mutex_;
             std::unique_ptr<engine::AkkEngine> internal_db_;
     };
 

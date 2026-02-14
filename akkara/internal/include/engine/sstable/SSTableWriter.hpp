@@ -1,8 +1,8 @@
 /*
-* AkkEngine
+* AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -65,8 +65,8 @@ namespace akkaradb::engine::sstable {
      * Thread-safety: NOT thread-safe. Single writer only.
      */
     class SSTableWriter {
-    public:
-        /**
+        public:
+            /**
          * Creates SSTableWriter.
          *
          * @param file_path Output file path
@@ -76,16 +76,16 @@ namespace akkaradb::engine::sstable {
          * @return Unique pointer to writer
          * @throws std::runtime_error if file cannot be created
          */
-        [[nodiscard]] static std::unique_ptr<SSTableWriter> create(
-            std::filesystem::path& file_path,
-            std::shared_ptr<core::BufferPool> buffer_pool,
-            uint64_t expected_entries,
-            double bloom_fp_rate = 0.01
-        );
+            [[nodiscard]] static std::unique_ptr<SSTableWriter> create(
+                std::filesystem::path& file_path,
+                std::shared_ptr<core::BufferPool> buffer_pool,
+                uint64_t expected_entries,
+                double bloom_fp_rate = 0.01
+            );
 
-        ~SSTableWriter();
+            ~SSTableWriter();
 
-        /**
+            /**
          * Writes a record.
          *
          * Records MUST be written in ascending key order.
@@ -93,59 +93,54 @@ namespace akkaradb::engine::sstable {
          * @param record Record to write
          * @throws std::runtime_error if record too large for block
          */
-        void write(const core::MemRecord& record);
+            void write(const core::MemRecord& record);
 
-        /**
+            /**
          * Writes multiple records.
          *
          * @param records Records to write (must be sorted)
          */
-        void write_all(const std::vector<core::MemRecord>& records);
+            void write_all(const std::vector<core::MemRecord>& records);
 
-        /**
+            /**
          * Finalizes SSTable.
          *
          * Writes Index, Bloom, Footer, and computes file CRC.
          *
          * @return Seal result (offsets and entry count)
          */
-        struct SealResult {
-            uint64_t index_off;
-            uint64_t bloom_off;
-            uint64_t entries;
-        };
+            struct SealResult {
+                uint64_t index_off;
+                uint64_t bloom_off;
+                uint64_t entries;
+            };
 
-        [[nodiscard]] SealResult seal();
+            [[nodiscard]] SealResult seal();
 
-        /**
+            /**
          * Closes file.
          */
-        void close();
+            void close();
 
-        /**
+            /**
          * Returns total entries written.
          */
-        [[nodiscard]] uint64_t entries_written() const noexcept { return total_entries_; }
+            [[nodiscard]] uint64_t entries_written() const noexcept { return total_entries_; }
 
-    private:
-        SSTableWriter(
-            std::filesystem::path& file_path,
-            std::shared_ptr<core::BufferPool> buffer_pool,
-            uint64_t expected_entries,
-            double bloom_fp_rate
-        );
+        private:
+            SSTableWriter(std::filesystem::path& file_path, std::shared_ptr<core::BufferPool> buffer_pool, uint64_t expected_entries, double bloom_fp_rate);
 
-        void on_block_ready(core::OwnedBuffer block);
+            void on_block_ready(core::OwnedBuffer block);
 
-        std::filesystem::path file_path_;
-        std::shared_ptr<core::BufferPool> buffer_pool_;
-        std::ofstream file_;
-        uint64_t total_entries_;
+            std::filesystem::path file_path_;
+            std::shared_ptr<core::BufferPool> buffer_pool_;
+            std::ofstream file_;
+            uint64_t total_entries_;
 
-        std::unique_ptr<format::akk::AkkBlockPacker> packer_;
-        IndexBlock::Builder index_builder_;
-        BloomFilter::Builder bloom_builder_;
+            std::unique_ptr<format::akk::AkkBlockPacker> packer_;
+            IndexBlock::Builder index_builder_;
+            BloomFilter::Builder bloom_builder_;
 
-        std::vector<uint8_t> pending_first_key_;
+            std::vector<uint8_t> pending_first_key_;
     };
 } // namespace akkaradb::engine::sstable

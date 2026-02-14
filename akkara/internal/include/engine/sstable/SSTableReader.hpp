@@ -1,8 +1,8 @@
 /*
-* AkkEngine
+* AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -135,11 +135,19 @@ namespace akkaradb::engine::sstable {
             /**
          * Point lookup (zero-copy).
          *
-         * Returns RecordView pointing into cached block.
-         * RecordView is valid until block is evicted from cache.
+         * WARNING: UNSAFE - RecordView points into cached block.
+         * The returned RecordView becomes invalid when:
+         * 1. The block is evicted from the LRU cache
+         * 2. Another get() or range operation evicts the block
+         * 3. The SSTableReader is destroyed
+         *
+         * RECOMMENDATION: Use get_copy() instead for safe value access.
+         * This method exists only for performance-critical code where
+         * the caller can guarantee immediate consumption of the RecordView.
          *
          * @param key Key to find
          * @return RecordView if found, nullopt otherwise
+         * @deprecated Use get_copy() for safe access
          */
             [[nodiscard]] std::optional<core::RecordView> get(std::span<const uint8_t> key);
 

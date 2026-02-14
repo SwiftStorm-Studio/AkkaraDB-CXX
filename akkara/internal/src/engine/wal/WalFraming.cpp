@@ -180,7 +180,18 @@ namespace akkaradb::engine::wal {
     // ==================== CRC Computation ====================
 
     uint32_t WalFraming::compute_frame_crc(core::BufferView frame_view, size_t total_len) noexcept {
-        try { return frame_view.crc32c(0, total_len); }
-        catch (...) { return 0; }
+        try {
+            const uint32_t crc = frame_view.crc32c(0, total_len);
+            // Ensure we never return 0, which could be a valid CRC
+            // If CRC happens to be 0, use 1 instead to distinguish from error case
+            return crc == 0
+                       ? 1
+                       : crc;
+        }
+        catch (...) {
+            // Return a value that's unlikely to match a real CRC
+            // Use 0xFFFFFFFF instead of 0 to avoid collision with valid CRCs
+            return 0xFFFFFFFF;
+        }
     }
 } // namespace akkaradb::engine::wal

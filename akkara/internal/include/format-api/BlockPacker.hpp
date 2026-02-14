@@ -1,8 +1,8 @@
 /*
-* AkkEngine
+* AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -61,24 +61,24 @@ namespace akkaradb::format {
      * Thread-safety: NOT thread-safe. Single producer only.
      */
     class BlockPacker {
-    public:
-        /**
+        public:
+            /**
          * Callback invoked when a block is ready.
          *
          * @param block Completed block (ownership transferred to callback)
          */
-        using BlockReadyCallback = std::function<void(core::OwnedBuffer block)>;
+            using BlockReadyCallback = std::function<void(core::OwnedBuffer block)>;
 
-        virtual ~BlockPacker() = default;
+            virtual ~BlockPacker() = default;
 
-        /**
+            /**
          * Begins a new block.
          *
          * If a non-empty block is currently open, it's automatically ended first.
          */
-        virtual void begin_block() = 0;
+            virtual void begin_block() = 0;
 
-        /**
+            /**
          * Attempts to append a record to the current block.
          *
          * If the block doesn't have enough space, returns false without
@@ -93,16 +93,16 @@ namespace akkaradb::format {
          * @param mini_key First 8 bytes of key (LE-packed)
          * @return true if appended, false if block is full
          */
-        [[nodiscard]] virtual bool try_append(
-            std::span<const uint8_t> key,
-            std::span<const uint8_t> value,
-            uint64_t seq,
-            uint8_t flags,
-            uint64_t key_fp64,
-            uint64_t mini_key
-        ) = 0;
+            [[nodiscard]] virtual bool try_append(
+                std::span<const uint8_t> key,
+                std::span<const uint8_t> value,
+                uint64_t seq,
+                uint8_t flags,
+                uint64_t key_fp64,
+                uint64_t mini_key
+            ) = 0;
 
-        /**
+            /**
          * Convenience overload that computes key_fp64 and mini_key automatically.
          *
          * @param key Key bytes
@@ -111,48 +111,48 @@ namespace akkaradb::format {
          * @param flags Flags
          * @return true if appended, false if block is full
          */
-        [[nodiscard]] bool try_append(
-            std::span<const uint8_t> key,
-            std::span<const uint8_t> value,
-            uint64_t seq,
-            uint8_t flags = core::AKHdr32::FLAG_NORMAL
-        ) {
-            const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
-            const uint64_t mini = core::AKHdr32::build_mini_key(key.data(), key.size());
-            return try_append(key, value, seq, flags, fp64, mini);
-        }
+            [[nodiscard]] bool try_append(
+                std::span<const uint8_t> key,
+                std::span<const uint8_t> value,
+                uint64_t seq,
+                uint8_t flags = core::AKHdr32::FLAG_NORMAL
+            ) {
+                const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
+                const uint64_t mini = core::AKHdr32::build_mini_key(key.data(), key.size());
+                return try_append(key, value, seq, flags, fp64, mini);
+            }
 
-        /**
+            /**
          * Ends the current block and emits it via callback.
          *
          * No-op if no block is open or block is empty.
          */
-        virtual void end_block() = 0;
+            virtual void end_block() = 0;
 
-        /**
+            /**
          * Flushes any open block.
          *
          * Equivalent to end_block() if a block is open and non-empty.
          */
-        virtual void flush() = 0;
+            virtual void flush() = 0;
 
-        /**
+            /**
          * Returns the block size in bytes.
          */
-        [[nodiscard]] virtual size_t block_size() const noexcept = 0;
+            [[nodiscard]] virtual size_t block_size() const noexcept = 0;
 
-        /**
+            /**
          * Returns the number of bytes remaining in the current block.
          *
          * @return Remaining space, or 0 if no block is open
          */
-        [[nodiscard]] virtual size_t remaining() const noexcept = 0;
+            [[nodiscard]] virtual size_t remaining() const noexcept = 0;
 
-        /**
+            /**
      * Returns the number of records in the current block.
      *
      * @return Record count, or 0 if no block is open
      */
-        [[nodiscard]] virtual size_t record_count() const noexcept = 0;
+            [[nodiscard]] virtual size_t record_count() const noexcept = 0;
     };
 } // namespace akkaradb::format

@@ -1,8 +1,8 @@
 /*
-* AkkEngine
+* AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -61,10 +61,10 @@ namespace akkaradb::format {
      * Cursors are NOT thread-safe.
      */
     class BlockUnpacker {
-    public:
-        virtual ~BlockUnpacker() = default;
+        public:
+            virtual ~BlockUnpacker() = default;
 
-        /**
+            /**
          * Creates a forward-only cursor over records in a block.
          *
          * The cursor is valid until the underlying buffer is released.
@@ -75,9 +75,9 @@ namespace akkaradb::format {
          * @throws std::runtime_error if CRC validation fails
          * @throws std::out_of_range if block is malformed
          */
-        [[nodiscard]] virtual std::unique_ptr<RecordCursor> cursor(core::BufferView block) const = 0;
+            [[nodiscard]] virtual std::unique_ptr<RecordCursor> cursor(core::BufferView block) const = 0;
 
-        /**
+            /**
          * Unpacks all records from a block into a vector.
          *
          * Records are appended to the provided vector.
@@ -87,9 +87,9 @@ namespace akkaradb::format {
          * @throws std::runtime_error if CRC validation fails
          * @throws std::out_of_range if block is malformed
          */
-        virtual void unpack_into(core::BufferView block, std::vector<core::RecordView>& out) const = 0;
+            virtual void unpack_into(core::BufferView block, std::vector<core::RecordView>& out) const = 0;
 
-        /**
+            /**
          * Unpacks all records and returns a new vector.
          *
          * @param block Block buffer
@@ -97,13 +97,13 @@ namespace akkaradb::format {
          * @throws std::runtime_error if CRC validation fails
          * @throws std::out_of_range if block is malformed
          */
-        [[nodiscard]] std::vector<core::RecordView> unpack(core::BufferView block) const {
-            std::vector<core::RecordView> records;
-            unpack_into(block, records);
-            return records;
-        }
+            [[nodiscard]] std::vector<core::RecordView> unpack(core::BufferView block) const {
+                std::vector<core::RecordView> records;
+                unpack_into(block, records);
+                return records;
+            }
 
-        /**
+            /**
          * Validates a block without unpacking.
          *
          * Checks CRC and basic structure.
@@ -111,11 +111,11 @@ namespace akkaradb::format {
          * @param block Block buffer
          * @return true if valid, false otherwise
          */
-        [[nodiscard]] virtual bool validate(core::BufferView block) const noexcept = 0;
+            [[nodiscard]] virtual bool validate(core::BufferView block) const noexcept = 0;
 
-        /**
+            /**
          * Returns the block size this unpacker expects.
          */
-        [[nodiscard]] virtual size_t block_size() const noexcept = 0;
+            [[nodiscard]] virtual size_t block_size() const noexcept = 0;
     };
 } // namespace akkaradb::format

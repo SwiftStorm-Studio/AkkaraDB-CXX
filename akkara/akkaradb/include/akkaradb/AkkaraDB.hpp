@@ -189,10 +189,18 @@ namespace akkaradb {
             /**
          * Compare-and-swap operation.
          *
+         * LIMITATION: Only works for keys currently in MemTable.
+         * If the key has been flushed to SSTable, CAS will always fail (return false)
+         * even if the expected_seq matches. This is a design limitation to maintain
+         * atomicity - atomic CAS across MemTable and SSTable is not supported.
+         *
+         * For reliable CAS, ensure the key was recently written and not yet flushed,
+         * or use get() to check the current seq before attempting CAS.
+         *
          * @param key Key bytes
          * @param expected_seq Expected current sequence number
          * @param new_value New value (nullopt = delete)
-         * @return true if successful, false if seq mismatch
+         * @return true if successful, false if seq mismatch or key already flushed
          * @throws std::runtime_error if database is closed or WAL write fails
          */
             [[nodiscard]] bool compare_and_swap(std::span<const uint8_t> key, uint64_t expected_seq, const std::optional<std::span<const uint8_t>>& new_value);

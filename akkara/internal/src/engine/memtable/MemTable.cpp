@@ -19,6 +19,7 @@
 
 // internal/src/engine/memtable/MemTable.cpp
 #include "engine/memtable/MemTable.hpp"
+#include "engine/memtable/BPTree.hpp"
 #include <map>
 #include <shared_mutex>
 #include <thread>
@@ -50,7 +51,7 @@ namespace akkaradb::engine::memtable {
      */
     class Shard {
         public:
-            using Map = std::map<core::MemRecord, std::monostate, MemRecordCmp>;
+            using Map = BPTree<core::MemRecord, std::monostate, MemRecordCmp>;
 
             Shard() : approx_bytes_{0}, next_imm_id_{0} {}
 
@@ -58,15 +59,21 @@ namespace akkaradb::engine::memtable {
             bool put(core::MemRecord record) {
                 std::unique_lock lock{mutex_};
 
-                auto [it, inserted] = active_.emplace(record, std::monostate{});
-                if (inserted) { approx_bytes_ += record.approx_size(); }
-                else {
-                    approx_bytes_ -= it->first.approx_size();
-                    approx_bytes_ += record.approx_size();
-                    auto node = active_.extract(it);
-                    node.key() = std::move(record);
-                    active_.insert(std::move(node));
+                const size_t new_size = record.approx_size();
+
+                // Check if key exists and subtract old size
+                auto it = active_.lower_bound(record.key());
+                if (it != active_.end()) {
+                    const auto& pair = *it;
+                    if (pair.first.compare_key(record.key()) == 0) {
+                        // Key exists, subtract old size
+                        approx_bytes_ -= pair.first.approx_size();
+                    }
                 }
+
+                // Insert or update
+                active_.put(std::move(record), std::monostate{});
+                approx_bytes_ += new_size;
 
                 return approx_bytes_ > threshold_bytes_;
             }
@@ -76,12 +83,20 @@ namespace akkaradb::engine::memtable {
             std::shared_ptr<const core::MemRecord> get(std::span<const uint8_t> key) const {
                 std::shared_lock lock{mutex_};
 
-                auto it = active_.find(key);
-                if (it != active_.end()) { return std::make_shared<const core::MemRecord>(it->first); }
+                // Search in active tree using lower_bound
+                auto it = active_.lower_bound(key);
+                if (it != active_.end()) {
+                    const auto& pair = *it;
+                    if (pair.first.compare_key(key) == 0) { return std::make_shared<const core::MemRecord>(pair.first); }
+                }
 
+                // Search in immutables (newest to oldest)
                 for (auto rit = immutables_.rbegin(); rit != immutables_.rend(); ++rit) {
-                    auto it2 = rit->second.find(key);
-                    if (it2 != rit->second.end()) { return std::make_shared<const core::MemRecord>(it2->first); }
+                    auto it2 = rit->second.lower_bound(key);
+                    if (it2 != rit->second.end()) {
+                        const auto& pair = *it2;
+                        if (pair.first.compare_key(key) == 0) { return std::make_shared<const core::MemRecord>(pair.first); }
+                    }
                 }
 
                 return nullptr;
@@ -92,19 +107,29 @@ namespace akkaradb::engine::memtable {
                 if (active_.empty()) return {0, {}};
 
                 const uint64_t id = next_imm_id_++;
-                immutables_.push_back({id, std::move(active_)});
+
+                // Move active tree into a temporary for iteration
+                Map sealed_tree = std::move(active_);
                 active_ = Map{};
                 approx_bytes_ = 0;
 
+                // Extract all records with move (no copy)
                 std::vector<core::MemRecord> result;
-                result.reserve(immutables_.back().second.size());
-                for (const auto& rec : immutables_.back().second | std::views::keys) { result.push_back(rec); }
+                result.reserve(sealed_tree.size());
+                for (auto it = sealed_tree.begin(); it != sealed_tree.end(); ++it) {
+                    // Move the MemRecord out of the tree
+                    result.push_back(std::move(const_cast<core::MemRecord&>((*it).first)));
+                }
+
+                // Store the now-empty tree in immutables for cleanup tracking
+                immutables_.push_back({id, std::move(sealed_tree)});
+
                 return {id, std::move(result)};
             }
 
             void on_flushed(uint64_t id) {
                 std::unique_lock lock{mutex_};
-                immutables_.erase(std::remove_if(immutables_.begin(), immutables_.end(), [id](const auto& p) { return p.first == id; }), immutables_.end());
+                std::erase_if(immutables_, [id](const auto& p) { return p.first == id; });
             }
 
             size_t approx_bytes() const noexcept {
@@ -127,15 +152,17 @@ namespace akkaradb::engine::memtable {
                     std::vector<core::MemRecord> slice;
                     auto it = m.lower_bound(start_span);
                     for (; it != m.end(); ++it) {
-                        const auto key = it->first.key();
+                        const auto& pair = *it;
+                        const auto key = pair.first.key();
                         if (!end.empty() && !std::ranges::lexicographical_compare(key, end_span)) break;
-                        slice.push_back(it->first);
+                        // Copy is unavoidable here - MemRecord must outlive the lock
+                        slice.push_back(pair.first);
                     }
                     if (!slice.empty()) result.push_back(std::move(slice));
                 };
 
                 collect(active_);
-                for (const auto& imm : immutables_) collect(imm.second);
+                for (const auto& val : immutables_ | std::views::values) collect(val);
                 return result;
             }
 

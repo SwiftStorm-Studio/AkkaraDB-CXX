@@ -254,9 +254,10 @@ namespace akkaradb::engine::sstable {
             same_key.push_back(std::move(first));
 
             while (!pq.empty()) {
-                auto& peek = pq.top();
+                const auto& peek = pq.top();
                 if (same_key[0].record.compare_key(peek.record) == 0) {
-                    same_key.push_back(std::move(const_cast<HeapEntry&>(peek)));
+                    // Copy from const reference (no UB)
+                    same_key.push_back(peek);
                     pq.pop();
                 }
                 else { break; }

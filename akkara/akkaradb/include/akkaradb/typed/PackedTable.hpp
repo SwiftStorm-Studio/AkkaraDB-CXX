@@ -134,17 +134,18 @@ namespace akkaradb::typed {
         if (remaining >= 2) k1 ^= static_cast<uint64_t>(tail[1]) << 8;
         if (remaining >= 1) k1 ^= static_cast<uint64_t>(tail[0]) << 0;
 
-        if (k1 != 0) {
-            k1 *= c1;
-            k1 = rotl64(k1, 31);
-            k1 *= c2;
-            h1 ^= k1;
-        }
-        if (k2 != 0) {
+        // Mix tail values according to standard Murmur3 (even if zero)
+        if (remaining > 8) {
             k2 *= c2;
             k2 = rotl64(k2, 33);
             k2 *= c1;
             h2 ^= k2;
+        }
+        if (remaining > 0) {
+            k1 *= c1;
+            k1 = rotl64(k1, 31);
+            k1 *= c2;
+            h1 ^= k1;
         }
 
         h1 ^= len;
@@ -291,10 +292,7 @@ namespace akkaradb::typed {
                 constexpr auto field_ptrs = Entity::akkara_field_ptrs;
 
                 size_t estimated_size = 0;
-                std::apply(
-                    [&](auto... ptrs) { estimated_size = (estimate_size(entity.*ptrs) + ...); },
-                    field_ptrs
-                );
+                std::apply([&](auto... ptrs) { estimated_size = (estimate_size(entity.*ptrs) + ...); }, field_ptrs);
                 buf.reserve(estimated_size);
 
                 std::apply([&](auto... ptrs) { (serialize(buf, entity.*ptrs), ...); }, field_ptrs);

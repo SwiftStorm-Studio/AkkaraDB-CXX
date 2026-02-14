@@ -1,8 +1,8 @@
 /*
-* AkkEngine
+* AkkaraDB
  * Copyright (C) 2025 Swift Storm Studio
  *
- * This file is part of AkkEngine.
+ * This file is part of AkkaraDB.
  *
  * AkkEngine is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -43,31 +43,31 @@ namespace akkaradb::format::akk {
      * Cursors are NOT thread-safe.
      */
     class AkkBlockUnpacker : public BlockUnpacker {
-    public:
-        /**
+        public:
+            /**
          * Block size constant (32 KiB).
          */
-        static constexpr size_t BLOCK_SIZE = 32 * 1024;
+            static constexpr size_t BLOCK_SIZE = 32 * 1024;
 
-        /**
+            /**
          * Creates an AkkBlockUnpacker.
          *
          * @return Unique pointer to unpacker
          */
-        [[nodiscard]] static std::unique_ptr<AkkBlockUnpacker> create();
+            [[nodiscard]] static std::unique_ptr<AkkBlockUnpacker> create();
 
-        ~AkkBlockUnpacker() override;
+            ~AkkBlockUnpacker() override;
 
-        [[nodiscard]] std::unique_ptr<RecordCursor> cursor(core::BufferView block) const override;
+            [[nodiscard]] std::unique_ptr<RecordCursor> cursor(core::BufferView block) const override;
 
-        void unpack_into(core::BufferView block, std::vector<core::RecordView>& out) const override;
+            void unpack_into(core::BufferView block, std::vector<core::RecordView>& out) const override;
 
-        [[nodiscard]] bool validate(core::BufferView block) const noexcept override;
+            [[nodiscard]] bool validate(core::BufferView block) const noexcept override;
 
-        [[nodiscard]] size_t block_size() const noexcept override { return BLOCK_SIZE; }
+            [[nodiscard]] size_t block_size() const noexcept override { return BLOCK_SIZE; }
 
-    private:
-        AkkBlockUnpacker() = default;
+        private:
+            AkkBlockUnpacker() = default;
     };
 
     /**
@@ -78,8 +78,8 @@ namespace akkaradb::format::akk {
      * Thread-safety: NOT thread-safe.
      */
     class AkkRecordCursor : public RecordCursor {
-    public:
-        /**
+        public:
+            /**
          * Creates a cursor from a validated block.
          *
          * @param block Block buffer (must remain valid during cursor lifetime)
@@ -87,20 +87,17 @@ namespace akkaradb::format::akk {
          * @throws std::runtime_error if CRC validation fails
          * @throws std::out_of_range if block is malformed
          */
-        [[nodiscard]] static std::unique_ptr<AkkRecordCursor> create(
-            core::BufferView block,
-            uint32_t payload_len
-        );
+            [[nodiscard]] static std::unique_ptr<AkkRecordCursor> create(core::BufferView block, uint32_t payload_len);
 
-        [[nodiscard]] bool has_next() const noexcept override;
+            [[nodiscard]] bool has_next() const noexcept override;
 
-        [[nodiscard]] std::optional<core::RecordView> try_next() override;
+            [[nodiscard]] std::optional<core::RecordView> try_next() override;
 
-    private:
-        AkkRecordCursor(core::BufferView block, uint32_t payload_len);
+        private:
+            AkkRecordCursor(core::BufferView block, uint32_t payload_len);
 
-        core::BufferView block_;
-        uint32_t payload_len_;
-        size_t current_offset_; // Current position in payload (relative to offset 4)
+            core::BufferView block_;
+            uint32_t payload_len_;
+            size_t current_offset_; // Current position in payload (relative to offset 4)
     };
 } // namespace akkaradb::format::akk

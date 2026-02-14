@@ -89,6 +89,7 @@ namespace akkaradb::engine::wal {
             if (offset + key_len > src.size()) return std::nullopt;
 
             const auto key_span = src.slice(offset, key_len).as_span<uint8_t>();
+            std::vector<uint8_t> key_vec(key_span.begin(), key_span.end());
             offset += key_len;
 
             if (offset + sizeof(uint32_t) > src.size()) return std::nullopt;
@@ -97,8 +98,9 @@ namespace akkaradb::engine::wal {
 
             if (offset + value_len > src.size()) return std::nullopt;
             const auto value_span = src.slice(offset, value_len).as_span<uint8_t>();
+            std::vector value_vec(value_span.begin(), value_span.end());
 
-            return WalOp{op_type, seq, key_span, value_span};
+            return WalOp{op_type, seq, std::move(key_vec), std::move(value_vec)};
         }
         catch (...) { return std::nullopt; }
     }

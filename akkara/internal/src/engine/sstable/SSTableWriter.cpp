@@ -89,26 +89,34 @@ namespace akkaradb::engine::sstable {
         packer_->flush();
 
         // Record current position for index
+        file_.flush();
         const auto index_off = static_cast<uint64_t>(file_.tellp());
+        if (file_.fail()) { throw std::runtime_error("SSTableWriter: I/O error before writing index"); }
 
         // Write index block
         auto index_data = index_builder_.build();
         file_.write(reinterpret_cast<const char*>(index_data.data()), static_cast<std::streamsize>(index_data.size()));
+        if (file_.fail()) { throw std::runtime_error("SSTableWriter: I/O error writing index block (disk full?)"); }
 
         // Record current position for bloom
+        file_.flush();
         const auto bloom_off = static_cast<uint64_t>(file_.tellp());
+        if (file_.fail()) { throw std::runtime_error("SSTableWriter: I/O error before writing bloom filter"); }
 
         // Write bloom filter
         auto bloom = bloom_builder_.build();
         auto bloom_data = bloom.serialize();
         file_.write(reinterpret_cast<const char*>(bloom_data.data()), static_cast<std::streamsize>(bloom_data.size()));
+        if (file_.fail()) { throw std::runtime_error("SSTableWriter: I/O error writing bloom filter (disk full?)"); }
 
         // Write footer via AKSSFooter to guarantee layout matches the spec:
         // [magic:4][version:1][pad:3][index_off:8][bloom_off:8][entries:4][crc32c:4]
         const auto footer_buf = AKSSFooter::write_to_buffer(AKSSFooter::Footer{index_off, bloom_off, static_cast<uint32_t>(total_entries_)});
         file_.write(reinterpret_cast<const char*>(footer_buf.data()), static_cast<std::streamsize>(footer_buf.size()));
+        if (file_.fail()) { throw std::runtime_error("SSTableWriter: I/O error writing footer (disk full?)"); }
 
         file_.flush();
+        if (file_.fail()) { throw std::runtime_error("SSTableWriter: I/O error during final flush (disk full?)"); }
 
         return SealResult{.index_off = index_off, .bloom_off = bloom_off, .entries = total_entries_};
     }
@@ -124,6 +132,7 @@ namespace akkaradb::engine::sstable {
     void SSTableWriter::on_block_ready(core::OwnedBuffer block) {
         // Record block offset for index
         const auto block_offset = static_cast<uint64_t>(file_.tellp());
+        if (file_.fail()) { throw std::runtime_error("SSTableWriter: I/O error getting block offset"); }
 
         // Add to index: first_key -> offset
         if (!pending_first_key_.empty()) {
@@ -133,6 +142,7 @@ namespace akkaradb::engine::sstable {
 
         // Write block to file
         file_.write(reinterpret_cast<const char*>(block.data()), static_cast<std::streamsize>(block.size()));
+        if (file_.fail()) { throw std::runtime_error("SSTableWriter: I/O error writing data block (disk full?)"); }
 
         // IMPROVEMENT: Return buffer to pool for reuse instead of deallocation
         // This reduces memory churn and improves performance
