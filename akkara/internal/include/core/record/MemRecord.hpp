@@ -129,22 +129,37 @@ namespace akkaradb::core {
             /**
          * Returns a span over the key bytes.
          */
-            [[nodiscard]] std::span<const uint8_t> key() const noexcept { return {key_.data(), header_.k_len}; }
+            [[nodiscard]] std::span<const uint8_t> key() const noexcept {
+                // Return empty span if key_ is empty (e.g., after move)
+                return key_.empty()
+                           ? std::span<const uint8_t>{}
+                           : std::span<const uint8_t>{key_.data(), header_.k_len};
+            }
 
             /**
          * Returns a span over the value bytes.
          */
-            [[nodiscard]] std::span<const uint8_t> value() const noexcept { return {value_.data(), header_.v_len}; }
+            [[nodiscard]] std::span<const uint8_t> value() const noexcept {
+                // Return empty span if value_ is empty (e.g., after move)
+                return value_.empty()
+                           ? std::span<const uint8_t>{}
+                           : std::span<const uint8_t>{value_.data(), header_.v_len};
+            }
 
             /**
          * Returns a string_view over the key.
          */
-            [[nodiscard]] std::string_view key_string() const noexcept { return {reinterpret_cast<const char*>(key_.data()), header_.k_len}; }
+            [[nodiscard]] std::string_view key_string() const noexcept {
+                return key_.empty()
+                           ? std::string_view{} : std::string_view{reinterpret_cast<const char*>(key_.data()), header_.k_len};
+            }
 
             /**
          * Returns a string_view over the value.
          */
-            [[nodiscard]] std::string_view value_string() const noexcept { return {reinterpret_cast<const char*>(value_.data()), header_.v_len}; }
+            [[nodiscard]] std::string_view value_string() const noexcept {
+                return value_.empty() ? std::string_view{} : std::string_view{reinterpret_cast<const char*>(value_.data()), header_.v_len};
+            }
 
             /**
          * Returns the sequence number.

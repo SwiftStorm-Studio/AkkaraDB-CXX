@@ -32,7 +32,7 @@ void print_current_time() {
 int main(int argc, char** argv) {
     BenchmarkSuite::print_header();
 
-    std::string benchmark_type = "all";
+    std::string benchmark_type = "mixed";
 
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {

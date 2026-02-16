@@ -60,138 +60,49 @@ namespace akkaradb::engine::wal {
 
         if (dst.size() < total_size) { throw std::out_of_range("WalFraming::encode_into: buffer too small"); }
 
-        size_t offset = 0;
+        dst.write_u32_le(0, static_cast<uint32_t>(payload_len));
 
-        // Write magic
-        dst.write_u32_le(offset, FRAME_MAGIC);
-        offset += sizeof(uint32_t);
+        op.serialize_into(dst.slice(sizeof(uint32_t)));
 
-        // Write payloadLen
-        dst.write_u32_le(offset, static_cast<uint32_t>(payload_len));
-        offset += sizeof(uint32_t);
+        const uint32_t crc = dst.crc32c(sizeof(uint32_t), payload_len);
+        dst.write_u32_le(sizeof(uint32_t) + payload_len, crc);
 
-        // Write payload (serialize WalOp)
-        const size_t payload_written = op.serialize_into(dst.slice(offset));
-        offset += payload_written;
-
-        // Compute CRC over [magic][payloadLen][payload]
-        const size_t crc_range_len = FRAME_HEADER_SIZE + payload_len;
-        const uint32_t crc = compute_frame_crc(dst, crc_range_len);
-
-        // Write CRC
-        dst.write_u32_le(offset, crc);
-        offset += sizeof(uint32_t);
-
-        return offset;
+        return total_size;
     }
 
     // ==================== Decoding ====================
 
     std::optional<WalOp> WalFraming::decode(core::BufferView src) {
-        // Validate minimum size (header + footer)
         if (src.size() < FRAME_OVERHEAD) { return std::nullopt; }
 
-        size_t offset = 0;
+        const uint32_t payload_len = src.read_u32_le(0);
+        if (src.size() < frame_size(payload_len)) { return std::nullopt; }
 
-        // Read and validate magic
-        const uint32_t magic = src.read_u32_le(offset);
-        if (magic != FRAME_MAGIC) { return std::nullopt; }
-        offset += sizeof(uint32_t);
+        const uint32_t stored_crc = src.read_u32_le(sizeof(uint32_t) + payload_len);
+        const uint32_t computed_crc = src.crc32c(sizeof(uint32_t), payload_len);
+        if (stored_crc != computed_crc) { return std::nullopt; }
 
-        // Read payloadLen
-        const uint32_t payload_len = src.read_u32_le(offset);
-        offset += sizeof(uint32_t);
-
-        // Validate total frame size
-        const size_t expected_size = frame_size(payload_len);
-        if (src.size() < expected_size) {
-            return std::nullopt; // Incomplete frame
-        }
-
-        // Read stored CRC (at end of frame)
-        const size_t crc_offset = FRAME_HEADER_SIZE + payload_len;
-        const uint32_t stored_crc = src.read_u32_le(crc_offset);
-
-        // Compute CRC over [magic][payloadLen][payload]
-        const uint32_t computed_crc = compute_frame_crc(src, FRAME_HEADER_SIZE + payload_len);
-
-        // Validate CRC
-        if (stored_crc != computed_crc) {
-            return std::nullopt; // Corrupted frame
-        }
-
-        // Extract payload
-        const auto payload_view = src.slice(FRAME_HEADER_SIZE, payload_len);
-
-        // Deserialize WalOp
-        return WalOp::deserialize(payload_view);
+        return WalOp::deserialize(src.slice(sizeof(uint32_t), payload_len));
     }
 
     bool WalFraming::validate(core::BufferView src) noexcept {
         try {
-            // Check minimum size
             if (src.size() < FRAME_OVERHEAD) { return false; }
 
-            // Read magic
-            const uint32_t magic = src.read_u32_le(0);
-            if (magic != FRAME_MAGIC) { return false; }
+            const uint32_t payload_len = src.read_u32_le(0);
+            if (src.size() < frame_size(payload_len)) { return false; }
 
-            // Read payloadLen
-            const uint32_t payload_len = src.read_u32_le(sizeof(uint32_t));
-
-            // Validate frame size
-            const size_t expected_size = frame_size(payload_len);
-            if (src.size() < expected_size) {
-                return false; // Incomplete
-            }
-
-            // Read stored CRC
-            const size_t crc_offset = FRAME_HEADER_SIZE + payload_len;
-            const uint32_t stored_crc = src.read_u32_le(crc_offset);
-
-            // Compute CRC
-            const uint32_t computed_crc = compute_frame_crc(src, FRAME_HEADER_SIZE + payload_len);
-
+            const uint32_t stored_crc = src.read_u32_le(sizeof(uint32_t) + payload_len);
+            const uint32_t computed_crc = src.crc32c(sizeof(uint32_t), payload_len);
             return stored_crc == computed_crc;
-        }
-        catch (...) { return false; }
+        } catch (...) { return false; }
     }
 
     std::optional<size_t> WalFraming::try_read_frame_length(core::BufferView src) noexcept {
         try {
-            // Need at least header to read length
             if (src.size() < FRAME_HEADER_SIZE) { return std::nullopt; }
-
-            // Read magic
-            const uint32_t magic = src.read_u32_le(0);
-            if (magic != FRAME_MAGIC) {
-                return std::nullopt; // Invalid magic
-            }
-
-            // Read payloadLen
-            const uint32_t payload_len = src.read_u32_le(sizeof(uint32_t));
-
-            // Return total frame size
+            const uint32_t payload_len = src.read_u32_le(0);
             return frame_size(payload_len);
-        }
-        catch (...) { return std::nullopt; }
-    }
-
-    // ==================== CRC Computation ====================
-
-    uint32_t WalFraming::compute_frame_crc(core::BufferView frame_view, size_t total_len) noexcept {
-        try {
-            const uint32_t crc = frame_view.crc32c(0, total_len);
-            // Ensure we never return 0, which could be a valid CRC
-            // If CRC happens to be 0, use 1 instead to distinguish from error case
-            return crc == 0
-                       ? 1
-                       : crc;
-        }
-        catch (...) {
-            // Return a value that's unlikely to match a real CRC
-            // Use 0xFFFFFFFF instead of 0 to avoid collision with valid CRCs
-            return 0xFFFFFFFF;
-        }
+        } catch (...) { return std::nullopt; }
     }
 } // namespace akkaradb::engine::wal

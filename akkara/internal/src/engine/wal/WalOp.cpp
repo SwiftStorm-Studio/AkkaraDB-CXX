@@ -22,36 +22,38 @@
 #include <stdexcept>
 #include <cstring>
 
+#include "core/record/AKHdr32.hpp"
+
 namespace akkaradb::engine::wal {
     // ==================== Serialization ====================
 
-    size_t WalOp::serialized_size() const noexcept {
-        // [opType:u8][seq:u64][keyLen:u16][key][valueLen:u32][value]
-        return sizeof(uint8_t) + sizeof(uint64_t) + sizeof(uint16_t) + key_.size() + sizeof(uint32_t) + value_.size();
-    }
+    size_t WalOp::serialized_size() const noexcept { return sizeof(core::AKHdr32) + key_.size() + value_.size(); }
 
     size_t WalOp::serialize_into(core::BufferView dst) const {
         if (const size_t required = serialized_size(); dst.size() < required) { throw std::out_of_range("WalOp::serialize_into: buffer too small"); }
 
+        uint8_t flags = 0;
+        if (op_type_ == OpType::DELETE) flags = core::AKHdr32::FLAG_TOMBSTONE; // 0x01
+        else if (op_type_ == OpType::CHECKPOINT) flags = 0x02;
+
+        const core::AKHdr32 header{
+            .k_len = static_cast<uint16_t>(key_.size()),
+            .v_len = static_cast<uint32_t>(value_.size()),
+            .seq = seq_,
+            .flags = flags,
+            .pad0 = 0,
+            .key_fp64 = core::AKHdr32::compute_key_fp64(key_.data(), key_.size()),
+            .mini_key = core::AKHdr32::build_mini_key(key_.data(), key_.size())
+        };
+
         size_t offset = 0;
-
-        dst.write_u8(offset, static_cast<uint8_t>(op_type_));
-        offset += sizeof(uint8_t);
-
-        dst.write_u64_le(offset, seq_);
-        offset += sizeof(uint64_t);
-
-        if (key_.size() > UINT16_MAX) { throw std::invalid_argument("WalOp::serialize_into: key too large"); }
-        dst.write_u16_le(offset, static_cast<uint16_t>(key_.size()));
-        offset += sizeof(uint16_t);
+        std::memcpy(dst.data() + offset, &header, sizeof(header));
+        offset += sizeof(header);
 
         if (!key_.empty()) {
             std::memcpy(dst.data() + offset, key_.data(), key_.size());
             offset += key_.size();
         }
-
-        dst.write_u32_le(offset, static_cast<uint32_t>(value_.size()));
-        offset += sizeof(uint32_t);
 
         if (!value_.empty()) {
             std::memcpy(dst.data() + offset, value_.data(), value_.size());
@@ -70,37 +72,31 @@ namespace akkaradb::engine::wal {
 
     std::optional<WalOp> WalOp::deserialize(core::BufferView src) {
         try {
-            size_t offset = 0;
+            if (src.size() < sizeof(core::AKHdr32)) { return std::nullopt; }
 
-            if (offset + sizeof(uint8_t) > src.size()) return std::nullopt;
-            const auto op_type = static_cast<OpType>(src.read_u8(offset));
-            offset += sizeof(uint8_t);
+            const auto* hdr = reinterpret_cast<const core::AKHdr32*>(src.data());
 
-            if (op_type != OpType::PUT && op_type != OpType::DELETE && op_type != OpType::CHECKPOINT) { return std::nullopt; }
+            OpType op_type;
+            if (hdr->flags == 0x02) op_type = OpType::CHECKPOINT;
+            else if (hdr->flags & core::AKHdr32::FLAG_TOMBSTONE) op_type = OpType::DELETE;
+            else op_type = OpType::PUT;
 
-            if (offset + sizeof(uint64_t) > src.size()) return std::nullopt;
-            const uint64_t seq = src.read_u64_le(offset);
-            offset += sizeof(uint64_t);
+            const size_t expected = sizeof(core::AKHdr32) + hdr->k_len + hdr->v_len;
+            if (src.size() < expected) { return std::nullopt; }
 
-            if (offset + sizeof(uint16_t) > src.size()) return std::nullopt;
-            const uint16_t key_len = src.read_u16_le(offset);
-            offset += sizeof(uint16_t);
+            constexpr size_t key_offset = sizeof(core::AKHdr32);
+            const size_t val_offset = key_offset + hdr->k_len;
 
-            if (offset + key_len > src.size()) return std::nullopt;
+            std::vector key_vec(
+                reinterpret_cast<const uint8_t*>(src.data()) + key_offset,
+                reinterpret_cast<const uint8_t*>(src.data()) + key_offset + hdr->k_len
+            );
+            std::vector value_vec(
+                reinterpret_cast<const uint8_t*>(src.data()) + val_offset,
+                reinterpret_cast<const uint8_t*>(src.data()) + val_offset + hdr->v_len
+            );
 
-            const auto key_span = src.slice(offset, key_len).as_span<uint8_t>();
-            std::vector<uint8_t> key_vec(key_span.begin(), key_span.end());
-            offset += key_len;
-
-            if (offset + sizeof(uint32_t) > src.size()) return std::nullopt;
-            const uint32_t value_len = src.read_u32_le(offset);
-            offset += sizeof(uint32_t);
-
-            if (offset + value_len > src.size()) return std::nullopt;
-            const auto value_span = src.slice(offset, value_len).as_span<uint8_t>();
-            std::vector value_vec(value_span.begin(), value_span.end());
-
-            return WalOp{op_type, seq, std::move(key_vec), std::move(value_vec)};
+            return WalOp{op_type, hdr->seq, std::move(key_vec), std::move(value_vec)};
         }
         catch (...) { return std::nullopt; }
     }

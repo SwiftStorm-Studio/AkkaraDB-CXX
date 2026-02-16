@@ -117,11 +117,12 @@ namespace akkaradb::engine::memtable {
                 std::vector<core::MemRecord> result;
                 result.reserve(sealed_tree.size());
                 for (auto it = sealed_tree.begin(); it != sealed_tree.end(); ++it) {
-                    // Move the MemRecord out of the tree
-                    result.push_back(std::move(const_cast<core::MemRecord&>((*it).first)));
+                    // Copy the MemRecord instead of moving to avoid leaving moved-from objects in the tree
+                    // The tree will be stored in immutables_ and may still be accessed by readers
+                    result.push_back((*it).first);
                 }
 
-                // Store the now-empty tree in immutables for cleanup tracking
+                // Store the sealed tree in immutables for readers to access
                 immutables_.push_back({id, std::move(sealed_tree)});
 
                 return {id, std::move(result)};

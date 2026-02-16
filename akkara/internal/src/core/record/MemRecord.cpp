@@ -82,11 +82,18 @@ namespace akkaradb::core {
     int MemRecord::compare_key(std::span<const uint8_t> other_key) const noexcept {
         const size_t min_len = std::min(key().size(), other_key.size());
 
-        if (const int cmp = std::memcmp(key_.data(), other_key.data(), min_len); cmp != 0) { return cmp < 0 ? -1 : 1; }
+        // Only call memcmp if both pointers are valid and min_len > 0
+        if (min_len > 0 && key_.data() && other_key.data()) {
+            if (const int cmp = std::memcmp(key_.data(), other_key.data(), min_len); cmp != 0) {
+                return cmp < 0
+                           ? -1
+                           : 1;
+            }
+        }
 
         // If prefixes are equal, shorter key comes first
         if (header_.k_len < other_key.size()) { return -1; }
-        else if (header_.k_len > other_key.size()) { return 1; }
+        if (header_.k_len > other_key.size()) { return 1; }
         return 0;
     }
 
