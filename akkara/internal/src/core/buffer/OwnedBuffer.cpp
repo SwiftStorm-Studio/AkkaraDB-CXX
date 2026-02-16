@@ -38,39 +38,40 @@ namespace akkaradb::core {
  * @return Pointer to aligned memory, or nullptr on failure
  */
         void* allocate_aligned(size_t size, size_t alignment) {
-#if defined(_WIN32)
+            #if defined(_WIN32)
             // Windows: _aligned_malloc
             return _aligned_malloc(size, alignment);
 
-#elif defined(__APPLE__) || (defined(__ANDROID__) && __ANDROID_API__ < 28)
+            #elif defined(__APPLE__) || (defined(__ANDROID__) && __ANDROID_API__ < 28)
             // macOS or old Android: posix_memalign
-            void* ptr = nullptr;
-            if (posix_memalign(&ptr, alignment, size) != 0) { return nullptr; }
-            return ptr;
+            void* ptr = nullptr; if (posix_memalign(&ptr, alignment, size) != 0) { return nullptr; } return ptr;
 
-#else
+            #else
             // Linux (glibc >= 2.16), FreeBSD: aligned_alloc
             // Note: size must be multiple of alignment for aligned_alloc
             const size_t adjusted_size = (size + alignment - 1) & ~(alignment - 1);
             return std::aligned_alloc(alignment, adjusted_size);
-#endif
+            #endif
         }
 
         /**
  * Platform-agnostic aligned memory deallocation.
  */
         void deallocate_aligned(void* ptr) noexcept {
-#if defined(_WIN32)
+            #if defined(_WIN32)
             _aligned_free(ptr);
-#else
+            #else
             std::free(ptr);
-#endif
+            #endif
         }
     } // anonymous namespace
 
     // ==================== AlignedDeleter Implementation ====================
 
-    void OwnedBuffer::AlignedDeleter::operator()(std::byte* ptr) const noexcept { if (ptr) { deallocate_aligned(ptr); } }
+    void OwnedBuffer::AlignedDeleter::operator()(std::byte* ptr) const noexcept {
+        if (owns_memory && ptr) { deallocate_aligned(ptr); }
+        // Non-owning buffers: no-op (memory managed externally)
+    }
 
     // ==================== OwnedBuffer Implementation ====================
 
@@ -89,6 +90,10 @@ namespace akkaradb::core {
         if (!raw_ptr) { throw std::bad_alloc{}; }
 
         auto* byte_ptr = static_cast<std::byte*>(raw_ptr);
-        return OwnedBuffer{byte_ptr, size};
+        return OwnedBuffer{byte_ptr, size, true}; // owns_memory = true
+    }
+
+    OwnedBuffer OwnedBuffer::wrap_non_owning(std::byte* data, size_t size) noexcept {
+        return OwnedBuffer{data, size, false}; // owns_memory = false
     }
 } // namespace akkaradb::core

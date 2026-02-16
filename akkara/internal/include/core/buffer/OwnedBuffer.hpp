@@ -66,24 +66,30 @@ namespace akkaradb::core {
             [[nodiscard]] static OwnedBuffer allocate(size_t size, size_t alignment = 4096);
 
             /**
+     * Wraps externally-managed memory as a non-owning buffer.
+     *
+     * This is useful for arena allocators where memory lifetime is managed
+     * by the arena, not by individual buffers.
+     *
+     * IMPORTANT: The caller must ensure that the memory remains valid for
+     * the lifetime of this OwnedBuffer. The memory will NOT be freed when
+     * this buffer is destroyed.
+     *
+     * @param data Pointer to externally-managed memory
+     * @param size Size in bytes
+     * @return Non-owning OwnedBuffer wrapping the memory
+     */
+            [[nodiscard]] static OwnedBuffer wrap_non_owning(std::byte* data, size_t size) noexcept;
+
+            /**
      * Move constructor.
      */
-            OwnedBuffer(OwnedBuffer&& other) noexcept
-                : data_{std::move(other.data_)}, size_{other.size_} {
-                other.size_ = 0; // Reset source size so empty() stays consistent with data_
-            }
+            OwnedBuffer(OwnedBuffer&& other) noexcept = default;
 
             /**
      * Move assignment operator.
      */
-            OwnedBuffer& operator=(OwnedBuffer&& other) noexcept {
-                if (this != &other) {
-                    data_ = std::move(other.data_);
-                    size_ = other.size_;
-                    other.size_ = 0; // Reset source size so empty() stays consistent with data_
-                }
-                return *this;
-            }
+            OwnedBuffer& operator=(OwnedBuffer&& other) noexcept = default;
 
             /**
      * Deleted copy constructor (move-only).
@@ -143,8 +149,9 @@ namespace akkaradb::core {
 
             /**
      * Fills the entire buffer with zeros.
+     * Uses optimized SIMD implementation via BufferView.
      */
-            void zero_fill() noexcept { if (data_ && size_ > 0) { std::memset(data_.get(), 0, size_); } }
+            void zero_fill() noexcept { if (data_ && size_ > 0) { view().zero_fill(); } }
 
             /**
      * Releases ownership of the buffer and returns the raw pointer.
@@ -167,8 +174,11 @@ namespace akkaradb::core {
      * Uses platform-specific aligned deallocation:
      * - Windows: _aligned_free
      * - POSIX: free (works for both aligned_alloc and posix_memalign)
+     *
+     * Supports non-owning mode for arena-allocated buffers.
      */
             struct AlignedDeleter {
+                bool owns_memory{true};
                 void operator()(std::byte* ptr) const noexcept;
             };
 
@@ -176,8 +186,8 @@ namespace akkaradb::core {
             size_t size_{0};
 
             /**
-     * Private constructor (use allocate() factory method).
+     * Private constructor (use allocate() or wrap_non_owning() factory methods).
      */
-            OwnedBuffer(std::byte* data, size_t size) noexcept : data_{data}, size_{size} {}
+            OwnedBuffer(std::byte* data, size_t size, bool owns_memory) noexcept : data_{data, AlignedDeleter{owns_memory}}, size_{size} {}
     };
 } // namespace akkaradb::core

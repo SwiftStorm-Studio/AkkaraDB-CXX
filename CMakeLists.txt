@@ -55,33 +55,12 @@ add_library(akkaradb)
 
 # Public headers (C++ API - User-facing)
 target_sources(akkaradb PUBLIC FILE_SET HEADERS
-        BASE_DIRS ${AKKARADB_INCLUDE_DIR}
-        FILES
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/Export.hpp
 
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/AkkaraDB.hpp
-
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/EntityMacros.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/PackedTable.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/Query.hpp
-
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/Serialization.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/Core.hpp
-
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Primitives.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/String.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Bool.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Vector.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Optional.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Map.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Set.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Pair.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/typed/serialization/serializers/Array.hpp
 )
 
 # Public implementation (akkaradb/src)
 target_sources(akkaradb PRIVATE
-        ${AKKARADB_SRC_DIR}/AkkaraDB.cpp
+
 )
 
 # Internal headers (not exposed to users)
@@ -89,8 +68,7 @@ target_sources(akkaradb PRIVATE
         # Core - Buffer
         ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferView.hpp
         ${INTERNAL_INCLUDE_DIR}/core/buffer/OwnedBuffer.hpp
-        ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferPool.hpp
-        ${INTERNAL_INCLUDE_DIR}/core/buffer/PooledBuffer.hpp
+        ${INTERNAL_INCLUDE_DIR}/core/buffer/PerThreadArena.hpp
 
         # Core - Record
         ${INTERNAL_INCLUDE_DIR}/core/record/AKHdr32.hpp
@@ -100,46 +78,7 @@ target_sources(akkaradb PRIVATE
         # Core - CRC
         ${INTERNAL_INCLUDE_DIR}/core/CRC32C.hpp
 
-        # Format - API
-        ${INTERNAL_INCLUDE_DIR}/format-api/BlockPacker.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-api/BlockUnpacker.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-api/RecordCursor.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-api/StripeReader.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-api/StripeWriter.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-api/FlushPolicy.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-api/ParityCoder.hpp
 
-        # Format - Implementation
-        ${INTERNAL_INCLUDE_DIR}/format-akk/AkkBlockPacker.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-akk/AkkBlockUnpacker.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-akk/AkkStripeWriter.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-akk/AkkStripeReader.hpp
-
-        ${INTERNAL_INCLUDE_DIR}/format-akk/parity/NoParityCoder.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-akk/parity/XorParityCoder.hpp
-        ${INTERNAL_INCLUDE_DIR}/format-akk/parity/DualXorParityCoder.hpp
-
-        # Engine
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalOp.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalFraming.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalWriter.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalReader.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalRecovery.hpp
-
-        ${INTERNAL_INCLUDE_DIR}/engine/memtable/BPTree.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/memtable/MemTable.hpp
-
-        ${INTERNAL_INCLUDE_DIR}/engine/manifest/Manifest.hpp
-
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/AKSSFooter.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/IndexBlock.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/BloomFilter.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTableWriter.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTableReader.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTCompactor.hpp
-
-        ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/StripeLaneWriter.hpp
 )
 
 # Internal implementation (internal/src)
@@ -147,7 +86,7 @@ target_sources(akkaradb PRIVATE
         # Core - Buffer
         ${INTERNAL_SRC_DIR}/core/buffer/BufferView.cpp
         ${INTERNAL_SRC_DIR}/core/buffer/OwnedBuffer.cpp
-        ${INTERNAL_SRC_DIR}/core/buffer/BufferPool.cpp
+        ${INTERNAL_SRC_DIR}/core/buffer/PerThreadArena.cpp
 
         # Core - Record
         ${INTERNAL_SRC_DIR}/core/record/AKHdr32.cpp
@@ -157,36 +96,7 @@ target_sources(akkaradb PRIVATE
         # Core - CRC
         ${INTERNAL_SRC_DIR}/core/CRC32C.cpp
 
-        # Format - Implementation
-        ${INTERNAL_SRC_DIR}/format-akk/AkkBlockPacker.cpp
-        ${INTERNAL_SRC_DIR}/format-akk/AkkBlockUnpacker.cpp
-        ${INTERNAL_SRC_DIR}/format-akk/AkkStripeWriter.cpp
-        ${INTERNAL_SRC_DIR}/format-akk/AkkStripeReader.cpp
 
-        ${INTERNAL_SRC_DIR}/format-akk/parity/NoParityCoder.cpp
-        ${INTERNAL_SRC_DIR}/format-akk/parity/XorParityCoder.cpp
-        ${INTERNAL_SRC_DIR}/format-akk/parity/DualXorParityCoder.cpp
-
-        # Engine
-        ${INTERNAL_SRC_DIR}/engine/wal/WalOp.cpp
-        ${INTERNAL_SRC_DIR}/engine/wal/WalFraming.cpp
-        ${INTERNAL_SRC_DIR}/engine/wal/WalWriter.cpp
-        ${INTERNAL_SRC_DIR}/engine/wal/WalReader.cpp
-        ${INTERNAL_SRC_DIR}/engine/wal/WalRecovery.cpp
-
-        ${INTERNAL_SRC_DIR}/engine/memtable/MemTable.cpp
-
-        ${INTERNAL_SRC_DIR}/engine/manifest/Manifest.cpp
-
-        ${INTERNAL_SRC_DIR}/engine/sstable/AKSSFooter.cpp
-        ${INTERNAL_SRC_DIR}/engine/sstable/IndexBlock.cpp
-        ${INTERNAL_SRC_DIR}/engine/sstable/BloomFilter.cpp
-        ${INTERNAL_SRC_DIR}/engine/sstable/SSTableWriter.cpp
-        ${INTERNAL_SRC_DIR}/engine/sstable/SSTableReader.cpp
-        ${INTERNAL_SRC_DIR}/engine/sstable/SSTCompactor.cpp
-
-        ${INTERNAL_SRC_DIR}/engine/AkkEngine.cpp
-        ${INTERNAL_SRC_DIR}/engine/StripeLaneWriter.cpp
 )
 
 # Include directories

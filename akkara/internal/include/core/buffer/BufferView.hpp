@@ -44,51 +44,51 @@ namespace akkaradb::core {
     class BufferView {
         public:
             /**
-         * Constructs an empty BufferView.
-         */
+             * Constructs an empty BufferView.
+             */
             constexpr BufferView() noexcept : data_{nullptr}, size_{0} {}
 
             /**
-         * Constructs a BufferView from raw pointer and size.
-         *
-         * @param data Pointer to the beginning of the buffer
-         * @param size Size in bytes
-         */
+             * Constructs a BufferView from raw pointer and size.
+             *
+             * @param data Pointer to the beginning of the buffer
+             * @param size Size in bytes
+             */
             constexpr BufferView(std::byte* data, size_t size) noexcept : data_{data}, size_{size} {}
 
             /**
-         * Constructs a BufferView from a std::span.
-         *
-         * @param span Byte span
-         */
+             * Constructs a BufferView from a std::span.
+             *
+             * @param span Byte span
+             */
             constexpr explicit BufferView(std::span<std::byte> span) noexcept : data_{span.data()}, size_{span.size()} {}
 
             // ==================== Basic Accessors ====================
 
             /**
-         * Returns the raw pointer to the buffer.
-         */
+             * Returns the raw pointer to the buffer.
+             */
             [[nodiscard]] constexpr std::byte* data() const noexcept { return data_; }
 
             /**
-         * Returns the size of the buffer in bytes.
-         */
+             * Returns the size of the buffer in bytes.
+             */
             [[nodiscard]] constexpr size_t size() const noexcept { return size_; }
 
             /**
-         * Returns true if the buffer is empty.
-         */
+             * Returns true if the buffer is empty.
+             */
             [[nodiscard]] constexpr bool empty() const noexcept { return size_ == 0; }
 
             /**
-         * Returns a std::span view of the buffer.
-         */
+             * Returns a std::span view of the buffer.
+             */
             [[nodiscard]] constexpr std::span<std::byte> as_span() const noexcept { return {data_, size_}; }
 
             /**
-         * Returns a typed span view of the buffer.
-         * T must be a byte-sized trivial type.
-         */
+             * Returns a typed span view of the buffer.
+             * T must be a byte-sized trivial type.
+             */
             template <typename T>
             [[nodiscard]] constexpr std::span<const T> as_span() const noexcept {
                 static_assert(sizeof(T) == 1);
@@ -96,171 +96,208 @@ namespace akkaradb::core {
             }
 
             /**
-         * Returns a const std::span view of the buffer.
-         */
+             * Returns a const std::span view of the buffer.
+             */
             [[nodiscard]] constexpr std::span<const std::byte> as_const_span() const noexcept { return {data_, size_}; }
 
             // ==================== Slicing ====================
 
             /**
-         * Creates a sub-view starting at offset with specified length.
-         *
-         * @param offset Starting offset (in bytes)
-         * @param length Length of the slice (in bytes)
-         * @return A new BufferView representing the slice
-         * @throws std::out_of_range if offset + length > size()
-         */
+             * Creates a sub-view starting at offset with specified length.
+             *
+             * @param offset Starting offset (in bytes)
+             * @param length Length of the slice (in bytes)
+             * @return A new BufferView representing the slice
+             * @throws std::out_of_range if offset + length > size()
+             */
             [[nodiscard]] BufferView slice(size_t offset, size_t length) const;
 
             /**
-         * Creates a sub-view starting at offset to the end.
-         *
-         * @param offset Starting offset (in bytes)
-         * @return A new BufferView from offset to end
-         * @throws std::out_of_range if offset > size()
-         */
+             * Creates a sub-view starting at offset to the end.
+             *
+             * @param offset Starting offset (in bytes)
+             * @return A new BufferView from offset to end
+             * @throws std::out_of_range if offset > size()
+             */
             [[nodiscard]] BufferView slice(size_t offset) const;
 
             // ==================== Little-Endian Read Operations ====================
 
             /**
-         * Reads an unsigned 8-bit integer.
-         *
-         * @param offset Offset in bytes
-         * @return uint8_t value
-         * @throws std::out_of_range if offset >= size()
-         */
-            [[nodiscard]] uint8_t read_u8(size_t offset) const;
+             * Reads an unsigned 8-bit integer.
+             *
+             * @param offset Offset in bytes
+             * @return uint8_t value
+             * @throws std::out_of_range if offset >= size() (debug only)
+             */
+            [[nodiscard]] uint8_t read_u8(size_t offset) const noexcept {
+                check_bounds_inline(offset, 1);
+                return static_cast<uint8_t>(data_[offset]);
+            }
 
             /**
-         * Reads an unsigned 16-bit integer (Little-Endian).
-         *
-         * @param offset Offset in bytes
-         * @return uint16_t value
-         * @throws std::out_of_range if offset + 2 > size()
-         */
-            [[nodiscard]] uint16_t read_u16_le(size_t offset) const;
+             * Reads an unsigned 16-bit integer (Little-Endian).
+             *
+             * @param offset Offset in bytes
+             * @return uint16_t value
+             * @throws std::out_of_range if offset + 2 > size() (debug only)
+             */
+            [[nodiscard]] uint16_t read_u16_le(size_t offset) const noexcept {
+                check_bounds_inline(offset, 2);
+                uint16_t value;
+                std::memcpy(&value, data_ + offset, 2);
+                return value;
+            }
 
             /**
-         * Reads an unsigned 32-bit integer (Little-Endian).
-         *
-         * @param offset Offset in bytes
-         * @return uint32_t value
-         * @throws std::out_of_range if offset + 4 > size()
-         */
-            [[nodiscard]] uint32_t read_u32_le(size_t offset) const;
+             * Reads an unsigned 32-bit integer (Little-Endian).
+             *
+             * @param offset Offset in bytes
+             * @return uint32_t value
+             * @throws std::out_of_range if offset + 4 > size() (debug only)
+             */
+            [[nodiscard]] uint32_t read_u32_le(size_t offset) const noexcept {
+                check_bounds_inline(offset, 4);
+                uint32_t value;
+                std::memcpy(&value, data_ + offset, 4);
+                return value;
+            }
 
             /**
-         * Reads an unsigned 64-bit integer (Little-Endian).
-         *
-         * @param offset Offset in bytes
-         * @return uint64_t value
-         * @throws std::out_of_range if offset + 8 > size()
-         */
-            [[nodiscard]] uint64_t read_u64_le(size_t offset) const;
+             * Reads an unsigned 64-bit integer (Little-Endian).
+             *
+             * @param offset Offset in bytes
+             * @return uint64_t value
+             * @throws std::out_of_range if offset + 8 > size() (debug only)
+             */
+            [[nodiscard]] uint64_t read_u64_le(size_t offset) const noexcept {
+                check_bounds_inline(offset, 8);
+                uint64_t value;
+                std::memcpy(&value, data_ + offset, 8);
+                return value;
+            }
 
             // ==================== Little-Endian Write Operations ====================
 
             /**
-         * Writes an unsigned 8-bit integer.
-         *
-         * @param offset Offset in bytes
-         * @param value Value to write
-         * @throws std::out_of_range if offset >= size()
-         */
-            void write_u8(size_t offset, uint8_t value) const;
+             * Writes an unsigned 8-bit integer.
+             *
+             * @param offset Offset in bytes
+             * @param value Value to write
+             * @throws std::out_of_range if offset >= size() (debug only)
+             */
+            void write_u8(size_t offset, uint8_t value) const noexcept {
+                check_bounds_inline(offset, 1);
+                data_[offset] = static_cast<std::byte>(value);
+            }
 
             /**
-         * Writes an unsigned 16-bit integer (Little-Endian).
-         *
-         * @param offset Offset in bytes
-         * @param value Value to write
-         * @throws std::out_of_range if offset + 2 > size()
-         */
-            void write_u16_le(size_t offset, uint16_t value) const;
+             * Writes an unsigned 16-bit integer (Little-Endian).
+             *
+             * @param offset Offset in bytes
+             * @param value Value to write
+             * @throws std::out_of_range if offset + 2 > size() (debug only)
+             */
+            void write_u16_le(size_t offset, uint16_t value) const noexcept {
+                check_bounds_inline(offset, 2);
+                std::memcpy(data_ + offset, &value, 2);
+            }
 
             /**
-         * Writes an unsigned 32-bit integer (Little-Endian).
-         *
-         * @param offset Offset in bytes
-         * @param value Value to write
-         * @throws std::out_of_range if offset + 4 > size()
-         */
-            void write_u32_le(size_t offset, uint32_t value) const;
+             * Writes an unsigned 32-bit integer (Little-Endian).
+             *
+             * @param offset Offset in bytes
+             * @param value Value to write
+             * @throws std::out_of_range if offset + 4 > size() (debug only)
+             */
+            void write_u32_le(size_t offset, uint32_t value) const noexcept {
+                check_bounds_inline(offset, 4);
+                std::memcpy(data_ + offset, &value, 4);
+            }
 
             /**
-         * Writes an unsigned 64-bit integer (Little-Endian).
-         *
-         * @param offset Offset in bytes
-         * @param value Value to write
-         * @throws std::out_of_range if offset + 8 > size()
-         */
-            void write_u64_le(size_t offset, uint64_t value) const;
+             * Writes an unsigned 64-bit integer (Little-Endian).
+             *
+             * @param offset Offset in bytes
+             * @param value Value to write
+             * @throws std::out_of_range if offset + 8 > size() (debug only)
+             */
+            void write_u64_le(size_t offset, uint64_t value) const noexcept {
+                check_bounds_inline(offset, 8);
+                std::memcpy(data_ + offset, &value, 8);
+            }
 
             // ==================== Bulk Operations ====================
 
             /**
-         * Copies data from source buffer to this buffer.
-         *
-         * @param offset Destination offset
-         * @param src Source buffer
-         * @param src_offset Source offset
-         * @param length Number of bytes to copy
-         * @throws std::out_of_range if bounds are violated
-         */
+             * Copies data from source buffer to this buffer.
+             *
+             * @param offset Destination offset
+             * @param src Source buffer
+             * @param src_offset Source offset
+             * @param length Number of bytes to copy
+             * @throws std::out_of_range if bounds are violated
+             */
             void copy_from(size_t offset, BufferView src, size_t src_offset, size_t length) const;
 
             /**
-         * Fills a region with a specific byte value.
-         *
-         * @param offset Starting offset
-         * @param length Number of bytes to fill
-         * @param value Byte value to fill with
-         * @throws std::out_of_range if offset + length > size()
-         */
+             * Fills a region with a specific byte value.
+             *
+             * @param offset Starting offset
+             * @param length Number of bytes to fill
+             * @param value Byte value to fill with
+             * @throws std::out_of_range if offset + length > size()
+             */
             void fill(size_t offset, size_t length, std::byte value) const;
 
             /**
-         * Fills the entire buffer with zeros.
-         */
+             * Fills the entire buffer with zeros.
+             * Uses optimized SIMD/platform-specific implementation when available.
+             */
             void zero_fill() const noexcept;
+
+            /**
+             * Fills the entire buffer with zeros (inlined fast path).
+             * For small buffers, this avoids function call overhead.
+             */
+            void zero_fill_inline() const noexcept { if (data_ && size_ > 0) { std::memset(data_, 0, size_); } }
 
             // ==================== CRC Computation ====================
 
             /**
-         * Computes CRC32C checksum over a range.
-         *
-         * Uses hardware acceleration (SSE4.2 crc32c instruction) when available.
-         *
-         * @param offset Starting offset
-         * @param length Number of bytes to checksum
-         * @return 32-bit CRC32C value
-         * @throws std::out_of_range if offset + length > size()
-         */
+             * Computes CRC32C checksum over a range.
+             *
+             * Uses hardware acceleration (SSE4.2 crc32c instruction) when available.
+             *
+             * @param offset Starting offset
+             * @param length Number of bytes to checksum
+             * @return 32-bit CRC32C value
+             * @throws std::out_of_range if offset + length > size()
+             */
             [[nodiscard]] uint32_t crc32c(size_t offset, size_t length) const;
 
             /**
-         * Computes CRC32C checksum over the entire buffer.
-         *
-         * @return 32-bit CRC32C value
-         */
+             * Computes CRC32C checksum over the entire buffer.
+             *
+             * @return 32-bit CRC32C value
+             */
             [[nodiscard]] uint32_t crc32c() const noexcept { return crc32c(0, size_); }
 
             // ==================== String Operations ====================
 
             /**
-         * Creates a string_view from a region of the buffer.
-         *
-         * @param offset Starting offset
-         * @param length Number of bytes
-         * @return std::string_view over the region
-         * @throws std::out_of_range if offset + length > size()
-         */
+             * Creates a string_view from a region of the buffer.
+             *
+             * @param offset Starting offset
+             * @param length Number of bytes
+             * @return std::string_view over the region
+             * @throws std::out_of_range if offset + length > size()
+             */
             [[nodiscard]] std::string_view as_string_view(size_t offset, size_t length) const;
 
             /**
-         * Creates a string_view over the entire buffer.
-         */
+             * Creates a string_view over the entire buffer.
+             */
             [[nodiscard]] std::string_view as_string_view() const noexcept { return {reinterpret_cast<const char*>(data_), size_}; }
 
         private:
@@ -268,5 +305,22 @@ namespace akkaradb::core {
             size_t size_;
 
             void check_bounds(size_t offset, size_t length) const;
+
+            /**
+             * Inlined bounds check with conditional compilation.
+             * In Release builds (NDEBUG), this becomes a no-op.
+             * In Debug builds, performs full bounds checking.
+             */
+            void check_bounds_inline(size_t offset, size_t length) const noexcept {
+                #ifndef NDEBUG
+                // Debug: Full bounds checking with branch hints
+                if (offset + length > size_ || offset + length < offset) [[unlikely]] {
+                    check_bounds(offset, length); // Throws exception
+                }
+                #else
+                // Release: No-op (optimized away by compiler)
+                (void)offset; (void)length;
+                #endif
+            }
     };
 } // namespace akkaradb::core
