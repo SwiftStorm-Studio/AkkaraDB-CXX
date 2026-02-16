@@ -21,7 +21,6 @@
 #include "core/buffer/PerThreadArena.hpp"
 
 #include <vector>
-#include <cstring>
 #include <stdexcept>
 
 // Platform-specific includes for arena allocation
@@ -50,11 +49,11 @@ namespace akkaradb::core {
         // ============================================================================
 
         /**
- * ArenaBlock - Contiguous memory region for bump allocation.
- *
- * Allocates a large block upfront and distributes fixed-size buffers
- * via bump pointer increment. Zero synchronization overhead.
- */
+         * ArenaBlock - Contiguous memory region for bump allocation.
+         *
+         * Allocates a large block upfront and distributes fixed-size buffers
+         * via bump pointer increment. Zero synchronization overhead.
+         */
         class ArenaBlock {
             public:
                 ArenaBlock(size_t block_size, size_t alignment, size_t capacity)
@@ -63,9 +62,9 @@ namespace akkaradb::core {
 
                     #if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
                     // Use mmap for large page support
-                    base_ = mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-                    if (base_ == MAP_FAILED) { throw std::bad_alloc{}; }
+                    base_ = mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); if (base_ == MAP_FAILED) {
+                        throw std::bad_alloc{};
+                    }
 
                     #ifdef __linux__
                     // Advise kernel to use transparent huge pages for better TLB performance
@@ -74,7 +73,8 @@ namespace akkaradb::core {
 
                     #else
                     // Fallback to aligned_alloc for non-POSIX systems
-                    base_ = OwnedBuffer::allocate(total_size, alignment).release(); if (!base_) { throw std::bad_alloc{}; }
+                    base_ = OwnedBuffer::allocate(total_size, alignment).release();
+                    if (!base_) { throw std::bad_alloc{}; }
                     #endif
 
                     current_ = static_cast<std::byte*>(base_);
@@ -82,17 +82,18 @@ namespace akkaradb::core {
                 }
 
                 ~ArenaBlock() noexcept {
-                    if (base_ && base_ != MAP_FAILED) {
-                        const size_t total_size = block_size_ * capacity_;
+                    if (!base_) { return; }
 
-                        #if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
+                    #if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
+                    if (base_ != MAP_FAILED) {
+                        const size_t total_size = block_size_ * capacity_;
                         munmap(base_, total_size);
-                        #else
-                        // For aligned_alloc fallback, we need custom deallocation
-                        // Note: This relies on OwnedBuffer's AlignedDeleter
-                        std::free(base_);
-                        #endif
                     }
+                    #else
+                    // For aligned_alloc fallback (Windows, etc)
+                    // MAP_FAILED doesn't exist here, just free
+                    std::free(base_);
+                    #endif
                 }
 
                 // Non-copyable, non-movable
@@ -102,9 +103,9 @@ namespace akkaradb::core {
                 ArenaBlock& operator=(ArenaBlock&&) = delete;
 
                 /**
-     * Attempts to allocate one buffer from the arena.
-     * @return Pointer to buffer, or nullptr if exhausted
-     */
+                 * Attempts to allocate one buffer from the arena.
+                 * @return Pointer to buffer, or nullptr if exhausted
+                 */
                 [[nodiscard]] std::byte* try_allocate() noexcept {
                     std::byte* ptr = current_;
                     std::byte* next = ptr + block_size_;
@@ -118,13 +119,13 @@ namespace akkaradb::core {
                 }
 
                 /**
-     * Checks if arena has capacity for at least one more buffer.
-     */
+                 * Checks if arena has capacity for at least one more buffer.
+                 */
                 [[nodiscard]] bool has_capacity() const noexcept { return (current_ + block_size_) <= end_; }
 
                 /**
-     * Returns number of buffers allocated from this arena.
-     */
+                 * Returns number of buffers allocated from this arena.
+                 */
                 [[nodiscard]] size_t allocated_count() const noexcept { return (current_ - static_cast<std::byte*>(base_)) / block_size_; }
 
             private:
@@ -140,13 +141,13 @@ namespace akkaradb::core {
         // ============================================================================
 
         /**
- * ThreadLocalState - Per-thread allocation state.
- *
- * Each thread maintains:
- * - clean_list: Zero-filled buffers ready for immediate use
- * - dirty_list: Returned buffers awaiting zero-fill
- * - arena: Bump allocator for fresh allocations
- */
+         * ThreadLocalState - Per-thread allocation state.
+         *
+         * Each thread maintains:
+         * - clean_list: Zero-filled buffers ready for immediate use
+         * - dirty_list: Returned buffers awaiting zero-fill
+         * - arena: Bump allocator for fresh allocations
+         */
         struct ThreadLocalState {
             std::vector<OwnedBuffer> clean_list;
             std::vector<OwnedBuffer> dirty_list;
@@ -166,23 +167,23 @@ namespace akkaradb::core {
             }
 
             /**
-     * Ensures arena is allocated.
-     */
+             * Ensures arena is allocated.
+             */
             void ensure_arena() { if (!arena) { arena = std::make_unique<ArenaBlock>(block_size, alignment, arena_capacity); } }
 
             /**
-     * Attempts to allocate from arena.
-     * @return Pointer to buffer, or nullptr if arena exhausted
-     */
+             * Attempts to allocate from arena.
+             * @return Pointer to buffer, or nullptr if arena exhausted
+             */
             [[nodiscard]] std::byte* try_allocate_from_arena() {
                 ensure_arena();
                 return arena->try_allocate();
             }
 
             /**
-     * Performs batch zero-fill of dirty buffers.
-     * @param count Number of buffers to clean (0 = clean all)
-     */
+             * Performs batch zero-fill of dirty buffers.
+             * @param count Number of buffers to clean (0 = clean all)
+             */
             void batch_zero_fill(size_t count = 0) {
                 if (dirty_list.empty()) { return; }
 
@@ -199,8 +200,8 @@ namespace akkaradb::core {
             }
 
             /**
-     * Checks if opportunistic batch cleaning should be triggered.
-     */
+             * Checks if opportunistic batch cleaning should be triggered.
+             */
             [[nodiscard]] bool should_batch_clean() const noexcept { return dirty_list.size() >= DIRTY_THRESHOLD && clean_list.size() < CLEAN_LOW_WATERMARK; }
         };
     } // anonymous namespace
@@ -220,8 +221,8 @@ namespace akkaradb::core {
                   parent_{parent} {}
 
             /**
-     * Gets or creates the thread-local state for current thread.
-     */
+             * Gets or creates the thread-local state for current thread.
+             */
             [[nodiscard]] ThreadLocalState& get_tls() noexcept {
                 thread_local ThreadLocalState state{block_size_, alignment_, arena_capacity_, clean_capacity_, dirty_capacity_};
                 return state;
@@ -340,11 +341,11 @@ namespace akkaradb::core {
             PerThreadArena* parent_;
 
             /**
-     * Creates an OwnedBuffer from arena-allocated memory.
-     *
-     * The buffer doesn't own the memory (arena does).
-     * Uses wrap_non_owning() to prevent deallocation.
-     */
+             * Creates an OwnedBuffer from arena-allocated memory.
+             *
+             * The buffer doesn't own the memory (arena does).
+             * Uses wrap_non_owning() to prevent deallocation.
+             */
             [[nodiscard]] static OwnedBuffer create_arena_buffer(std::byte* ptr, size_t size) { return OwnedBuffer::wrap_non_owning(ptr, size); }
     };
 

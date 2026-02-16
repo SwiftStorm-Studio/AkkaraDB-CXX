@@ -23,11 +23,8 @@
 #include <algorithm>
 
 namespace akkaradb::core {
-    MemRecord::MemRecord(
-        const AKHdr32& header,
-        std::vector<uint8_t> key,
-        std::vector<uint8_t> value
-    ) noexcept : header_{header}, key_{std::move(key)}, value_{std::move(value)} { compute_approx_size(); }
+    MemRecord::MemRecord(const AKHdr32& header, std::vector<uint8_t> key, std::vector<uint8_t> value) noexcept
+        : header_{header}, key_{std::move(key)}, value_{std::move(value)} { compute_approx_size(); }
 
     void MemRecord::compute_approx_size() noexcept {
         // Header + key + value + vector overhead (approximation)
@@ -35,12 +32,7 @@ namespace akkaradb::core {
         approx_size_ = sizeof(AKHdr32) + key_.size() + value_.size() + vector_overhead;
     }
 
-    MemRecord MemRecord::create(
-        std::span<const uint8_t> key,
-        std::span<const uint8_t> value,
-        uint64_t seq,
-        uint8_t flags
-    ) {
+    MemRecord MemRecord::create(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags) {
         std::vector key_vec(key.begin(), key.end());
         std::vector value_vec(value.begin(), value.end());
 
@@ -57,12 +49,7 @@ namespace akkaradb::core {
         return MemRecord{header, std::move(key_vec), std::move(value_vec)};
     }
 
-    MemRecord MemRecord::create(
-        std::string_view key,
-        std::string_view value,
-        uint64_t seq,
-        uint8_t flags
-    ) {
+    MemRecord MemRecord::create(std::string_view key, std::string_view value, uint64_t seq, uint8_t flags) {
         const auto key_span = std::span{reinterpret_cast<const uint8_t*>(key.data()), key.size()};
         const auto value_span = std::span{reinterpret_cast<const uint8_t*>(value.data()), value.size()};
         return create(key_span, value_span, seq, flags);

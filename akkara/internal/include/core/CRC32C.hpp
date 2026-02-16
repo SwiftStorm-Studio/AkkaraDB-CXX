@@ -35,21 +35,21 @@ namespace akkaradb::core {
     class CRC32C {
         public:
             /**
-         * Computes CRC32C checksum.
-         *
-         * @param data Pointer to data
-         * @param size Size in bytes
-         * @return CRC32C checksum
-         */
+             * Computes CRC32C checksum.
+             *
+             * @param data Pointer to data
+             * @param size Size in bytes
+             * @return CRC32C checksum
+             */
             [[nodiscard]] static uint32_t compute(const uint8_t* data, size_t size) noexcept;
 
             /**
-         * Computes CRC32C checksum (convenience overload).
-         *
-         * @param data Pointer to data
-         * @param size Size in bytes
-         * @return CRC32C checksum
-         */
+             * Computes CRC32C checksum (convenience overload).
+             *
+             * @param data Pointer to data
+             * @param size Size in bytes
+             * @return CRC32C checksum
+             */
             [[nodiscard]] static uint32_t compute(const void* data, size_t size) noexcept { return compute(static_cast<const uint8_t*>(data), size); }
     };
 } // namespace akkaradb::core

@@ -22,12 +22,12 @@
 
 namespace akkaradb::core {
     uint32_t CRC32C::compute(const uint8_t* data, size_t size) noexcept {
-        constexpr uint32_t POLY = 0x82F63B78; // Castagnoli polynomial
-        uint32_t crc = 0xFFFFFFFF;
+        auto crc = 0xFFFFFFFF;
 
         for (size_t i = 0; i < size; ++i) {
             crc ^= static_cast<uint32_t>(data[i]);
-            for (int j = 0; j < 8; ++j) {
+            for (auto j = 0; j < 8; ++j) {
+                constexpr auto POLY = 0x82F63B78;
                 const uint32_t mask = (crc & 1)
                                           ? 0xFFFFFFFF
                                           : 0;

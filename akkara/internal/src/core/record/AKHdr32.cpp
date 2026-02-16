@@ -25,11 +25,11 @@
 namespace akkaradb::core {
     namespace {
         /**
- * SipHash-2-4 implementation.
- *
- * Reference: https://131002.net/siphash/
- * Seed: 0x5AD6DCD676D23C25 (default AkkaraDB seed)
- */
+         * SipHash-2-4 implementation.
+         *
+         * Reference: https://131002.net/siphash/
+         * Seed: 0x5AD6DCD676D23C25 (default AkkaraDB seed)
+         */
         class SipHash24 {
             public:
                 explicit SipHash24(uint64_t seed = 0x5AD6DCD676D23C25) noexcept {
@@ -124,13 +124,7 @@ namespace akkaradb::core {
         return mini;
     }
 
-    AKHdr32 AKHdr32::create(
-        const uint8_t* key,
-        size_t key_len,
-        size_t value_len,
-        uint64_t seq,
-        uint8_t flags
-    ) noexcept {
+    AKHdr32 AKHdr32::create(const uint8_t* key, size_t key_len, size_t value_len, uint64_t seq, uint8_t flags) noexcept {
         return AKHdr32{
             .k_len = static_cast<uint16_t>(key_len),
             .v_len = static_cast<uint32_t>(value_len),

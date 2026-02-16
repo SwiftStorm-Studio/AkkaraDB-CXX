@@ -107,7 +107,8 @@ namespace akkaradb::core {
         }
         #elif AKKARADB_HAS_AVX2
         // AVX2: 32 bytes per iteration
-        const __m256i zero = _mm256_setzero_si256(); while (remaining >= 32) {
+        const __m256i zero = _mm256_setzero_si256();
+        while (remaining >= 32) {
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(ptr), zero);
             ptr += 32;
             remaining -= 32;
@@ -127,31 +128,32 @@ namespace akkaradb::core {
     uint32_t BufferView::crc32c(size_t offset, size_t length) const {
         check_bounds(offset, length);
 
-        uint32_t crc = 0xFFFFFFFF;
+        auto crc = 0xFFFFFFFF;
         const auto* ptr = reinterpret_cast<const uint8_t*>(data_ + offset);
 
         #if AKKARADB_HAS_SSE42
-        size_t remaining = length; while (remaining >= 8) {
+        size_t remaining = length;
+        while (remaining >= 8) {
             uint64_t chunk;
             std::memcpy(&chunk, ptr, 8);
             crc = static_cast<uint32_t>(_mm_crc32_u64(crc, chunk));
             ptr += 8;
             remaining -= 8;
-        } while (remaining >= 4) {
+        }
+        while (remaining >= 4) {
             uint32_t chunk;
             std::memcpy(&chunk, ptr, 4);
             crc = _mm_crc32_u32(crc, chunk);
             ptr += 4;
             remaining -= 4;
-        } while (remaining > 0) {
+        }
+        while (remaining > 0) {
             crc = _mm_crc32_u8(crc, *ptr);
             ++ptr;
             --remaining;
         }
         #else
-        static constexpr uint32_t poly = 0x82F63B78;
-
-        for (size_t i = 0; i < length; ++i) {
+        static constexpr uint32_t poly = 0x82F63B78; for (size_t i = 0; i < length; ++i) {
             crc ^= ptr[i];
             for (int j = 0; j < 8; ++j) { crc = (crc >> 1) ^ (poly & (-(crc & 1))); }
         }

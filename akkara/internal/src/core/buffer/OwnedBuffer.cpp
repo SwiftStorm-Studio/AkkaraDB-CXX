@@ -49,14 +49,13 @@ namespace akkaradb::core {
             #else
             // Linux (glibc >= 2.16), FreeBSD: aligned_alloc
             // Note: size must be multiple of alignment for aligned_alloc
-            const size_t adjusted_size = (size + alignment - 1) & ~(alignment - 1);
-            return std::aligned_alloc(alignment, adjusted_size);
+            const size_t adjusted_size = (size + alignment - 1) & ~(alignment - 1); return std::aligned_alloc(alignment, adjusted_size);
             #endif
         }
 
         /**
- * Platform-agnostic aligned memory deallocation.
- */
+         * Platform-agnostic aligned memory deallocation.
+         */
         void deallocate_aligned(void* ptr) noexcept {
             #if defined(_WIN32)
             _aligned_free(ptr);
