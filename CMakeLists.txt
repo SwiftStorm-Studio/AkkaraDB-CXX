@@ -78,7 +78,11 @@ target_sources(akkaradb PRIVATE
         # Core - CRC
         ${INTERNAL_INCLUDE_DIR}/core/CRC32C.hpp
 
+        # Engine
+        ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
 
+        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalOp.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalFraming.hpp
 )
 
 # Internal implementation (internal/src)
@@ -96,7 +100,8 @@ target_sources(akkaradb PRIVATE
         # Core - CRC
         ${INTERNAL_SRC_DIR}/core/CRC32C.cpp
 
-
+        ${INTERNAL_SRC_DIR}/engine/wal/WalOp.cpp
+        ${INTERNAL_SRC_DIR}/engine/wal/WalFraming.cpp
 )
 
 # Include directories
@@ -161,7 +166,7 @@ message(STATUS "Building AkkaraDB benchmarks")
 
 # Benchmark executable
 add_executable(akkaradb_benchmark
-        benchmarks/main_benchmark.cpp
+        benchmarks/benchmark.cpp
 )
 
 if (MSVC)

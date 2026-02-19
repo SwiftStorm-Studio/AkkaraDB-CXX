@@ -1,0 +1,8 @@
+//
+// Created by main on 2026/02/17.
+//
+
+#ifndef AKKARADB_AKKENGINE_HPP
+#define AKKARADB_AKKENGINE_HPP
+
+#endif //AKKARADB_AKKENGINE_HPP
