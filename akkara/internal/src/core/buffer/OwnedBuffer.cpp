@@ -1,20 +1,19 @@
 /*
-* AkkaraDB
- * Copyright (C) 2025 Swift Storm Studio
+ * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * Copyright (C) 2026 RiriFa
  *
- * This file is part of AkkaraDB.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the License.
  *
- * AkkaraDB is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
- *
- * AkkaraDB is distributed in the hope that it will be useful,
+ * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
- * along with AkkaraDB.  If not, see <https://www.gnu.org/licenses/>.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 // internal/src/core/buffer/OwnedBuffer.cpp
@@ -49,7 +48,8 @@ namespace akkaradb::core {
             #else
             // Linux (glibc >= 2.16), FreeBSD: aligned_alloc
             // Note: size must be multiple of alignment for aligned_alloc
-            const size_t adjusted_size = (size + alignment - 1) & ~(alignment - 1); return std::aligned_alloc(alignment, adjusted_size);
+            const size_t adjusted_size = (size + alignment - 1) & ~(alignment - 1);
+            return std::aligned_alloc(alignment, adjusted_size);
             #endif
         }
 

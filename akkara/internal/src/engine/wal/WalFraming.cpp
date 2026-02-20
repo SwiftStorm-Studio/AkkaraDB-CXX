@@ -1,20 +1,19 @@
 /*
- * AkkaraDB
- * Copyright (C) 2025 Swift Storm Studio
+ * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * Copyright (C) 2026 RiriFa
  *
- * This file is part of AkkaraDB.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the License.
  *
- * AkkaraDB is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
- *
- * AkkaraDB is distributed in the hope that it will be useful,
+ * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
- * along with AkkaraDB.  If not, see <https://www.gnu.org/licenses/>.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 // internal/src/engine/wal/WalFraming.cpp
@@ -50,14 +49,16 @@ namespace akkaradb::wal {
     bool WalSegmentHeader::verify_checksum(core::BufferView buffer) const noexcept {
         if (buffer.size() < SIZE) return false;
 
-        // Read stored CRC, temporarily zero the field, compute, restore
+        // Copy header into local buffer, zero the crc32c field, then compute —
+        // avoids const_cast on this and avoids mutating the caller's buffer.
+        std::byte tmp[SIZE];
+        std::memcpy(tmp, buffer.data(), SIZE);
+
         const uint32_t stored = crc32c;
-        const_cast<WalSegmentHeader*>(this)->crc32c = 0;
+        const uint32_t zero = 0;
+        std::memcpy(tmp + offsetof(WalSegmentHeader, crc32c), &zero, sizeof(zero));
 
-        uint32_t computed = buffer.crc32c(0, SIZE);
-
-        const_cast<WalSegmentHeader*>(this)->crc32c = stored;
-
+        const uint32_t computed = core::BufferView{tmp, SIZE}.crc32c(0, SIZE);
         return stored == computed;
     }
 
@@ -90,17 +91,19 @@ namespace akkaradb::wal {
     // ============================================================================
 
     uint32_t WalBatchHeader::compute_checksum(core::BufferView buffer, size_t total_size) noexcept {
-        // Save and zero the crc32c field
+        // buffer.data() is non-const std::byte*, so direct memcpy is safe.
+        // Save the stored crc32c, zero it in-place, compute, then restore —
+        // no const_cast needed.
         uint32_t original;
         std::memcpy(&original, buffer.data() + offsetof(WalBatchHeader, crc32c), sizeof(original));
 
         const uint32_t zero = 0;
-        std::memcpy(const_cast<std::byte*>(buffer.data()) + offsetof(WalBatchHeader, crc32c), &zero, sizeof(zero));
+        std::memcpy(buffer.data() + offsetof(WalBatchHeader, crc32c), &zero, sizeof(zero));
 
         const uint32_t crc = buffer.crc32c(0, total_size);
 
         // Restore
-        std::memcpy(const_cast<std::byte*>(buffer.data()) + offsetof(WalBatchHeader, crc32c), &original, sizeof(original));
+        std::memcpy(buffer.data() + offsetof(WalBatchHeader, crc32c), &original, sizeof(original));
 
         return crc;
     }

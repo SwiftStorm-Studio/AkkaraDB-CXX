@@ -1,20 +1,19 @@
 /*
- * AkkaraDB
- * Copyright (C) 2025 Swift Storm Studio
+ * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * Copyright (C) 2026 RiriFa
  *
- * This file is part of AkkaraDB.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the License.
  *
- * AkkaraDB is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
- *
- * AkkaraDB is distributed in the hope that it will be useful,
+ * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
- * along with AkkaraDB.  If not, see <https://www.gnu.org/licenses/>.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 // internal/src/core/buffer/PerThreadArena.cpp
@@ -62,9 +61,8 @@ namespace akkaradb::core {
 
                     #if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
                     // Use mmap for large page support
-                    base_ = mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); if (base_ == MAP_FAILED) {
-                        throw std::bad_alloc{};
-                    }
+                    base_ = mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                    if (base_ == MAP_FAILED) { throw std::bad_alloc{}; }
 
                     #ifdef __linux__
                     // Advise kernel to use transparent huge pages for better TLB performance
@@ -73,8 +71,7 @@ namespace akkaradb::core {
 
                     #else
                     // Fallback to aligned_alloc for non-POSIX systems
-                    base_ = OwnedBuffer::allocate(total_size, alignment).release();
-                    if (!base_) { throw std::bad_alloc{}; }
+                    base_ = OwnedBuffer::allocate(total_size, alignment).release(); if (!base_) { throw std::bad_alloc{}; }
                     #endif
 
                     current_ = static_cast<std::byte*>(base_);

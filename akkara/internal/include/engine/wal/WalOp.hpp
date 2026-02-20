@@ -1,20 +1,19 @@
 /*
- * AkkaraDB
- * Copyright (C) 2025 Swift Storm Studio
+ * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * Copyright (C) 2026 RiriFa
  *
- * This file is part of AkkaraDB.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the License.
  *
- * AkkaraDB is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
- *
- * AkkaraDB is distributed in the hope that it will be useful,
+ * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
- * along with AkkaraDB.  If not, see <https://www.gnu.org/licenses/>.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 // internal/include/core/wal/WalOp.hpp
@@ -88,7 +87,7 @@ namespace akkaradb::wal {
      * - No intermediate object creation
      * - Direct memcpy to target buffer
      *
-     * Layout: [WalEntryHeader:12B][AKHdr32:32B][key][value]
+     * Layout: [WalEntryHeader:8B][AKHdr32:32B][key][value]
      *
      * @param buffer Target buffer (must have enough space)
      * @param key Key bytes
@@ -116,7 +115,7 @@ namespace akkaradb::wal {
      * - No intermediate object creation
      * - Tombstone with v_len = 0
      *
-     * Layout: [WalEntryHeader:12B][AKHdr32:32B][key]
+     * Layout: [WalEntryHeader:8B][AKHdr32:32B][key]
      *
      * @param buffer Target buffer (must have enough space)
      * @param key Key bytes
@@ -139,12 +138,12 @@ namespace akkaradb::wal {
      *
      * Performance: ~50-100ns
      *
-     * Layout: [WalEntryHeader:12B][seq:u64][timestamp:u64]
+     * Layout: [WalEntryHeader:8B][seq:u64][timestamp:u64]
      *
-     * @param buffer Target buffer (must have at least 28 bytes)
+     * @param buffer Target buffer (must have at least 24 bytes)
      * @param seq Sequence number
      * @param timestamp Timestamp in microseconds (0 = current time)
-     * @return Number of bytes written (always 28)
+     * @return Number of bytes written (always 24)
      * @throws std::out_of_range if buffer is too small
      */
     [[nodiscard]] size_t serialize_commit_direct(core::BufferView buffer, uint64_t seq, uint64_t timestamp = 0);
@@ -173,10 +172,10 @@ namespace akkaradb::wal {
             /**
              * Constructs a zero-copy view from buffer.
              *
-             * Buffer layout: [WalEntryHeader:12B][AKHdr32:32B][key][value]
+             * Buffer layout: [WalEntryHeader:8B][AKHdr32:32B][key][value]
              *
              * @param buffer Buffer containing serialized WalRecordOp
-             * @throws std::runtime_error if buffer is malformed or checksum fails
+             * @throws std::runtime_error if buffer is malformed
              */
             explicit WalRecordOpRef(core::BufferView buffer);
 

@@ -1,16 +1,10 @@
 # AkkaraDB C++ - Shared Library Build Configuration
 cmake_minimum_required(VERSION 4.1)
-project(AkkaraDB VERSION 0.1.0 LANGUAGES CXX)
-
-include(FetchContent)
-
-FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG v3.12.0
+project(AkkaraDB
+        DESCRIPTION "Low-latency, crash-safe JVM KV store with WAL & stripe parity"
+        VERSION 0.1.0
+        LANGUAGES CXX
 )
-
-FetchContent_MakeAvailable(nlohmann_json)
 
 # ==================== ! Build Options ! ====================
 option(BUILD_SHARED_LIBS "Build shared libraries (.so/.dll)" ON)
@@ -50,6 +44,11 @@ if (AKKARADB_ENABLE_SIMD)
     endif ()
 endif ()
 
+# ==================== Windows-specific definitions ====================
+if (WIN32)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif ()
+
 # ==================== Main Library ====================
 add_library(akkaradb)
 
@@ -83,6 +82,7 @@ target_sources(akkaradb PRIVATE
 
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalOp.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalFraming.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalWriter.hpp
 )
 
 # Internal implementation (internal/src)
@@ -102,6 +102,7 @@ target_sources(akkaradb PRIVATE
 
         ${INTERNAL_SRC_DIR}/engine/wal/WalOp.cpp
         ${INTERNAL_SRC_DIR}/engine/wal/WalFraming.cpp
+        ${INTERNAL_SRC_DIR}/engine/wal/WalWriter.cpp
 )
 
 # Include directories
@@ -111,12 +112,6 @@ target_include_directories(akkaradb
         $<INSTALL_INTERFACE:include>
         PRIVATE
         ${INTERNAL_INCLUDE_DIR}
-)
-
-# Link dependencies
-target_link_libraries(akkaradb
-        PRIVATE
-        nlohmann_json::nlohmann_json
 )
 
 # Specify C++ linker
