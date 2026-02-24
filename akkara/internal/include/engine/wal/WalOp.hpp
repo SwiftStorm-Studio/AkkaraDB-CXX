@@ -1,6 +1,6 @@
 /*
  * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
- * Copyright (C) 2026 RiriFa
+ * Copyright (C) 2026 Swift Storm Studio
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -44,7 +44,7 @@ namespace akkaradb::wal {
      * WalEntryHeader - Fixed-size header for all WAL entries.
      *
      * On-disk layout (8 bytes):
-     * [total_len:u32][entry_type:u8][reserved:u8×3]
+     * [total_len:u32][entry_type:u8][reserved:u8ÁE]
      *
      * Design:
      * - total_len: Total entry size including this header

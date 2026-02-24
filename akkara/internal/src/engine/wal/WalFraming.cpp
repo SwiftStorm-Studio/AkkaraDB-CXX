@@ -1,6 +1,6 @@
 /*
  * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
- * Copyright (C) 2026 RiriFa
+ * Copyright (C) 2026 Swift Storm Studio
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -49,8 +49,7 @@ namespace akkaradb::wal {
     bool WalSegmentHeader::verify_checksum(core::BufferView buffer) const noexcept {
         if (buffer.size() < SIZE) return false;
 
-        // Copy header into local buffer, zero the crc32c field, then compute —
-        // avoids const_cast on this and avoids mutating the caller's buffer.
+        // Copy header into local buffer, zero the crc32c field, then compute  E        // avoids const_cast on this and avoids mutating the caller's buffer.
         std::byte tmp[SIZE];
         std::memcpy(tmp, buffer.data(), SIZE);
 
@@ -92,8 +91,7 @@ namespace akkaradb::wal {
 
     uint32_t WalBatchHeader::compute_checksum(core::BufferView buffer, size_t total_size) noexcept {
         // buffer.data() is non-const std::byte*, so direct memcpy is safe.
-        // Save the stored crc32c, zero it in-place, compute, then restore —
-        // no const_cast needed.
+        // Save the stored crc32c, zero it in-place, compute, then restore  E        // no const_cast needed.
         uint32_t original;
         std::memcpy(&original, buffer.data() + offsetof(WalBatchHeader, crc32c), sizeof(original));
 

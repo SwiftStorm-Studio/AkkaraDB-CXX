@@ -1,6 +1,6 @@
 /*
  * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
- * Copyright (C) 2026 RiriFa
+ * Copyright (C) 2026 Swift Storm Studio
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
@@ -51,10 +51,10 @@ namespace akkaradb::wal {
     class FileHandle {
         public:
             #ifdef _WIN32
-            using NativeHandle = HANDLE;
-            static const NativeHandle INVALID_H;
+            using NativeHandle = HANDLE; static const NativeHandle INVALID_H;
             #else
-            using NativeHandle = int; static constexpr NativeHandle INVALID_H = -1;
+            using NativeHandle = int;
+            static constexpr NativeHandle INVALID_H = -1;
             #endif
 
             FileHandle() noexcept : handle_{INVALID_H} {}
@@ -78,13 +78,15 @@ namespace akkaradb::wal {
                 FileHandle fh;
                 #ifdef _WIN32
                 fh.handle_ = ::CreateFileW(path.c_str(), GENERIC_WRITE | GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-                if (fh.handle_ == INVALID_H) { throw std::runtime_error("FileHandle::open failed: " + path.string()); }
-                // Seek to end for append behaviour
-                ::SetFilePointer(fh.handle_, 0, nullptr, FILE_END);
+                if (fh.handle_ == INVALID_H) { throw std::runtime_error("FileHandle::open failed: " + path.string()); } ::SetFilePointer(
+                    fh.handle_,
+                    0,
+                    nullptr,
+                    FILE_END
+                );
                 #else
-                fh.handle_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644); if (fh.handle_ < 0) {
-                    throw std::runtime_error("FileHandle::open failed: " + path.string() + ": " + std::strerror(errno));
-                }
+                fh.handle_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (fh.handle_ < 0) { throw std::runtime_error("FileHandle::open failed: " + path.string() + ": " + std::strerror(errno)); }
                 #endif
                 return fh;
             }
@@ -93,7 +95,6 @@ namespace akkaradb::wal {
                 if (size == 0) return;
                 size_t written = 0;
                 const auto* ptr = static_cast<const uint8_t*>(data);
-
                 #ifdef _WIN32
                 while (written < size) {
                     DWORD w = 0;
@@ -141,20 +142,19 @@ namespace akkaradb::wal {
              */
             [[nodiscard]] uint64_t file_size() const noexcept {
                 #ifdef _WIN32
-                LARGE_INTEGER sz{};
-                if (!::GetFileSizeEx(handle_, &sz)) return 0;
-                return static_cast<uint64_t>(sz.QuadPart);
+                LARGE_INTEGER sz{}; if (!::GetFileSizeEx(handle_, &sz)) return 0; return static_cast<uint64_t>(sz.QuadPart);
                 #else
-                const off_t pos = ::lseek(handle_, 0, SEEK_END); return pos < 0
-                                                                            ? 0
-                                                                            : static_cast<uint64_t>(pos);
+                // fstat is correct for O_APPEND fds; lseek return value can be
+                // ignored by the kernel on append-mode files in some Linux versions.
+                struct stat st{};
+                if (::fstat(handle_, &st) < 0) return 0;
+                return static_cast<uint64_t>(st.st_size);
                 #endif
             }
 
             void truncate() {
                 #ifdef _WIN32
-                ::SetFilePointer(handle_, 0, nullptr, FILE_BEGIN);
-                if (!::SetEndOfFile(handle_)) { throw std::runtime_error("FileHandle::truncate failed"); }
+                ::SetFilePointer(handle_, 0, nullptr, FILE_BEGIN); if (!::SetEndOfFile(handle_)) { throw std::runtime_error("FileHandle::truncate failed"); }
                 ::SetFilePointer(handle_, 0, nullptr, FILE_END);
                 #else
                 if (::ftruncate(handle_, 0) < 0) { throw std::runtime_error(std::string("FileHandle::truncate failed: ") + std::strerror(errno)); }
@@ -179,7 +179,6 @@ namespace akkaradb::wal {
     };
 
     #ifdef _WIN32
-    // INVALID_HANDLE_VALUE contains a C-style cast and cannot be constexpr; define out-of-line.
     const FileHandle::NativeHandle FileHandle::INVALID_H = INVALID_HANDLE_VALUE;
     #endif
 
@@ -273,28 +272,38 @@ namespace akkaradb::wal {
     // ShardWriter - one flusher thread per shard
     // ============================================================================
 
-    // Batch arena block size: large enough to hold typical batches without fallback
     static constexpr size_t BATCH_ARENA_BLOCK_SIZE = 256 * 1024; // 256 KB
 
     class ShardWriter {
         public:
-            ShardWriter(uint32_t shard_id, const std::filesystem::path& wal_dir, size_t group_n, size_t group_micros, std::atomic<uint64_t>& global_batch_seq)
+            ShardWriter(
+                uint32_t shard_id,
+                const std::filesystem::path& wal_dir,
+                size_t group_n,
+                size_t group_micros,
+                uint64_t max_segment_bytes,
+                std::atomic<uint64_t>& global_batch_seq
+            )
                 : shard_id_{shard_id},
+                  wal_dir_{wal_dir},
                   group_n_{group_n},
                   group_micros_{group_micros},
+                  max_segment_bytes_{max_segment_bytes},
                   global_batch_seq_{global_batch_seq},
                   stopped_{false},
-                  needs_segment_header_{false} {
-                // Shard file: shard_0000.akwal, shard_0001.akwal, ...
-                const auto filename = std::format("shard_{:04d}.akwal", shard_id);
-                file_ = FileHandle::open(wal_dir / filename);
+                  needs_segment_header_{false},
+                  current_segment_bytes_{0} {
+                file_ = FileHandle::open(segment_path(shard_id_, segment_id_));
 
-                // Write SegmentHeader if file is new (empty)
-                if (file_.file_size() == 0) { write_segment_header(); }
+                // If the file was newly created (size == 0), write the segment header now.
+                // If it already exists (crash recovery scenario), skip - WalReader handles it.
+                if (file_.file_size() == 0) {
+                    write_segment_header();
+                    current_segment_bytes_ = WalSegmentHeader::SIZE;
+                }
+                else { current_segment_bytes_ = file_.file_size(); }
 
-                // PerThreadArena for batch buffer reuse (flusher thread only)
                 batch_arena_ = core::PerThreadArena::create(BATCH_ARENA_BLOCK_SIZE, 4096);
-
                 flusher_ = std::thread([this] { flusher_loop(); });
             }
 
@@ -304,12 +313,15 @@ namespace akkaradb::wal {
             ShardWriter& operator=(const ShardWriter&) = delete;
 
             void enqueue(core::OwnedBuffer entry_buf, std::shared_ptr<Waiter> waiter) {
+                bool was_empty;
                 {
                     std::lock_guard lock{queue_mutex_};
-                    const size_t prev = queue_.size();
+                    was_empty = queue_.empty();
                     queue_.push_back(Command::write(std::move(entry_buf), std::move(waiter)));
-                    if (prev == 0) queue_cv_.notify_one(); // 0→1 transition only
                 }
+                // Notify outside the lock: avoids the "notify-then-block" pattern
+                // where the flusher wakes up only to immediately contend on queue_mutex_.
+                if (was_empty) queue_cv_.notify_one();
             }
 
             void enqueue_force_sync(std::shared_ptr<Waiter> waiter) {
@@ -340,13 +352,39 @@ namespace akkaradb::wal {
             }
 
         private:
+            // ── Segment path helper ───────────────────────────────────────────────
+
+            [[nodiscard]] std::filesystem::path segment_path(uint32_t shard_id, uint64_t seg_id) const {
+                return wal_dir_ / std::format("shard_{:04d}_seg{:04d}.akwal", shard_id, seg_id);
+            }
+
+            // ── Segment header / rotation ─────────────────────────────────────────
+
             void write_segment_header() {
-                // Write segment header directly (before flusher starts)
                 uint8_t hdr_buf[WalSegmentHeader::SIZE];
                 core::BufferView hdr_view{reinterpret_cast<std::byte*>(hdr_buf), WalSegmentHeader::SIZE};
-                WalSegmentHeader::write(hdr_view, static_cast<uint16_t>(shard_id_), segment_id_++);
+                WalSegmentHeader::write(hdr_view, static_cast<uint16_t>(shard_id_), segment_id_);
                 file_.write(hdr_buf, WalSegmentHeader::SIZE);
             }
+
+            /**
+             * Closes the current segment, increments segment_id_, opens the next
+             * segment file, writes its header, and resets current_segment_bytes_.
+             *
+             * Called from the flusher thread only - no locking needed.
+             */
+            void rotate_segment() {
+                // Ensure the current segment is fully durable before closing.
+                file_.fdatasync();
+                file_.close();
+
+                ++segment_id_;
+                file_ = FileHandle::open(segment_path(shard_id_, segment_id_));
+                write_segment_header();
+                current_segment_bytes_ = WalSegmentHeader::SIZE;
+            }
+
+            // ── Flusher loop ──────────────────────────────────────────────────────
 
             void flusher_loop() {
                 std::vector<Command> local;
@@ -357,7 +395,6 @@ namespace akkaradb::wal {
 
                 try {
                     while (true) {
-                        // Wait for work
                         {
                             std::unique_lock lock{queue_mutex_};
                             queue_cv_.wait_for(
@@ -369,16 +406,13 @@ namespace akkaradb::wal {
                                 if (stopped_.load(std::memory_order_relaxed)) break;
                                 continue;
                             }
-                            // Drain entire queue in O(1) — producers unblocked immediately
                             std::swap(queue_, local);
                         }
 
-                        // Process local batch without holding queue_mutex_
                         bool do_shutdown = false;
                         size_t i = 0;
                         while (i < local.size() && !do_shutdown) {
                             if (local[i].type == Command::Type::WRITE) {
-                                // Accumulate consecutive WRITEs up to group_n_
                                 write_batch.push_back(std::move(local[i++]));
                                 while (i < local.size() && local[i].type == Command::Type::WRITE && write_batch.size() < group_n_) {
                                     write_batch.push_back(std::move(local[i++]));
@@ -397,7 +431,6 @@ namespace akkaradb::wal {
                     }
                 }
                 catch (...) {
-                    // Propagate error to all waiting callers
                     auto ep = std::current_exception();
                     for (auto& cmd : write_batch) { if (cmd.waiter) cmd.waiter->signal_error(ep); }
                     for (auto& cmd : local) { if (cmd.waiter) cmd.waiter->signal_error(ep); }
@@ -405,7 +438,6 @@ namespace akkaradb::wal {
                     return;
                 }
 
-                // Final fsync on clean shutdown
                 try { file_.fdatasync(); }
                 catch (...) {}
             }
@@ -413,42 +445,49 @@ namespace akkaradb::wal {
             void flush_write_batch(std::vector<Command>& batch) {
                 if (batch.empty()) return;
 
-                // Calculate total size
+                // Re-write SegmentHeader if this shard was truncated since the
+                // last flush. Must happen before any batch data so that
+                // WalReader always finds a valid header at offset 0.
+                if (needs_segment_header_) {
+                    write_segment_header();
+                    needs_segment_header_ = false;
+                    current_segment_bytes_ = WalSegmentHeader::SIZE;
+                }
+
+                // Rotate to a new segment if the current one is at or beyond the limit.
+                // Check before writing so the new batch lands in the fresh segment.
+                if (max_segment_bytes_ > 0 && current_segment_bytes_ >= max_segment_bytes_) { rotate_segment(); }
+
                 size_t entries_total = 0;
                 for (const auto& cmd : batch) entries_total += cmd.buffer.size();
 
                 const size_t batch_total = WalBatchHeader::SIZE + entries_total;
 
-                // Acquire batch buffer (reused via PerThreadArena when possible)
                 core::OwnedBuffer batch_buf = (batch_total <= BATCH_ARENA_BLOCK_SIZE)
                                                   ? batch_arena_->acquire(/*skip_zero_fill=*/true)
                                                   : core::OwnedBuffer::allocate(batch_total, 4096);
 
                 core::BufferView view = batch_buf.view();
 
-                // Write BatchHeader (crc32c = 0 placeholder)
                 const uint64_t bseq = global_batch_seq_.fetch_add(1, std::memory_order_relaxed);
                 WalBatchHeader::write(view, bseq, static_cast<uint32_t>(batch.size()), static_cast<uint32_t>(batch_total));
 
-                // Concatenate all entries into batch buffer
                 size_t offset = WalBatchHeader::SIZE;
                 for (const auto& cmd : batch) {
                     std::memcpy(reinterpret_cast<uint8_t*>(view.data()) + offset, cmd.buffer.data(), cmd.buffer.size());
                     offset += cmd.buffer.size();
                 }
 
-                // Finalize CRC over [BatchHeader(crc=0) + all entries]
                 WalBatchHeader::finalize_checksum(view, batch_total);
 
-                // Single write syscall — arena release is guaranteed via scope exit
                 std::exception_ptr write_ex;
                 try {
                     file_.write(view.data(), batch_total);
                     file_.fdatasync();
+                    current_segment_bytes_ += batch_total;
                 }
                 catch (...) { write_ex = std::current_exception(); }
 
-                // Return batch buffer to arena for reuse (both success and error paths)
                 if (batch_total <= BATCH_ARENA_BLOCK_SIZE) { batch_arena_->release(std::move(batch_buf)); }
 
                 if (write_ex) {
@@ -456,14 +495,9 @@ namespace akkaradb::wal {
                     std::rethrow_exception(write_ex);
                 }
 
-                // Signal all waiters (fast_mode=false callers)
                 for (auto& cmd : batch) { if (cmd.waiter) cmd.waiter->signal(); }
             }
 
-            /**
-             * Handles a control command (FORCE_SYNC, TRUNCATE, SHUTDOWN).
-             * @return true if SHUTDOWN was processed
-             */
             bool handle_control(Command& cmd) {
                 try {
                     switch (cmd.type) {
@@ -473,9 +507,9 @@ namespace akkaradb::wal {
                             return false;
 
                         case Command::Type::TRUNCATE:
-                            file_.truncate();
-                            file_.fsync_full();
-                            // Next write will need a fresh SegmentHeader
+                            // Truncate all segment files for this shard, then reset
+                            // to segment 0 and schedule a fresh SegmentHeader.
+                            truncate_all_segments();
                             needs_segment_header_ = true;
                             if (cmd.waiter) cmd.waiter->signal();
                             return false;
@@ -493,6 +527,30 @@ namespace akkaradb::wal {
                 }
             }
 
+            /**
+             * Truncates the active segment and deletes any older segment files
+             * for this shard (shard_{id}_seg0001.akwal, seg0002.akwal, ...).
+             * Resets segment_id_ to 0 and current_segment_bytes_ to 0.
+             */
+            void truncate_all_segments() {
+                // Close and delete all segments beyond seg0000.
+                for (uint64_t s = segment_id_; s > 0; --s) {
+                    if (s == segment_id_) file_.close(); // close active before deleting
+                    std::filesystem::remove(segment_path(shard_id_, s));
+                }
+
+                // If we were already on seg0, file_ is still open; just truncate it.
+                // If we closed it above (segment_id_ > 0), reopen seg0 and truncate.
+                if (segment_id_ > 0) {
+                    segment_id_ = 0;
+                    file_ = FileHandle::open(segment_path(shard_id_, 0));
+                }
+
+                file_.truncate();
+                file_.fsync_full();
+                current_segment_bytes_ = 0;
+            }
+
             void drain_queue_on_error(const std::exception_ptr& ep) {
                 std::lock_guard lock{queue_mutex_};
                 for (auto& cmd : queue_) { if (cmd.waiter) cmd.waiter->signal_error(ep); }
@@ -502,11 +560,13 @@ namespace akkaradb::wal {
             // ── Members ──────────────────────────────────────────────────────────
 
             uint32_t shard_id_;
+            std::filesystem::path wal_dir_;
             uint64_t segment_id_{0};
             size_t group_n_;
             size_t group_micros_;
+            uint64_t max_segment_bytes_;
 
-            std::atomic<uint64_t>& global_batch_seq_; ///< Shared across all shards
+            std::atomic<uint64_t>& global_batch_seq_;
 
             FileHandle file_;
             std::unique_ptr<core::PerThreadArena> batch_arena_;
@@ -518,7 +578,8 @@ namespace akkaradb::wal {
             std::thread flusher_;
             std::atomic<bool> stopped_;
 
-            bool needs_segment_header_; ///< true after truncate(), reset on next flush
+            bool needs_segment_header_;
+            uint64_t current_segment_bytes_; ///< Bytes written to the active segment so far
     };
 
     // ============================================================================
@@ -526,10 +587,8 @@ namespace akkaradb::wal {
     // ============================================================================
 
     static uint32_t resolve_shard_count(uint32_t requested) {
-        if (requested == 0) return compute_shard_count(); // auto: {2,4,8,16}
-        if (requested == 1) return 1; // effectively single-shard
-
-        // Round up to nearest power of 2, cap at 16
+        if (requested == 0) return compute_shard_count();
+        if (requested == 1) return 1;
         uint32_t n = 2;
         while (n < requested) n <<= 1;
         return std::min(n, 16u);
@@ -541,19 +600,19 @@ namespace akkaradb::wal {
 
     class WalWriter::Impl {
         public:
-            Impl(std::filesystem::path wal_dir, size_t group_n, size_t group_micros, bool fast_mode, uint32_t shard_count_req)
-                : wal_dir_{std::move(wal_dir)},
-                  group_n_{group_n},
-                  group_micros_{group_micros},
-                  fast_mode_{fast_mode},
-                  shard_count_{resolve_shard_count(shard_count_req)},
+            explicit Impl(WalOptions opts)
+                : wal_dir_{std::move(opts.wal_dir)},
+                  group_n_{opts.group_n},
+                  group_micros_{opts.group_micros},
+                  fast_mode_{opts.fast_mode},
+                  shard_count_{resolve_shard_count(opts.shard_count)},
+                  max_segment_bytes_{opts.max_segment_bytes},
                   global_batch_seq_{0},
                   running_{true} {
                 std::filesystem::create_directories(wal_dir_);
-
                 shards_.reserve(shard_count_);
                 for (uint32_t id = 0; id < shard_count_; ++id) {
-                    shards_.push_back(std::make_unique<ShardWriter>(id, wal_dir_, group_n_, group_micros_, global_batch_seq_));
+                    shards_.push_back(std::make_unique<ShardWriter>(id, wal_dir_, group_n_, group_micros_, max_segment_bytes_, global_batch_seq_));
                 }
             }
 
@@ -561,76 +620,26 @@ namespace akkaradb::wal {
 
             void append_put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint64_t key_fp64, uint64_t mini_key) {
                 if (!running_.load(std::memory_order_acquire)) { throw std::runtime_error("WalWriter is closed"); }
-
-                // ── (1) Serialize into TLS staging buffer ──────────────────────
-                // TLS buffer is capped at TLS_BUF_MAX to prevent unbounded growth
-                // when a single large entry is written (e.g. 10MB value).
-                // Entries exceeding the cap are serialized directly into a
-                // one-shot OwnedBuffer, bypassing TLS entirely.
-                static constexpr size_t TLS_BUF_MAX = 1024 * 1024; // 1 MB
-                thread_local std::vector<uint8_t> tls_buf;
-
                 const size_t needed = WalEntryHeader::SIZE + sizeof(core::AKHdr32) + key.size() + value.size();
-
-                size_t written;
-                core::OwnedBuffer entry_buf;
-
-                if (needed <= TLS_BUF_MAX) {
-                    // Fast path: reuse TLS buffer (zero-allocation steady state)
-                    if (tls_buf.size() < needed) tls_buf.resize(needed);
-                    core::BufferView tls_view{reinterpret_cast<std::byte*>(tls_buf.data()), needed};
-                    written = serialize_add_direct(tls_view, key, value, seq, key_fp64, mini_key);
-
-                    // ── (2) Copy into OwnedBuffer (copy #1) ───────────────────
-                    entry_buf = core::OwnedBuffer::allocate(written, 64);
-                    std::memcpy(entry_buf.data(), tls_buf.data(), written);
-                }
-                else {
-                    // Slow path: oversized entry — allocate directly, skip TLS
-                    entry_buf = core::OwnedBuffer::allocate(needed, 64);
-                    core::BufferView direct_view{reinterpret_cast<std::byte*>(entry_buf.data()), needed};
-                    written = serialize_add_direct(direct_view, key, value, seq, key_fp64, mini_key);
-                }
-
-                // ── (3) Enqueue to shard ───────────────────────────────────────
-                enqueue_entry(key_fp64, std::move(entry_buf));
+                enqueue_entry(
+                    key_fp64,
+                    serialize_to_owned(needed, [&](core::BufferView v) { return serialize_add_direct(v, key, value, seq, key_fp64, mini_key); })
+                );
             }
 
             void append_delete(std::span<const uint8_t> key, uint64_t seq, uint64_t key_fp64, uint64_t mini_key) {
                 if (!running_.load(std::memory_order_acquire)) { throw std::runtime_error("WalWriter is closed"); }
-
-                static constexpr size_t TLS_BUF_MAX = 1024 * 1024; // 1 MB
-                thread_local std::vector<uint8_t> tls_buf;
-
                 const size_t needed = WalEntryHeader::SIZE + sizeof(core::AKHdr32) + key.size();
-
-                size_t written;
-                core::OwnedBuffer entry_buf;
-
-                if (needed <= TLS_BUF_MAX) {
-                    if (tls_buf.size() < needed) tls_buf.resize(needed);
-                    core::BufferView tls_view{reinterpret_cast<std::byte*>(tls_buf.data()), needed};
-                    written = serialize_delete_direct(tls_view, key, seq, key_fp64, mini_key);
-
-                    entry_buf = core::OwnedBuffer::allocate(written, 64);
-                    std::memcpy(entry_buf.data(), tls_buf.data(), written);
-                }
-                else {
-                    // Oversized key — allocate directly, skip TLS
-                    entry_buf = core::OwnedBuffer::allocate(needed, 64);
-                    core::BufferView direct_view{reinterpret_cast<std::byte*>(entry_buf.data()), needed};
-                    written = serialize_delete_direct(direct_view, key, seq, key_fp64, mini_key);
-                }
-
-                enqueue_entry(key_fp64, std::move(entry_buf));
+                enqueue_entry(
+                    key_fp64,
+                    serialize_to_owned(needed, [&](core::BufferView v) { return serialize_delete_direct(v, key, seq, key_fp64, mini_key); })
+                );
             }
 
             void force_sync() {
                 if (!running_.load(std::memory_order_acquire)) return;
-
                 std::vector<std::shared_ptr<Waiter>> waiters;
                 waiters.reserve(shard_count_);
-
                 for (auto& shard : shards_) {
                     auto w = std::make_shared<Waiter>();
                     shard->enqueue_force_sync(w);
@@ -641,10 +650,8 @@ namespace akkaradb::wal {
 
             void truncate() {
                 if (!running_.load(std::memory_order_acquire)) return;
-
                 std::vector<std::shared_ptr<Waiter>> waiters;
                 waiters.reserve(shard_count_);
-
                 for (auto& shard : shards_) {
                     auto w = std::make_shared<Waiter>();
                     shard->enqueue_truncate(w);
@@ -659,17 +666,36 @@ namespace akkaradb::wal {
             }
 
         private:
+            // ── Serialization helper ──────────────────────────────────────────────
+            // Single TLS staging buffer shared by append_put and append_delete.
+            static constexpr size_t TLS_BUF_MAX = 1024 * 1024; // 1 MB
+
+            template <typename Fn>
+            [[nodiscard]] core::OwnedBuffer serialize_to_owned(size_t needed, Fn&& fn) {
+                thread_local std::vector<uint8_t> tls_buf;
+                core::OwnedBuffer entry_buf;
+                if (needed <= TLS_BUF_MAX) {
+                    if (tls_buf.size() < needed) tls_buf.resize(needed);
+                    core::BufferView tls_view{reinterpret_cast<std::byte*>(tls_buf.data()), needed};
+                    const size_t written = fn(tls_view);
+                    entry_buf = core::OwnedBuffer::allocate(written, 64);
+                    std::memcpy(entry_buf.data(), tls_buf.data(), written);
+                }
+                else {
+                    // Oversized entry: allocate directly, skip TLS
+                    entry_buf = core::OwnedBuffer::allocate(needed, 64);
+                    core::BufferView direct_view{reinterpret_cast<std::byte*>(entry_buf.data()), needed};
+                    fn(direct_view);
+                }
+                return entry_buf;
+            }
+
             void enqueue_entry(uint64_t key_fp64, core::OwnedBuffer entry_buf) {
                 const uint32_t shard_id = (shard_count_ == 1)
                                               ? 0u
                                               : shard_for(key_fp64, shard_count_);
-
-                if (fast_mode_) {
-                    // fast_mode: no waiter, return immediately after enqueue
-                    shards_[shard_id]->enqueue(std::move(entry_buf), nullptr);
-                }
+                if (fast_mode_) { shards_[shard_id]->enqueue(std::move(entry_buf), nullptr); }
                 else {
-                    // non-fast_mode: block until fdatasync() completes
                     auto waiter = std::make_shared<Waiter>();
                     shards_[shard_id]->enqueue(std::move(entry_buf), waiter);
                     waiter->wait();
@@ -681,8 +707,9 @@ namespace akkaradb::wal {
             size_t group_micros_;
             bool fast_mode_;
             uint32_t shard_count_;
+            uint64_t max_segment_bytes_;
 
-            std::atomic<uint64_t> global_batch_seq_; ///< Shared by all ShardWriters
+            std::atomic<uint64_t> global_batch_seq_;
             std::atomic<bool> running_;
 
             std::vector<std::unique_ptr<ShardWriter>> shards_;
@@ -695,9 +722,9 @@ namespace akkaradb::wal {
     WalWriter::WalWriter() = default;
     WalWriter::~WalWriter() = default;
 
-    std::unique_ptr<WalWriter> WalWriter::create(std::filesystem::path wal_dir, size_t group_n, size_t group_micros, bool fast_mode, uint32_t shard_count) {
-        auto w = std::unique_ptr<WalWriter>(new WalWriter());
-        w->impl_ = std::make_unique<Impl>(std::move(wal_dir), group_n, group_micros, fast_mode, shard_count);
+    std::unique_ptr<WalWriter> WalWriter::create(WalOptions options) {
+        auto w = std::unique_ptr < WalWriter > (new WalWriter());
+        w->impl_ = std::make_unique<Impl>(std::move(options));
         return w;
     }
 

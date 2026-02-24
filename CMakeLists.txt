@@ -80,9 +80,15 @@ target_sources(akkaradb PRIVATE
         # Engine
         ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
 
+        # Engine - MemTable
+        ${INTERNAL_INCLUDE_DIR}/engine/memtable/BPTree.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/memtable/MemTable.hpp
+
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalOp.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalFraming.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalWriter.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalReader.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalRecovery.hpp
 )
 
 # Internal implementation (internal/src)
@@ -100,9 +106,14 @@ target_sources(akkaradb PRIVATE
         # Core - CRC
         ${INTERNAL_SRC_DIR}/core/CRC32C.cpp
 
+        # Engine - MemTable
+        ${INTERNAL_SRC_DIR}/engine/memtable/MemTable.cpp
+
         ${INTERNAL_SRC_DIR}/engine/wal/WalOp.cpp
         ${INTERNAL_SRC_DIR}/engine/wal/WalFraming.cpp
         ${INTERNAL_SRC_DIR}/engine/wal/WalWriter.cpp
+        ${INTERNAL_SRC_DIR}/engine/wal/WalReader.cpp
+        ${INTERNAL_SRC_DIR}/engine/wal/WalRecovery.cpp
 )
 
 # Include directories
