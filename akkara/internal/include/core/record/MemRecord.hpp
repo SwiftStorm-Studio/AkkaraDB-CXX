@@ -1,5 +1,5 @@
 /*
- * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
  *
  * This program is free software: you can redistribute it and/or modify
@@ -33,30 +33,31 @@ namespace akkaradb::core {
     * a non-owning view. MemRecord is used in MemTable and for operations
     * that require data ownership.
     *
+    * Storage layout:
+    *   data_ = [key bytes | value bytes]  — single contiguous heap allocation.
+    *   key()   → span{ data_.data(),          k_len }
+    *   value() → span{ data_.data() + k_len,  v_len }
+    *
+    * Benefits over two separate vectors:
+    *   - One heap allocation instead of two
+    *   - sizeof(MemRecord) = 64 bytes (was 88) → BPTree fits ~37% more records per leaf
+    *   - Key and value are cache-adjacent; value reads follow key reads with no extra miss
+    *
     * Design principles:
-    * - Ownership: Holds actual key/value bytes in memory
-    * - Movable: Supports efficient transfer of ownership
-    * - Comparable: Provides key comparison for sorted structures
-    * - Approximate size tracking: For memory management
+    *   - Movable: Supports efficient transfer of ownership
+    *   - Comparable: Provides key comparison for sorted structures
+    *   - Approximate size tracking: For memory management
     *
     * Typical usage:
     * ```cpp
-    * auto record = MemRecord::create(
-    *     key_bytes,
-    *     value_bytes,
-    *     seq,
-    *     MemRecord::FLAG_NORMAL
-    * );
+    * auto record = MemRecord::create(key_bytes, value_bytes, seq);
     *
-    * if (record.is_tombstone()) {
-    *     // Handle deletion
-    * }
+    * if (record.is_tombstone()) { // Handle deletion }
     *
     * auto view = record.as_view();  // Zero-copy view
     * ```
     *
-    * Thread-safety: NOT thread-safe. External synchronization required
-    * for concurrent access.
+    * Thread-safety: NOT thread-safe. External synchronization required.
     */
     class MemRecord {
         public:
@@ -68,11 +69,11 @@ namespace akkaradb::core {
             /**
              * Creates a MemRecord with copied data.
              *
-             * @param key Key bytes (will be copied)
-             * @param value Value bytes (will be copied)
-             * @param seq Sequence number
+             * @param key   Key bytes (copied into data_[0..k_len))
+             * @param value Value bytes (copied into data_[k_len..k_len+v_len))
+             * @param seq   Sequence number
              * @param flags Flags (FLAG_NORMAL or FLAG_TOMBSTONE)
-             * @return New MemRecord
+             * @return New MemRecord backed by a single heap allocation
              */
             [[nodiscard]] static MemRecord create(
                 std::span<const uint8_t> key,
@@ -83,38 +84,21 @@ namespace akkaradb::core {
 
             /**
              * Creates a MemRecord from string key/value.
-             *
-             * @param key Key string
-             * @param value Value string
-             * @param seq Sequence number
-             * @param flags Flags
-             * @return New MemRecord
              */
             [[nodiscard]] static MemRecord create(std::string_view key, std::string_view value, uint64_t seq, uint8_t flags = AKHdr32::FLAG_NORMAL);
 
             /**
-             * Creates a tombstone (deletion marker).
-             *
-             * @param key Key bytes
-             * @param seq Sequence number
-             * @return Tombstone MemRecord
+             * Creates a tombstone (deletion marker). value is empty; data_ holds key only.
              */
             [[nodiscard]] static MemRecord tombstone(std::span<const uint8_t> key, uint64_t seq);
 
             /**
              * Creates a tombstone from string key.
-             *
-             * @param key Key string
-             * @param seq Sequence number
-             * @return Tombstone MemRecord
              */
             [[nodiscard]] static MemRecord tombstone(std::string_view key, uint64_t seq);
 
             /**
              * Creates a MemRecord from a RecordView (copies data).
-             *
-             * @param view RecordView to copy from
-             * @return New MemRecord
              */
             [[nodiscard]] static MemRecord from_view(const RecordView& view);
 
@@ -126,41 +110,36 @@ namespace akkaradb::core {
             [[nodiscard]] const AKHdr32& header() const noexcept { return header_; }
 
             /**
-             * Returns a span over the key bytes.
+             * Returns a span over the key bytes  (data_[0..k_len)).
              */
             [[nodiscard]] std::span<const uint8_t> key() const noexcept {
-                // Return empty span if key_ is empty (e.g., after move)
-                return key_.empty()
-                           ? std::span<const uint8_t>{}
-                           : std::span<const uint8_t>{key_.data(), header_.k_len};
+                if (data_.empty()) return {};
+                return {data_.data(), header_.k_len};
             }
 
             /**
-             * Returns a span over the value bytes.
+             * Returns a span over the value bytes  (data_[k_len..k_len+v_len)).
+             * Empty span for tombstones (v_len == 0).
              */
             [[nodiscard]] std::span<const uint8_t> value() const noexcept {
-                // Return empty span if value_ is empty (e.g., after move)
-                return value_.empty()
-                           ? std::span<const uint8_t>{}
-                           : std::span<const uint8_t>{value_.data(), header_.v_len};
+                if (header_.v_len == 0) return {};
+                return {data_.data() + header_.k_len, header_.v_len};
             }
 
             /**
             * Returns a string_view over the key.
             */
             [[nodiscard]] std::string_view key_string() const noexcept {
-                return key_.empty()
-                           ? std::string_view{}
-                           : std::string_view{reinterpret_cast<const char*>(key_.data()), header_.k_len};
+                if (data_.empty()) return {};
+                return {reinterpret_cast<const char*>(data_.data()), header_.k_len};
             }
 
             /**
             * Returns a string_view over the value.
             */
             [[nodiscard]] std::string_view value_string() const noexcept {
-                return value_.empty()
-                           ? std::string_view{}
-                           : std::string_view{reinterpret_cast<const char*>(value_.data()), header_.v_len};
+                if (header_.v_len == 0) return {};
+                return {reinterpret_cast<const char*>(data_.data() + header_.k_len), header_.v_len};
             }
 
             /**
@@ -189,7 +168,7 @@ namespace akkaradb::core {
             [[nodiscard]] uint64_t mini_key() const noexcept { return header_.mini_key; }
 
             /**
-            * Returns approximate size in bytes (header + key + value + overhead).
+            * Returns approximate size in bytes (header + data + vector overhead).
             */
             [[nodiscard]] size_t approx_size() const noexcept { return approx_size_; }
 
@@ -198,21 +177,20 @@ namespace akkaradb::core {
             *
             * WARNING: The returned view is only valid while this MemRecord exists.
             *
-            * @return RecordView over this record
+            * @return RecordView over this record's contiguous data buffer
             */
-            [[nodiscard]] RecordView as_view() const noexcept { return RecordView{&header_, key_.data(), value_.data()}; }
+            [[nodiscard]] RecordView as_view() const noexcept { return RecordView{&header_, data_.data(), data_.data() + header_.k_len}; }
 
             /**
-            * Checks if the record is empty.
+            * Checks if the record is empty (default-constructed or moved-from).
             */
-            [[nodiscard]] bool empty() const noexcept { return key_.empty(); }
+            [[nodiscard]] bool empty() const noexcept { return data_.empty(); }
 
             // ==================== Comparison ====================
 
             /**
             * Compares keys lexicographically.
             *
-            * @param other Other MemRecord
             * @return -1 if this < other, 0 if equal, +1 if this > other
             */
             [[nodiscard]] int compare_key(const MemRecord& other) const noexcept;
@@ -220,7 +198,6 @@ namespace akkaradb::core {
             /**
             * Compares key with raw bytes.
             *
-            * @param other_key Key bytes to compare
             * @return -1 if this < other, 0 if equal, +1 if this > other
             */
             [[nodiscard]] int compare_key(std::span<const uint8_t> other_key) const noexcept;
@@ -249,12 +226,15 @@ namespace akkaradb::core {
 
         private:
             AKHdr32 header_{};
-            std::vector<uint8_t> key_;
-            std::vector<uint8_t> value_;
+            /// Contiguous buffer: [key bytes (k_len)] [value bytes (v_len)]
+            /// Single heap allocation — eliminates the second alloc of the old key_+value_ design.
+            std::vector<uint8_t> data_;
             size_t approx_size_{0};
 
-            MemRecord(const AKHdr32& header, std::vector<uint8_t> key, std::vector<uint8_t> value) noexcept;
+            MemRecord(const AKHdr32& header, std::vector<uint8_t> data) noexcept;
 
             void compute_approx_size() noexcept;
     };
+
+    static_assert(sizeof(MemRecord) == 64, "MemRecord must be 64 bytes (AKHdr32=32 + vector=24 + size_t=8)");
 } // namespace akkaradb::core

@@ -1,5 +1,5 @@
 /*
- * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
  *
  * This program is free software: you can redistribute it and/or modify
@@ -30,6 +30,7 @@
 #include <shared_mutex>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 namespace akkaradb::engine::memtable {
     // ============================================================================
@@ -50,7 +51,8 @@ namespace akkaradb::engine::memtable {
          * Rounds n up to the next power of 2, clamped to [2, 16].
          */
         [[nodiscard]] uint32_t resolve_shard_count(size_t n) {
-            if (n == 0) throw std::invalid_argument("MemTable: shard_count must be >= 1");
+            // 0 = auto: use hardware_concurrency(), floor to power-of-2, clamp to [2, 16].
+            if (n == 0) n = std::max(2u, std::thread::hardware_concurrency());
             if (n == 1) return 2; // minimum parallelism
             uint32_t p = 2;
             while (p < static_cast<uint32_t>(n)) p <<= 1;
@@ -315,8 +317,8 @@ namespace akkaradb::engine::memtable {
              * @param maps    Snapshots of all shard maps (each already key-sorted)
              * @param range   Key range [start, end)
              */
-            Impl(std::vector<std::shared_ptr<const Map>> maps, const MemTable::KeyRange& range)
-                : maps_{std::move(maps)}, range_{range} {
+            Impl(std::vector<std::shared_ptr<const Map>> maps, KeyRange range)
+                : maps_{std::move(maps)}, range_{std::move(range)} {
                 const auto start_span = std::span<const uint8_t>{range_.start};
 
                 for (size_t i = 0; i < maps_.size(); ++i) {
@@ -422,8 +424,8 @@ namespace akkaradb::engine::memtable {
 
     class MemTable::Impl {
         public:
-            Impl(size_t shard_count_req, size_t threshold_bytes_per_shard, FlushCallback on_flush)
-                : shard_count_{resolve_shard_count(shard_count_req)}, threshold_bytes_per_shard_{threshold_bytes_per_shard}, seq_gen_{0} {
+            explicit Impl(MemTable::Options opts)
+                : shard_count_{resolve_shard_count(opts.shard_count)}, threshold_bytes_per_shard_{opts.threshold_bytes_per_shard}, seq_gen_{0} {
                 shards_.reserve(shard_count_);
                 flushers_.reserve(shard_count_);
 
@@ -434,7 +436,7 @@ namespace akkaradb::engine::memtable {
                 }
 
                 // Flushers created separately so on_flush capture is correct
-                if (on_flush) { for (uint32_t i = 0; i < shard_count_; ++i) { make_flusher(i, on_flush); } }
+                if (opts.on_flush) { for (uint32_t i = 0; i < shard_count_; ++i) { make_flusher(i, opts.on_flush); } }
             }
 
             ~Impl() {
@@ -555,11 +557,9 @@ namespace akkaradb::engine::memtable {
     // MemTable public API
     // ============================================================================
 
-    std::unique_ptr<MemTable> MemTable::create(size_t shard_count, size_t threshold_bytes_per_shard, FlushCallback on_flush) {
-        return std::unique_ptr<MemTable>(new MemTable(shard_count, threshold_bytes_per_shard, std::move(on_flush)));
-    }
+    std::unique_ptr<MemTable> MemTable::create(Options options) { return std::unique_ptr<MemTable>(new MemTable(std::move(options))); }
 
-    MemTable::MemTable(size_t sc, size_t tb, FlushCallback of) : impl_{std::make_unique<Impl>(sc, tb, std::move(of))} {}
+    MemTable::MemTable(Options options) : impl_{std::make_unique<Impl>(std::move(options))} {}
 
     MemTable::~MemTable() = default;
 

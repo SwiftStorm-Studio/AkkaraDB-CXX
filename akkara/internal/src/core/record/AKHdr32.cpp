@@ -1,5 +1,5 @@
 /*
- * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
  *
  * This program is free software: you can redistribute it and/or modify

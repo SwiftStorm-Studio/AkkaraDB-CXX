@@ -84,6 +84,7 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/engine/memtable/BPTree.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/memtable/MemTable.hpp
 
+        # Engine - WAL
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalOp.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalFraming.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalWriter.hpp
@@ -109,6 +110,7 @@ target_sources(akkaradb PRIVATE
         # Engine - MemTable
         ${INTERNAL_SRC_DIR}/engine/memtable/MemTable.cpp
 
+        # Engine - WAL
         ${INTERNAL_SRC_DIR}/engine/wal/WalOp.cpp
         ${INTERNAL_SRC_DIR}/engine/wal/WalFraming.cpp
         ${INTERNAL_SRC_DIR}/engine/wal/WalWriter.cpp

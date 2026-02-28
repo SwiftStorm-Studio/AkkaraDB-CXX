@@ -1,5 +1,5 @@
 /*
- * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
  *
  * This program is free software: you can redistribute it and/or modify
@@ -32,7 +32,7 @@ namespace akkaradb::engine::memtable {
      * MemTable - Multi-shard in-memory write buffer with background flush.
      *
      * Architecture:
-     * - shard_count shards (power-of-2, 2..16), each with its own shared_mutex
+     * - Options::shard_count shards (power-of-2, 2..16), each with its own shared_mutex
      * - Shard selection: key_fp64 & (shard_count - 1)  (~1 ns, no division)
      *   key_fp64 = AKHdr32::compute_key_fp64(), same hash as WAL routing
      * - Per-shard Flusher thread: flushes independently, no cross-shard blocking
@@ -61,6 +61,36 @@ namespace akkaradb::engine::memtable {
              * Called from a per-shard flusher thread (not the writer thread).
              */
             using FlushCallback = std::function<void(std::vector<core::MemRecord>)>;
+
+            /**
+             * Options - Configuration for MemTable creation.
+             *
+             * Nested inside MemTable so FlushCallback is already in scope.
+             */
+            struct Options {
+                /**
+                 * Number of shards.
+                 * Rounded up to next power-of-2, clamped to [2, 16].
+                 * 0 = auto (uses std::thread::hardware_concurrency(), min 2).
+                 * Default: 0 (auto)
+                 */
+                size_t shard_count = 0;
+
+                /**
+                 * Approximate byte threshold per shard before automatic flush is triggered.
+                 * Higher values reduce flush frequency (better throughput batching) at the
+                 * cost of higher peak memory usage per shard.
+                 * Default: 64 MiB
+                 */
+                size_t threshold_bytes_per_shard = 64ULL * 1024 * 1024;
+
+                /**
+                 * Optional flush callback. Can be set or replaced later via
+                 * set_flush_callback(). Pass nullptr to disable background flushing.
+                 * Default: nullptr
+                 */
+                FlushCallback on_flush = nullptr;
+            };
 
             /**
              * Key range for range scans: [start, end).
@@ -98,18 +128,12 @@ namespace akkaradb::engine::memtable {
             // ── Factory ───────────────────────────────────────────────────────
 
             /**
-             * Creates a MemTable.
+             * Creates a MemTable from an Options struct.
              *
-             * @param shard_count           Number of shards.
-             *                              Rounded up to next power-of-2, clamped to [2, 16].
-             * @param threshold_bytes_per_shard
-             *                              Approximate byte threshold per shard before
-             *                              automatic flush is triggered.
-             * @param on_flush              Optional flush callback. Can be set later via
-             *                              set_flush_callback().
-             * @throws std::invalid_argument if shard_count == 0
+             * @param options  See MemTable::Options for field descriptions.
+             * @throws std::invalid_argument if options.shard_count results in 0 shards
              */
-            [[nodiscard]] static std::unique_ptr<MemTable> create(size_t shard_count, size_t threshold_bytes_per_shard, FlushCallback on_flush = nullptr);
+            [[nodiscard]] static std::unique_ptr<MemTable> create(Options options = {});
 
             ~MemTable();
 
@@ -192,7 +216,7 @@ namespace akkaradb::engine::memtable {
 
         private:
             class Impl;
-            explicit MemTable(size_t shard_count, size_t threshold_bytes_per_shard, FlushCallback on_flush);
+            explicit MemTable(Options options);
             std::unique_ptr<Impl> impl_;
     };
 } // namespace akkaradb::engine::memtable

@@ -1,5 +1,5 @@
 /*
- * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
  *
  * This program is free software: you can redistribute it and/or modify
@@ -156,6 +156,18 @@ namespace akkaradb::core {
             size_t clean_capacity;
             size_t dirty_capacity;
 
+            // Thread-local pending stat counters.
+            // Flushed to global atomics every FLUSH_INTERVAL operations to eliminate
+            // per-call atomic contention on the hot path.
+            static constexpr uint64_t FLUSH_INTERVAL = 64;
+            uint64_t pending_acquired{0};
+            uint64_t pending_released{0};
+            uint64_t pending_clean_hits{0};
+            uint64_t pending_dirty_hits{0};
+            uint64_t pending_arena_allocs{0};
+            uint64_t pending_fallback_allocs{0};
+            uint64_t pending_batch_cleanings{0};
+
             ThreadLocalState(size_t bs, size_t align, size_t ac, size_t cc, size_t dc)
                 : block_size{bs}, alignment{align}, arena_capacity{ac}, clean_capacity{cc}, dirty_capacity{dc} {
                 clean_list.reserve(cc);
@@ -228,61 +240,53 @@ namespace akkaradb::core {
             [[nodiscard]] OwnedBuffer acquire(bool skip_zero_fill) {
                 auto& tls = get_tls();
 
-                parent_->stats_total_acquired_.fetch_add(1, std::memory_order_relaxed);
+                ++tls.pending_acquired;
+                OwnedBuffer buf;
 
                 // Fast path: Clean pool hit
                 if (!tls.clean_list.empty()) {
-                    parent_->stats_clean_hits_.fetch_add(1, std::memory_order_relaxed);
-
-                    auto buf = std::move(tls.clean_list.back());
+                    ++tls.pending_clean_hits;
+                    buf = std::move(tls.clean_list.back());
                     tls.clean_list.pop_back();
-
                     // Clean buffers are already zero-filled
-                    if (!skip_zero_fill && buf.data()) {
-                        // Already clean, but re-zero if requested for security
-                        buf.zero_fill();
-                    }
-
-                    return buf;
+                    if (!skip_zero_fill && buf.data()) { buf.zero_fill(); }
                 }
-
                 // Medium path: Batch clean dirty buffers
-                if (!tls.dirty_list.empty()) {
-                    parent_->stats_dirty_hits_.fetch_add(1, std::memory_order_relaxed);
-                    parent_->stats_batch_cleanings_.fetch_add(1, std::memory_order_relaxed);
-
+                else if (!tls.dirty_list.empty()) {
+                    ++tls.pending_dirty_hits;
+                    ++tls.pending_batch_cleanings;
                     tls.batch_zero_fill(BATCH_CLEAN_SIZE);
-
-                    auto buf = std::move(tls.clean_list.back());
+                    buf = std::move(tls.clean_list.back());
                     tls.clean_list.pop_back();
-
-                    if (skip_zero_fill) {
-                        // Skip zero-fill optimization (caller will overwrite)
-                    }
-
-                    return buf;
                 }
-
                 // Slow path: Allocate from arena
-                if (auto* ptr = tls.try_allocate_from_arena(); ptr != nullptr) {
-                    parent_->stats_arena_allocs_.fetch_add(1, std::memory_order_relaxed);
-
+                else if (auto* ptr = tls.try_allocate_from_arena(); ptr != nullptr) {
+                    ++tls.pending_arena_allocs;
                     // Create OwnedBuffer without taking ownership of arena memory
                     // Note: This is a special case - the buffer's memory is owned by the arena
                     // We use a custom deleter that does nothing
-                    auto buf = create_arena_buffer(ptr, block_size_);
-
+                    buf = create_arena_buffer(ptr, block_size_);
                     if (!skip_zero_fill) { buf.zero_fill(); }
-
-                    return buf;
+                }
+                // Cold path: Arena exhausted, fallback to aligned_alloc
+                else {
+                    ++tls.pending_fallback_allocs;
+                    buf = OwnedBuffer::allocate(block_size_, alignment_);
+                    if (!skip_zero_fill) { buf.zero_fill(); }
                 }
 
-                // Cold path: Arena exhausted, fallback to aligned_alloc
-                parent_->stats_fallback_allocs_.fetch_add(1, std::memory_order_relaxed);
-
-                auto buf = OwnedBuffer::allocate(block_size_, alignment_);
-
-                if (!skip_zero_fill) { buf.zero_fill(); }
+                // Flush thread-local stats to global atomics every FLUSH_INTERVAL acquires.
+                // Replaces per-call fetch_add with a single batched write every 64 calls.
+                if ((tls.pending_acquired & (ThreadLocalState::FLUSH_INTERVAL - 1)) == 0) {
+                    parent_->stats_total_acquired_.fetch_add(ThreadLocalState::FLUSH_INTERVAL, std::memory_order_relaxed);
+                    parent_->stats_clean_hits_.fetch_add(tls.pending_clean_hits, std::memory_order_relaxed);
+                    parent_->stats_dirty_hits_.fetch_add(tls.pending_dirty_hits, std::memory_order_relaxed);
+                    parent_->stats_arena_allocs_.fetch_add(tls.pending_arena_allocs, std::memory_order_relaxed);
+                    parent_->stats_fallback_allocs_.fetch_add(tls.pending_fallback_allocs, std::memory_order_relaxed);
+                    parent_->stats_batch_cleanings_.fetch_add(tls.pending_batch_cleanings, std::memory_order_relaxed);
+                    tls.pending_clean_hits = tls.pending_dirty_hits = 0;
+                    tls.pending_arena_allocs = tls.pending_fallback_allocs = tls.pending_batch_cleanings = 0;
+                }
 
                 return buf;
             }
@@ -292,7 +296,7 @@ namespace akkaradb::core {
 
                 auto& tls = get_tls();
 
-                parent_->stats_total_released_.fetch_add(1, std::memory_order_relaxed);
+                ++tls.pending_released;
 
                 // Push to dirty queue
                 if (tls.dirty_list.size() < tls.dirty_capacity) { tls.dirty_list.push_back(std::move(buffer)); }
@@ -305,8 +309,15 @@ namespace akkaradb::core {
 
                 // Opportunistic batch cleaning
                 if (tls.should_batch_clean()) {
-                    parent_->stats_batch_cleanings_.fetch_add(1, std::memory_order_relaxed);
+                    ++tls.pending_batch_cleanings;
                     tls.batch_zero_fill(BATCH_CLEAN_SIZE);
+                }
+
+                // Flush released count (and any release-triggered batch_cleanings) every FLUSH_INTERVAL.
+                if ((tls.pending_released & (ThreadLocalState::FLUSH_INTERVAL - 1)) == 0) {
+                    parent_->stats_total_released_.fetch_add(ThreadLocalState::FLUSH_INTERVAL, std::memory_order_relaxed);
+                    parent_->stats_batch_cleanings_.fetch_add(tls.pending_batch_cleanings, std::memory_order_relaxed);
+                    tls.pending_batch_cleanings = 0;
                 }
             }
 

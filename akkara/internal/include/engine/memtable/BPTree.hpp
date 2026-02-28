@@ -1,5 +1,5 @@
 /*
- * AkkaraDB - Low-latency, crash-safe JVM KV store with WAL & stripe parity
+ * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
  *
  * This program is free software: you can redistribute it and/or modify
@@ -153,7 +153,9 @@ namespace akkaradb::engine::memtable {
                 InternalNode() noexcept : Node{NodeType::INTERNAL} {}
 
                 [[nodiscard]] size_t find_child_index(const K& key, const Compare& comp) const {
-                    auto it = std::lower_bound(keys.begin(), keys.begin() + this->count, key, comp);
+                    // upper_bound: separator = min key of right child, so key == separator routes right.
+                    // lower_bound would incorrectly route key == separator to the left child.
+                    auto it = std::upper_bound(keys.begin(), keys.begin() + this->count, key, comp);
                     return static_cast<size_t>(it - keys.begin());
                 }
             };
@@ -327,7 +329,11 @@ namespace akkaradb::engine::memtable {
     }
 
     template <typename K, typename V, typename Compare>
-    bool BPTree<K, V, Compare>::contains(const K& key) const { return get(key).has_value(); }
+    bool BPTree<K, V, Compare>::contains(const K& key) const {
+        if (!root_) return false;
+        const LeafNode* leaf = find_leaf(key);
+        return leaf && leaf->find_index(key, comp_).has_value();
+    }
 
     template <typename K, typename V, typename Compare>
     std::optional<V> BPTree<K, V, Compare>::search_leaf(const LeafNode* leaf, const K& key) const {
@@ -413,15 +419,16 @@ namespace akkaradb::engine::memtable {
         }
 
         if (leaf->count >= LEAF_ORDER) {
-            // Split: build temp array with LEAF_ORDER + 1 entries
-            std::array<std::pair<K, V>, LEAF_ORDER + 1> temp;
+            // Split: heap-allocated vector to avoid ~32 KB stack frame (LEAF_ORDER can be ~185 for MemRecord).
+            std::vector<std::pair<K, V>> temp;
+            temp.reserve(leaf->count + 1);
             size_t insert_idx = leaf->find_insert_index(key, comp_);
-            size_t temp_idx = 0;
 
-            for (size_t i = 0; i < insert_idx; ++i) temp[temp_idx++] = {leaf->keys[i], leaf->values[i]};
-            temp[temp_idx++] = {key, value};
-            for (size_t i = insert_idx; i < leaf->count; ++i) temp[temp_idx++] = {leaf->keys[i], leaf->values[i]};
+            for (size_t i = 0; i < insert_idx; ++i) temp.emplace_back(leaf->keys[i], leaf->values[i]);
+            temp.emplace_back(key, value);
+            for (size_t i = insert_idx; i < leaf->count; ++i) temp.emplace_back(leaf->keys[i], leaf->values[i]);
 
+            const size_t temp_idx = temp.size();
             size_t mid = (temp_idx + 1) / 2;
 
             for (size_t i = 0; i < mid; ++i) {
@@ -465,21 +472,26 @@ namespace akkaradb::engine::memtable {
         if (!split) return std::nullopt;
 
         if (node->count >= INTERNAL_ORDER) {
-            std::array<K, INTERNAL_ORDER + 1> temp_keys;
-            std::array<Node*, INTERNAL_ORDER + 2> temp_children;
-            size_t key_idx = 0, cptr = 0;
+            // Split: heap-allocated vectors to avoid ~30 KB stack frame (INTERNAL_ORDER can be ~341 for MemRecord).
+            std::vector<K> temp_keys;
+            std::vector<Node*> temp_children;
+            temp_keys.reserve(node->count + 1);
+            temp_children.reserve(node->count + 2);
 
             for (size_t i = 0; i < child_idx; ++i) {
-                temp_keys[key_idx++] = node->keys[i];
-                temp_children[cptr++] = node->children[i];
+                temp_keys.push_back(node->keys[i]);
+                temp_children.push_back(node->children[i]);
             }
-            temp_children[cptr++] = split->left;
-            temp_keys[key_idx++] = split->separator;
-            temp_children[cptr++] = split->right;
+            temp_children.push_back(split->left);
+            temp_keys.push_back(split->separator);
+            temp_children.push_back(split->right);
             for (size_t i = child_idx; i < node->count; ++i) {
-                temp_keys[key_idx++] = node->keys[i];
-                temp_children[cptr++] = node->children[i + 1];
+                temp_keys.push_back(node->keys[i]);
+                temp_children.push_back(node->children[i + 1]);
             }
+
+            const size_t key_idx = temp_keys.size();
+            const size_t cptr = temp_children.size();
 
             size_t mid = key_idx / 2;
             K promote_key = std::move(temp_keys[mid]);
@@ -557,8 +569,17 @@ namespace akkaradb::engine::memtable {
         Node* current = root_;
         while (current && current->is_internal()) {
             auto* internal = static_cast<InternalNode*>(current);
-            auto it = std::lower_bound(internal->keys.begin(), internal->keys.begin() + internal->count, key_like, comp_);
-            current = internal->children[static_cast<size_t>(it - internal->keys.begin())];
+            // upper_bound: same routing fix as find_child_index (separator = min key of right child).
+            auto it = std::upper_bound(internal->keys.begin(), internal->keys.begin() + internal->count, key_like, comp_);
+            Node* next = internal->children[static_cast<size_t>(it - internal->keys.begin())];
+            if (next) {
+                #ifdef _MSC_VER
+                _mm_prefetch(reinterpret_cast<const char*>(next), _MM_HINT_T0);
+                #else
+                __builtin_prefetch(next, 0, 3);
+                #endif
+            }
+            current = next;
         }
 
         auto* leaf = static_cast<LeafNode*>(current);
