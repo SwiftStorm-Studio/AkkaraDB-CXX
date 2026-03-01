@@ -209,16 +209,28 @@ namespace akkaradb::engine::memtable {
             // ── Iterator ──────────────────────────────────────────────────────
             class Iterator {
                 public:
-                    using iterator_category = std::forward_iterator_tag;
                     using value_type = std::pair<const K&, const V&>;
+
+                    // operator->() cannot simply return &operator*() because operator*()
+                    // returns value_type by value (a temporary pair of refs). ArrowProxy
+                    // stores that pair and returns a stable pointer to it. The proxy
+                    // lives for the duration of the full expression (e.g. it->first),
+                    // so the contained refs into node data remain valid.
+                    struct ArrowProxy {
+                        value_type val_;
+                        const value_type* operator->() const noexcept { return &val_; }
+                    };
+
+                    using iterator_category = std::forward_iterator_tag;
                     using difference_type = std::ptrdiff_t;
-                    using pointer = value_type*;
+                    using pointer = ArrowProxy;
                     using reference = value_type;
 
                     Iterator() = default;
                     Iterator(LeafNode* node, size_t index) : node_{node}, index_{index} {}
 
-                    reference operator*() const { return {node_->keys[index_], node_->values[index_]}; }
+                    reference operator*() const noexcept { return {node_->keys[index_], node_->values[index_]}; }
+                    ArrowProxy operator->() const noexcept { return ArrowProxy{{node_->keys[index_], node_->values[index_]}}; }
 
                     Iterator& operator++() {
                         ++index_;
@@ -586,7 +598,7 @@ namespace akkaradb::engine::memtable {
         if (!leaf) return end();
 
         auto it = std::lower_bound(leaf->keys.begin(), leaf->keys.begin() + leaf->count, key_like, comp_);
-        size_t idx = static_cast<size_t>(it - leaf->keys.begin());
+        auto idx = static_cast<size_t>(it - leaf->keys.begin());
         if (idx >= leaf->count) return Iterator{leaf->next, 0};
         return Iterator{leaf, idx};
     }

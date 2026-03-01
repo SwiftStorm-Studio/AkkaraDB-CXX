@@ -31,6 +31,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -278,14 +279,14 @@ namespace akkaradb::wal {
         public:
             ShardWriter(
                 uint32_t shard_id,
-                const std::filesystem::path& wal_dir,
+                std::filesystem::path wal_dir,
                 size_t group_n,
                 size_t group_micros,
                 uint64_t max_segment_bytes,
                 std::atomic<uint64_t>& global_batch_seq
             )
                 : shard_id_{shard_id},
-                  wal_dir_{wal_dir},
+                  wal_dir_{std::move(wal_dir)},
                   group_n_{group_n},
                   group_micros_{group_micros},
                   max_segment_bytes_{max_segment_bytes},

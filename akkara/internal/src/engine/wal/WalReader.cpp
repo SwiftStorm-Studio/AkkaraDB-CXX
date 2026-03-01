@@ -19,7 +19,6 @@
 // internal/src/engine/wal/WalReader.cpp
 #include "engine/wal/WalReader.hpp"
 
-#include <cstring>
 #include <stdexcept>
 
 #ifdef _WIN32
@@ -70,7 +69,7 @@ namespace akkaradb::wal {
             [[nodiscard]] static ReadFileHandle open(const std::filesystem::path& path) {
                 ReadFileHandle fh;
                 #ifdef _WIN32
-                fh.handle_ = ::CreateFileW(
+                fh.handle_ = CreateFileW(
                     path.c_str(),
                     GENERIC_READ,
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -101,9 +100,9 @@ namespace akkaradb::wal {
             [[nodiscard]] size_t read(void* buf, size_t size) {
                 if (size == 0) return 0;
                 #ifdef _WIN32
-                DWORD got = 0; if (!::ReadFile(handle_, buf, static_cast<DWORD>(size), &got, nullptr)) {
+                DWORD got = 0; if (!ReadFile(handle_, buf, static_cast<DWORD>(size), &got, nullptr)) {
                     throw std::runtime_error("WalReader: ReadFile failed");
-                } return static_cast<size_t>(got);
+                } return got;
                 #else
                 auto* ptr = static_cast<uint8_t*>(buf);
                 size_t total = 0;
@@ -125,9 +124,9 @@ namespace akkaradb::wal {
             void close() noexcept {
                 if (handle_ != INVALID_H) {
                     #ifdef _WIN32
-                    ::CloseHandle(handle_);
+                    CloseHandle(handle_);
                     #else
-                    ::close(handle_);
+                    close(handle_);
                     #endif
                     handle_ = INVALID_H;
                 }

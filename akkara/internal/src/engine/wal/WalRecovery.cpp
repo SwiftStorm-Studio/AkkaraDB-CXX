@@ -290,7 +290,7 @@ namespace akkaradb::wal {
         const auto shard_groups = group_by_shard(segment_files);
 
         // ── 2. Build ShardSegmentChains and seed the heap ────────────────────
-        const uint32_t chain_count = static_cast<uint32_t>(shard_groups.size());
+        const auto chain_count = static_cast<uint32_t>(shard_groups.size());
 
         std::vector<std::unique_ptr<ShardSegmentChain>> chains;
         chains.reserve(chain_count);
@@ -335,7 +335,7 @@ namespace akkaradb::wal {
 
         // ── 3. Merge-drain the heap in batch_seq order ────────────────────────
         while (!heap.empty()) {
-            HeapEntry top = std::move(const_cast<HeapEntry&>(heap.top()));
+            HeapEntry top = const_cast<HeapEntry&>(heap.top());
             heap.pop();
 
             const DispatchCounts counts = dispatch_batch(top.batch, on_record, on_commit, on_checkpoint);

@@ -133,7 +133,7 @@ namespace akkaradb::engine::memtable {
              * @param options  See MemTable::Options for field descriptions.
              * @throws std::invalid_argument if options.shard_count results in 0 shards
              */
-            [[nodiscard]] static std::unique_ptr<MemTable> create(Options options = {});
+            [[nodiscard]] static std::unique_ptr<MemTable> create(const Options& options = {});
 
             ~MemTable();
 
@@ -207,7 +207,7 @@ namespace akkaradb::engine::memtable {
              * Drains the existing flusher (blocks) before switching.
              * Pass nullptr to disable flushing.
              */
-            void set_flush_callback(FlushCallback cb);
+            void set_flush_callback(const FlushCallback& cb);
 
             // ── Metrics ───────────────────────────────────────────────────────
 
@@ -216,7 +216,7 @@ namespace akkaradb::engine::memtable {
 
         private:
             class Impl;
-            explicit MemTable(Options options);
+            explicit MemTable(const Options& options);
             std::unique_ptr<Impl> impl_;
     };
 } // namespace akkaradb::engine::memtable

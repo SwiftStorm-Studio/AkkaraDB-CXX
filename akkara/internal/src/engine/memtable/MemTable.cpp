@@ -28,7 +28,6 @@
 #include <queue>
 #include <ranges>
 #include <shared_mutex>
-#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -104,7 +103,7 @@ namespace akkaradb::engine::memtable {
              * Inserts or replaces a record.
              * Returns true if the shard is now over the flush threshold.
              */
-            bool put(core::MemRecord record) {
+            bool put(const core::MemRecord& record) {
                 std::unique_lock lock{mutex_};
 
                 const size_t new_size = record.approx_size();
@@ -190,7 +189,7 @@ namespace akkaradb::engine::memtable {
                     for (auto it = active_.begin(); !it.is_end(); ++it) { snap->put(it->first, it->second); }
                     result.push_back(std::move(snap));
                 }
-                for (const auto& [id, map] : immutables_) { result.push_back(map); }
+                for (const auto& map : immutables_ | std::views::values) { result.push_back(map); }
                 return result;
             }
 
@@ -424,10 +423,10 @@ namespace akkaradb::engine::memtable {
 
     class MemTable::Impl {
         public:
-            explicit Impl(MemTable::Options opts)
+            explicit Impl(const Options& opts)
                 : shard_count_{resolve_shard_count(opts.shard_count)}, threshold_bytes_per_shard_{opts.threshold_bytes_per_shard}, seq_gen_{0} {
                 shards_.reserve(shard_count_);
-                flushers_.reserve(shard_count_);
+                flushers_.resize(shard_count_); // resize (not reserve): make_flusher uses [i] subscript
 
                 for (uint32_t i = 0; i < shard_count_; ++i) {
                     auto shard = std::make_unique<Shard>();
@@ -453,7 +452,7 @@ namespace akkaradb::engine::memtable {
                 auto record = core::MemRecord::create(key, value, seq);
                 advance_seq_gen(seq);
 
-                if (shards_[si]->put(std::move(record))) { trigger_flush(si); }
+                if (shards_[si]->put(record)) { trigger_flush(si); }
             }
 
             void remove(std::span<const uint8_t> key, uint64_t seq) {
@@ -463,7 +462,7 @@ namespace akkaradb::engine::memtable {
                 auto record = core::MemRecord::tombstone(key, seq);
                 advance_seq_gen(seq);
 
-                if (shards_[si]->put(std::move(record))) { trigger_flush(si); }
+                if (shards_[si]->put(record)) { trigger_flush(si); }
             }
 
             // ── Read path ─────────────────────────────────────────────────────
@@ -499,7 +498,7 @@ namespace akkaradb::engine::memtable {
                 for (auto& f : flushers_) { if (f) f->drain(); }
             }
 
-            void set_flush_callback(FlushCallback cb) {
+            void set_flush_callback(const FlushCallback& cb) {
                 // Drain existing flushers first to avoid losing in-flight batches.
                 for (auto& f : flushers_) { if (f) f->drain(); }
                 flushers_.clear();
@@ -557,9 +556,9 @@ namespace akkaradb::engine::memtable {
     // MemTable public API
     // ============================================================================
 
-    std::unique_ptr<MemTable> MemTable::create(Options options) { return std::unique_ptr<MemTable>(new MemTable(std::move(options))); }
+    std::unique_ptr<MemTable> MemTable::create(const Options& options) { return std::unique_ptr<MemTable>(new MemTable(options)); }
 
-    MemTable::MemTable(Options options) : impl_{std::make_unique<Impl>(std::move(options))} {}
+    MemTable::MemTable(const Options& options) : impl_{std::make_unique<Impl>(options)} {}
 
     MemTable::~MemTable() = default;
 
@@ -574,5 +573,5 @@ namespace akkaradb::engine::memtable {
     void MemTable::flush_hint() { impl_->flush_hint(); }
     void MemTable::force_flush() { impl_->force_flush(); }
     size_t MemTable::approx_size() const noexcept { return impl_->approx_size(); }
-    void MemTable::set_flush_callback(FlushCallback cb) { impl_->set_flush_callback(std::move(cb)); }
+    void MemTable::set_flush_callback(const FlushCallback& cb) { impl_->set_flush_callback(cb); }
 } // namespace akkaradb::engine::memtable

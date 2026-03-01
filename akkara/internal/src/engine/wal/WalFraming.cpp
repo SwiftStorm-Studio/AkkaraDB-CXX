@@ -30,7 +30,7 @@ namespace akkaradb::wal {
     // ============================================================================
 
     uint32_t compute_shard_count() noexcept {
-        const uint32_t cores = static_cast<uint32_t>(std::thread::hardware_concurrency());
+        const auto cores = std::thread::hardware_concurrency();
 
         // Clamp to [2, 16]
         const uint32_t clamped = std::max(2u, std::min(cores, 16u));
@@ -54,7 +54,7 @@ namespace akkaradb::wal {
         std::memcpy(tmp, buffer.data(), SIZE);
 
         const uint32_t stored = crc32c;
-        const uint32_t zero = 0;
+        constexpr uint32_t zero = 0;
         std::memcpy(tmp + offsetof(WalSegmentHeader, crc32c), &zero, sizeof(zero));
 
         const uint32_t computed = core::BufferView{tmp, SIZE}.crc32c(0, SIZE);
@@ -95,7 +95,7 @@ namespace akkaradb::wal {
         uint32_t original;
         std::memcpy(&original, buffer.data() + offsetof(WalBatchHeader, crc32c), sizeof(original));
 
-        const uint32_t zero = 0;
+        constexpr uint32_t zero = 0;
         std::memcpy(buffer.data() + offsetof(WalBatchHeader, crc32c), &zero, sizeof(zero));
 
         const uint32_t crc = buffer.crc32c(0, total_size);
