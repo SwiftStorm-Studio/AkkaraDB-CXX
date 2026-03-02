@@ -482,4 +482,60 @@ namespace akkaradb::engine::manifest {
         return true;
     }
 
+    // ============================================================================
+    // Cluster event encode / decode (v4)
+    // ============================================================================
+
+    std::vector<uint8_t> encode_node_join(uint64_t ts_us, uint64_t node_id, uint16_t repl_port, const std::string& host) {
+        const uint16_t host_len = static_cast<uint16_t>(host.size());
+        std::vector<uint8_t> p(20 + host_len);
+        uint8_t* b = p.data();
+        write_u64(b, 0, ts_us);
+        write_u64(b, 8, node_id);
+        write_u16(b, 16, repl_port);
+        write_u16(b, 18, host_len);
+        std::memcpy(b + 20, host.data(), host_len);
+        return p;
+    }
+
+    std::vector<uint8_t> encode_node_leave(uint64_t ts_us, uint64_t node_id) {
+        std::vector<uint8_t> p(16);
+        write_u64(p.data(), 0, ts_us);
+        write_u64(p.data(), 8, node_id);
+        return p;
+    }
+
+    std::vector<uint8_t> encode_primary_lease(uint64_t ts_us, uint64_t node_id, uint64_t lease_until_us) {
+        std::vector<uint8_t> p(24);
+        write_u64(p.data(), 0, ts_us);
+        write_u64(p.data(), 8, node_id);
+        write_u64(p.data(), 16, lease_until_us);
+        return p;
+    }
+
+    bool decode_node_join(const uint8_t* payload, uint16_t len, DecodedNodeJoin& out) {
+        if (len < 20) { return false; }
+        out.ts_us = read_u64(payload, 0);
+        out.node_id = read_u64(payload, 8);
+        out.repl_port = read_u16(payload, 16);
+        const uint16_t host_len = read_u16(payload, 18);
+        if (len < 20u + host_len) { return false; }
+        out.host.assign(reinterpret_cast<const char*>(payload + 20), host_len);
+        return true;
+    }
+
+    bool decode_node_leave(const uint8_t* payload, uint16_t len, DecodedNodeLeave& out) {
+        if (len < 16) { return false; }
+        out.ts_us = read_u64(payload, 0);
+        out.node_id = read_u64(payload, 8);
+        return true;
+    }
+
+    bool decode_primary_lease(const uint8_t* payload, uint16_t len, DecodedPrimaryLease& out) {
+        if (len < 24) { return false; }
+        out.ts_us = read_u64(payload, 0);
+        out.node_id = read_u64(payload, 8);
+        out.lease_until_us = read_u64(payload, 16);
+        return true;
+    }
 } // namespace akkaradb::engine::manifest

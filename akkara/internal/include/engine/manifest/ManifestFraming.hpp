@@ -43,6 +43,14 @@ namespace akkaradb::engine::manifest {
         CompactionEnd   = 0x05, ///< Compaction completed
         Checkpoint      = 0x06, ///< Checkpoint marker
         Truncate        = 0x07, ///< Manifest truncate marker
+
+        // ── Cluster events (v4) ──────────────────────────────────────────
+        NodeJoin = 0x10,
+        ///< A node joined the cluster
+        NodeLeave = 0x11,
+        ///< A node left the cluster
+        PrimaryLease = 0x12,
+        ///< Primary lease record (node_id + expiry)
     };
 
     // ============================================================================
@@ -312,4 +320,47 @@ namespace akkaradb::engine::manifest {
     [[nodiscard]] bool decode_checkpoint(const uint8_t* payload, uint16_t len, DecodedCheckpoint& out);
     [[nodiscard]] bool decode_truncate(const uint8_t* payload, uint16_t len, DecodedTruncate& out);
 
+    // ========================================================================
+    // Cluster event encode / decode (v4)
+    // ========================================================================
+
+    /**
+     * Encodes a NodeJoin payload.
+     * Payload: [ts_us:u64][node_id:u64][repl_port:u16][host_len:u16][host bytes]
+     */
+    [[nodiscard]] std::vector<uint8_t> encode_node_join(uint64_t ts_us, uint64_t node_id, uint16_t repl_port, const std::string& host);
+
+    /**
+     * Encodes a NodeLeave payload.
+     * Payload (16 bytes): [ts_us:u64][node_id:u64]
+     */
+    [[nodiscard]] std::vector<uint8_t> encode_node_leave(uint64_t ts_us, uint64_t node_id);
+
+    /**
+     * Encodes a PrimaryLease payload.
+     * Payload (24 bytes): [ts_us:u64][node_id:u64][lease_until_us:u64]
+     */
+    [[nodiscard]] std::vector<uint8_t> encode_primary_lease(uint64_t ts_us, uint64_t node_id, uint64_t lease_until_us);
+
+    struct DecodedNodeJoin {
+        uint64_t ts_us;
+        uint64_t node_id;
+        uint16_t repl_port;
+        std::string host;
+    };
+
+    struct DecodedNodeLeave {
+        uint64_t ts_us;
+        uint64_t node_id;
+    };
+
+    struct DecodedPrimaryLease {
+        uint64_t ts_us;
+        uint64_t node_id;
+        uint64_t lease_until_us;
+    };
+
+    [[nodiscard]] bool decode_node_join(const uint8_t* payload, uint16_t len, DecodedNodeJoin& out);
+    [[nodiscard]] bool decode_node_leave(const uint8_t* payload, uint16_t len, DecodedNodeLeave& out);
+    [[nodiscard]] bool decode_primary_lease(const uint8_t* payload, uint16_t len, DecodedPrimaryLease& out);
 } // namespace akkaradb::engine::manifest

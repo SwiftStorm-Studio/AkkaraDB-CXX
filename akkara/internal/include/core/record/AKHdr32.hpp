@@ -71,7 +71,8 @@ namespace akkaradb::core {
         // ==================== Flag Constants ====================
 
         static constexpr uint8_t FLAG_NORMAL = 0x00; ///< Normal record
-        static constexpr uint8_t FLAG_TOMBSTONE = 0x01; ///< Deleted record
+        static constexpr uint8_t FLAG_TOMBSTONE = 0x01; ///< Deleted record (tombstone)
+        static constexpr uint8_t FLAG_BLOB = 0x02; ///< Value is a blob reference [blob_id:u64][total_size:u64][checksum:u32] (v4)
 
         // ==================== Methods ====================
 
