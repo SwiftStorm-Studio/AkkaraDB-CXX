@@ -46,16 +46,20 @@ namespace akkaradb::engine::blob {
      * └─────────────────────────────────────────────────────┘
      *
      * Each .blob file = BlobFileHeader (32 bytes) + raw content.
+     * The file is written header-first then content directly, with no
+     * intermediate full copy (memory usage ≈ content already in RAM + 32B header).
+     *
+     * Blob ID:
+     *  blob_id == WAL seq of the write that created this blob.
+     *  The caller (AkkEngine) supplies the seq; BlobManager stores it verbatim.
+     *  This guarantees global uniqueness (Primary is sole seq issuer) and
+     *  makes GC trivial: if seq N's WAL entry no longer exists, blob N can be deleted.
      *
      * GC flow (crash-safe):
      *  1. schedule_delete(blob_id)  → enqueues into delete_queue_
      *  2. GC worker:  rename .blob → .blob.del  (atomic on most FS)
      *  3. GC worker:  delete .blob.del
      *  Startup cleanup: deletes any leftover *.blob.del files (rename was committed).
-     *
-     * Blob ID generation:
-     *  On start(), scans blobs/ for the maximum existing blob_id + 1.
-     *  Stored as std::atomic<uint64_t>; no extra file required.
      *
      * Thread safety:
      *  write(), read(), schedule_delete() are thread-safe.
@@ -90,20 +94,17 @@ namespace akkaradb::engine::blob {
         // ── write ────────────────────────────────────────────────────────────
 
         /**
-         * Writes content to a new blob file.
-         * Assigns a fresh blob_id, writes BlobFileHeader + content atomically
-         * via a tmp-file + rename.
+         * Writes content to a blob file with the given blob_id (= WAL seq).
          *
-         * @return Assigned blob_id.
+         * The caller must supply blob_id; BlobManager does NOT generate IDs.
+         * Writes BlobFileHeader (32B) + content to disk atomically via
+         * tmp-file + rename.  Header and content are written separately so
+         * the full content is never duplicated in memory.
+         *
+         * Idempotent: if a file with blob_id already exists, this is a no-op.
+         * (Allows safe retry on Replica after a reconnect.)
          */
-        [[nodiscard]] uint64_t write(std::span<const uint8_t> content);
-
-        /**
-         * Writes a blob that was received from the Primary (Replica path).
-         * The blob_id is supplied by the caller (from ReplBlobPut).
-         * If a blob with the same id already exists, this is a no-op.
-         */
-        void write_remote(uint64_t blob_id, std::span<const uint8_t> content);
+        void write(uint64_t blob_id, std::span<const uint8_t> content);
 
         // ── read ─────────────────────────────────────────────────────────────
 

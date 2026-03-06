@@ -107,6 +107,9 @@ target_sources(akkaradb PRIVATE
         # Core - CRC
         ${INTERNAL_SRC_DIR}/core/CRC32C.cpp
 
+        # Engine
+        ${INTERNAL_SRC_DIR}/engine/AkkEngine.cpp
+
         # Engine - MemTable
         ${INTERNAL_SRC_DIR}/engine/memtable/MemTable.cpp
 

@@ -95,17 +95,18 @@ namespace akkaradb::engine::cluster {
             throw std::runtime_error("ClusterConfig: unsupported version");
         }
 
-        // Verify CRC32C (crc field at offset 24, zero it for computation)
-        const uint32_t stored_crc = read_u32(hdr, 24);
+        // Verify CRC32C (crc field at offset 20, zero it for computation)
+        const uint32_t stored_crc = read_u32(hdr, 20);
         uint8_t hdr_for_crc[HDR_SIZE];
         std::memcpy(hdr_for_crc, hdr, HDR_SIZE);
-        write_u32(hdr_for_crc, 24, 0);
+        write_u32(hdr_for_crc, 20, 0);
         const uint32_t computed_crc = core::CRC32C::compute(hdr_for_crc, HDR_SIZE);
         if (stored_crc != computed_crc) {
             throw std::runtime_error("ClusterConfig: header CRC mismatch");
         }
 
-        const uint16_t node_count  = read_u16(hdr, 8);
+        const uint16_t flags = read_u16(hdr, 6);
+        const uint16_t node_count = read_u16(hdr, 8);
         const auto     mode        = static_cast<ReplicationMode>(hdr[10]);
         const uint8_t  repl_factor = hdr[11];
 
@@ -131,7 +132,9 @@ namespace akkaradb::engine::cluster {
             nodes.push_back(std::move(ni));
         }
 
-        return ClusterConfig{std::move(nodes), mode, repl_factor};
+        ClusterConfig cfg{std::move(nodes), mode, repl_factor};
+        if (flags & ClusterConfig::FLAG_WEB_CONFIG_ENABLED) cfg.set_web_config_enabled(true);
+        return cfg;
     }
 
     // ============================================================================
@@ -148,7 +151,7 @@ namespace akkaradb::engine::cluster {
         uint8_t* h = buf.data();
         write_u32(h,  0, MAGIC);
         write_u16(h,  4, VERSION);
-        write_u16(h,  6, 0); // flags
+        write_u16(h, 6, cfg.flags());
         write_u16(h,  8, static_cast<uint16_t>(cfg.nodes_.size()));
         h[10] = static_cast<uint8_t>(cfg.mode_);
         h[11] = cfg.repl_factor_;

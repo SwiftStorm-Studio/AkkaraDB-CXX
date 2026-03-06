@@ -90,6 +90,14 @@ namespace akkaradb::engine::cluster {
             static constexpr uint16_t VERSION = 0x0001;
 
             // ----------------------------------------------------------------
+            // flags field bits
+            // ----------------------------------------------------------------
+
+            /// Enable the built-in WebConfig HTTP server (for browser-based management).
+            /// When set, the engine starts an embedded HTTP server on web_config_port.
+            static constexpr uint16_t FLAG_WEB_CONFIG_ENABLED = 0x0001;
+
+            // ----------------------------------------------------------------
             // Factory
             // ----------------------------------------------------------------
 
@@ -124,6 +132,15 @@ namespace akkaradb::engine::cluster {
             [[nodiscard]] const std::vector<NodeInfo>& nodes()       const noexcept { return nodes_; }
             [[nodiscard]] ReplicationMode               mode()        const noexcept { return mode_; }
             [[nodiscard]] uint8_t                       repl_factor() const noexcept { return repl_factor_; }
+            [[nodiscard]] uint16_t flags() const noexcept { return flags_; }
+
+            /// Returns true if the integrated WebConfig HTTP server should be started.
+            [[nodiscard]] bool web_config_enabled() const noexcept { return (flags_ & FLAG_WEB_CONFIG_ENABLED) != 0; }
+
+            void set_web_config_enabled(bool enabled) noexcept {
+                if (enabled) flags_ |= FLAG_WEB_CONFIG_ENABLED;
+                else flags_ &= ~FLAG_WEB_CONFIG_ENABLED;
+            }
 
             /**
              * Finds a node by its node_id.
@@ -142,6 +159,7 @@ namespace akkaradb::engine::cluster {
             std::vector<NodeInfo> nodes_;
             ReplicationMode       mode_        = ReplicationMode::Standalone;
             uint8_t               repl_factor_ = 1;
+            uint16_t flags_ = 0;
     };
 
 } // namespace akkaradb::engine::cluster

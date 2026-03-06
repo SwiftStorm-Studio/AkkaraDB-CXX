@@ -67,11 +67,10 @@ namespace akkaradb::engine::blob {
     // ============================================================================
 
     namespace {
-
-        // Write `data` (len bytes) to `path` atomically via a .tmp file + rename.
-        static void write_atomic(const std::filesystem::path& path,
-                                 const uint8_t* data, size_t len) {
-            // Ensure parent directory exists
+        // Writes two contiguous byte regions to `path` atomically via .tmp + rename.
+        // Used to write BlobFileHeader (hdr) followed by blob content without
+        // allocating an intermediate vector that would double memory usage.
+        static void write_atomic_split(const std::filesystem::path& path, const uint8_t* hdr, size_t hdr_len, const uint8_t* content, size_t content_len) {
             std::filesystem::create_directories(path.parent_path());
 
             std::filesystem::path tmp = path;
@@ -85,21 +84,20 @@ namespace akkaradb::engine::blob {
             if (h == INVALID_HANDLE_VALUE)
                 throw std::runtime_error("BlobManager: cannot open tmp file for write");
 
-            DWORD written = 0;
-            size_t remaining = len;
-            const uint8_t* ptr = data;
-            while (remaining > 0) {
-                DWORD chunk = (remaining > 0x40000000u) ? 0x40000000u
-                                                        : static_cast<DWORD>(remaining);
-                if (!WriteFile(h, ptr, chunk, &written, nullptr) || written == 0) {
-                    CloseHandle(h);
-                    DeleteFileW(to_wpath(tmp).c_str());
-                    throw std::runtime_error("BlobManager: write error");
+            // Helper lambda: writes a region in ≤1GB chunks (WriteFile int limit)
+            auto write_region = [&](const uint8_t* data, size_t len) {
+                while (len > 0) {
+                    DWORD written = 0;
+                    DWORD chunk = (len > 0x40000000u) ? 0x40000000u : static_cast<DWORD>(len);
+                    if (!WriteFile(h, data, chunk, &written, nullptr) || written == 0) {
+                        CloseHandle(h);
+                        DeleteFileW(to_wpath(tmp).c_str());
+                        throw std::runtime_error("BlobManager: write error");
+                    }
+                    data += written;
+                    len -= written;
                 }
-                ptr       += written;
-                remaining -= written;
-            }
-            FlushFileBuffers(h);
+            }; write_region(hdr, hdr_len); write_region(content, content_len); FlushFileBuffers(h);
             CloseHandle(h);
             MoveFileExW(to_wpath(tmp).c_str(), to_wpath(path).c_str(),
                         MOVEFILE_REPLACE_EXISTING);
@@ -108,18 +106,21 @@ namespace akkaradb::engine::blob {
             if (fd < 0)
                 throw std::runtime_error("BlobManager: cannot open tmp file for write");
 
-            const uint8_t* ptr = data;
-            size_t remaining = len;
-            while (remaining > 0) {
-                ssize_t n = ::write(fd, ptr, remaining);
-                if (n <= 0) {
-                    ::close(fd);
-                    ::unlink(tmp.c_str());
-                    throw std::runtime_error("BlobManager: write error");
+            auto write_region = [&](const uint8_t* data, size_t len) {
+                while (len > 0) {
+                    ssize_t n = ::write(fd, data, len);
+                    if (n <= 0) {
+                        ::close(fd);
+                        ::unlink(tmp.c_str());
+                        throw std::runtime_error("BlobManager: write error");
+                    }
+                    data += n;
+                    len -= static_cast<size_t>(n);
                 }
-                ptr       += n;
-                remaining -= static_cast<size_t>(n);
-            }
+            };
+
+            write_region(hdr, hdr_len);
+            write_region(content, content_len);
             ::fsync(fd);
             ::close(fd);
             ::rename(tmp.c_str(), path.c_str());
@@ -221,7 +222,6 @@ namespace akkaradb::engine::blob {
     struct BlobManager::Impl {
         std::filesystem::path   blobs_dir;
         uint64_t                threshold;
-        std::atomic<uint64_t>   next_id { 1 };
 
         std::atomic<bool>       running { false };
         std::thread             gc_thr;
@@ -255,24 +255,15 @@ namespace akkaradb::engine::blob {
             }
         }
 
-        uint64_t scan_max_id() {
-            uint64_t max_id = 0;
-            std::error_code ec;
-            for (auto& entry : std::filesystem::recursive_directory_iterator(blobs_dir, ec)) {
-                if (ec) break;
-                if (entry.path().extension() != ".blob") continue;
-                uint64_t id = parse_blob_id_from_stem(
-                    entry.path().stem().string());
-                if (id > max_id) max_id = id;
-            }
-            return max_id;
-        }
-
         // ── write helpers ────────────────────────────────────────────────────
 
         void do_write(uint64_t id, std::span<const uint8_t> content) {
-            auto wire = encode_blob_file(id, content);
-            write_atomic(id_to_path(id), wire.data(), wire.size());
+            // Build only the 32-byte header; write header + content separately.
+            // This avoids duplicating the (potentially large) content in memory.
+            auto hdr = BlobFileHeader::build(id, content.size());
+            uint8_t hdr_buf[BlobFileHeader::SIZE];
+            hdr.serialize(hdr_buf);
+            write_atomic_split(id_to_path(id), hdr_buf, BlobFileHeader::SIZE, content.data(), content.size());
         }
 
         // ── GC worker ────────────────────────────────────────────────────────
@@ -339,10 +330,6 @@ namespace akkaradb::engine::blob {
         // Cleanup leftover .blob.del files from previous crash
         impl_->startup_cleanup();
 
-        // Determine starting blob_id
-        uint64_t max_id = impl_->scan_max_id();
-        impl_->next_id.store(max_id + 1, std::memory_order_relaxed);
-
         // Start GC worker
         impl_->running.store(true, std::memory_order_relaxed);
         impl_->gc_thr = std::thread([this]{ impl_->gc_loop(); });
@@ -356,30 +343,16 @@ namespace akkaradb::engine::blob {
     }
 
     // ============================================================================
-    // write / write_remote
+    // write
     // ============================================================================
 
-    uint64_t BlobManager::write(std::span<const uint8_t> content) {
-        uint64_t id = impl_->next_id.fetch_add(1, std::memory_order_relaxed);
-        impl_->do_write(id, content);
-        return id;
-    }
-
-    void BlobManager::write_remote(uint64_t blob_id,
-                                   std::span<const uint8_t> content) {
+    void BlobManager::write(uint64_t blob_id, std::span<const uint8_t> content) {
+        // Idempotent: if the file already exists (e.g. Replica re-receive after
+        // reconnect), skip silently.
         auto p = impl_->id_to_path(blob_id);
-        if (std::filesystem::exists(p)) return; // idempotent
+        if (std::filesystem::exists(p)) return;
 
         impl_->do_write(blob_id, content);
-
-        // Advance next_id if needed (Replica may receive higher ids than its counter)
-        uint64_t expected = impl_->next_id.load(std::memory_order_relaxed);
-        while (blob_id >= expected) {
-            if (impl_->next_id.compare_exchange_weak(
-                    expected, blob_id + 1,
-                    std::memory_order_relaxed, std::memory_order_relaxed))
-                break;
-        }
     }
 
     // ============================================================================
