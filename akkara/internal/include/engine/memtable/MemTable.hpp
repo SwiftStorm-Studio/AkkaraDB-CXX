@@ -154,7 +154,7 @@ namespace akkaradb::engine::memtable {
              * @param value Value bytes
              * @param seq   Sequence number (WAL sequence or next_seq())
              */
-            void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq);
+            void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags = core::AKHdr32::FLAG_NORMAL);
 
             /**
              * Inserts a tombstone (deletion marker).

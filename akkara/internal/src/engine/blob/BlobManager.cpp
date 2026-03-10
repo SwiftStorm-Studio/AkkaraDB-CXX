@@ -41,15 +41,7 @@
 #  include <windows.h>
 
 namespace {
-    // Wide-string conversion helper (UTF-8 → UTF-16)
-    static std::wstring to_wstr(const std::string& s) {
-        if (s.empty()) return {};
-        int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-        std::wstring w(n, 0);
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
-        return w;
-    }
-    static std::wstring to_wpath(const std::filesystem::path& p) {
+    std::wstring to_wpath(const std::filesystem::path& p) {
         return p.wstring();
     }
 }
@@ -70,7 +62,7 @@ namespace akkaradb::engine::blob {
         // Writes two contiguous byte regions to `path` atomically via .tmp + rename.
         // Used to write BlobFileHeader (hdr) followed by blob content without
         // allocating an intermediate vector that would double memory usage.
-        static void write_atomic_split(const std::filesystem::path& path, const uint8_t* hdr, size_t hdr_len, const uint8_t* content, size_t content_len) {
+        void write_atomic_split(const std::filesystem::path& path, const uint8_t* hdr, size_t hdr_len, const uint8_t* content, size_t content_len) {
             std::filesystem::create_directories(path.parent_path());
 
             std::filesystem::path tmp = path;
@@ -97,7 +89,10 @@ namespace akkaradb::engine::blob {
                     data += written;
                     len -= written;
                 }
-            }; write_region(hdr, hdr_len); write_region(content, content_len); FlushFileBuffers(h);
+            };
+            write_region(hdr, hdr_len);
+            write_region(content, content_len);
+            FlushFileBuffers(h);
             CloseHandle(h);
             MoveFileExW(to_wpath(tmp).c_str(), to_wpath(path).c_str(),
                         MOVEFILE_REPLACE_EXISTING);

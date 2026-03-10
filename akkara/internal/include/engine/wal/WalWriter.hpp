@@ -19,6 +19,7 @@
 // internal/include/engine/wal/WalWriter.hpp
 #pragma once
 
+#include "core/record/AKHdr32.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -152,7 +153,14 @@ namespace akkaradb::wal {
              *
              * @throws std::runtime_error if WAL is closed or write fails
              */
-            void append_put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint64_t key_fp64, uint64_t mini_key);
+            void append_put(
+                std::span<const uint8_t> key,
+                std::span<const uint8_t> value,
+                uint64_t seq,
+                uint64_t key_fp64,
+                uint64_t mini_key,
+                uint8_t flags = core::AKHdr32::FLAG_NORMAL
+            );
 
             /**
              * Appends a Delete (tombstone) entry to the appropriate shard.

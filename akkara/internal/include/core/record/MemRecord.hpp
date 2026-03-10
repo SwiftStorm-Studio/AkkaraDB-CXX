@@ -79,7 +79,8 @@ namespace akkaradb::core {
                 std::span<const uint8_t> key,
                 std::span<const uint8_t> value,
                 uint64_t seq,
-                uint8_t flags = AKHdr32::FLAG_NORMAL
+                uint8_t flags = AKHdr32::FLAG_NORMAL,
+                uint64_t precomputed_fp64 = 0 ///< 0 = compute internally
             );
 
             /**
@@ -90,7 +91,7 @@ namespace akkaradb::core {
             /**
              * Creates a tombstone (deletion marker). value is empty; data_ holds key only.
              */
-            [[nodiscard]] static MemRecord tombstone(std::span<const uint8_t> key, uint64_t seq);
+            [[nodiscard]] static MemRecord tombstone(std::span<const uint8_t> key, uint64_t seq, uint64_t precomputed_fp64 = 0);
 
             /**
              * Creates a tombstone from string key.
@@ -236,5 +237,11 @@ namespace akkaradb::core {
             void compute_approx_size() noexcept;
     };
 
+    // In Release (NDEBUG): sizeof(MemRecord) == 64  (AKHdr32=32 + vector=24 + size_t=8).
+    // In MSVC Debug: std::vector gains an 8-byte _Container_proxy* for checked iterators,
+    // making sizeof(vector) == 32 and sizeof(MemRecord) == 72.  The 64-byte guarantee is
+    // a Release-only cache-efficiency property, so the assert is guarded accordingly.
+    #ifdef NDEBUG
     static_assert(sizeof(MemRecord) == 64, "MemRecord must be 64 bytes (AKHdr32=32 + vector=24 + size_t=8)");
+    #endif
 } // namespace akkaradb::core

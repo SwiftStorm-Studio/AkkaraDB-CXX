@@ -75,7 +75,13 @@ namespace akkaradb::engine::memtable {
             [[nodiscard]] bool contains(const K& key) const;
 
             // ── Modification ──────────────────────────────────────────────────
-            void put(const K& key, const V& value);
+            /**
+             * Insert or update a key-value pair.
+             * Takes key/value by value to allow the caller to move in.
+             * Returns the old key if an existing entry was replaced (for size accounting),
+             * or nullopt if this was a new insertion.
+             */
+            [[nodiscard]] std::optional<K> put(K key, V value);
 
             /**
              * Not yet implemented (returns false without modifying the tree).
@@ -192,9 +198,9 @@ namespace akkaradb::engine::memtable {
 
             // ── Internal operations ───────────────────────────────────────────
             std::optional<V> search_leaf(const LeafNode* leaf, const K& key) const;
-            std::optional<SplitResult> insert_internal(Node* node, const K& key, const V& value);
-            std::optional<SplitResult> insert_into_leaf(LeafNode* leaf, const K& key, const V& value);
-            std::optional<SplitResult> insert_into_internal(InternalNode* node, const K& key, const V& value);
+            std::optional<SplitResult> insert_internal(Node* node, K&& key, V&& value, std::optional<K>& old_key);
+            std::optional<SplitResult> insert_into_leaf(LeafNode* leaf, K&& key, V&& value, std::optional<K>& old_key);
+            std::optional<SplitResult> insert_into_internal(InternalNode* node, K&& key, V&& value, std::optional<K>& old_key);
             SplitResult split_leaf(LeafNode* leaf);
             SplitResult split_internal(InternalNode* node);
             LeafNode* find_leaf(const K& key) const;
@@ -381,25 +387,27 @@ namespace akkaradb::engine::memtable {
     // ── put ───────────────────────────────────────────────────────────────────
 
     template <typename K, typename V, typename Compare>
-    void BPTree<K, V, Compare>::put(const K& key, const V& value) {
+    std::optional<K> BPTree<K, V, Compare>::put(K key, V value) {
         if (!root_) {
             auto* leaf = new LeafNode{};
-            leaf->keys[0] = key;
-            leaf->values[0] = value;
+            leaf->keys[0] = std::move(key);
+            leaf->values[0] = std::move(value);
             leaf->count = 1;
             root_ = leaf;
             ++size_;
-            return;
+            return std::nullopt;
         }
 
-        if (auto split = insert_internal(root_, key, value)) {
+        std::optional<K> old_key;
+        if (auto split = insert_internal(root_, std::move(key), std::move(value), old_key)) {
             auto* new_root = new InternalNode{};
-            new_root->keys[0] = split->separator;
+            new_root->keys[0] = std::move(split->separator);
             new_root->children[0] = split->left;
             new_root->children[1] = split->right;
             new_root->count = 1;
             root_ = new_root;
         }
+        return old_key;
     }
 
     // ── remove (not yet implemented) ──────────────────────────────────────────
@@ -414,31 +422,41 @@ namespace akkaradb::engine::memtable {
     // ── insert helpers ────────────────────────────────────────────────────────
 
     template <typename K, typename V, typename Compare>
-    std::optional<typename BPTree<K, V, Compare>::SplitResult>
-    BPTree<K, V, Compare>::insert_internal(Node* node, const K& key, const V& value) {
-        if (node->is_leaf()) return insert_into_leaf(static_cast<LeafNode*>(node), key, value);
-        return insert_into_internal(static_cast<InternalNode*>(node), key, value);
+    std::optional<typename BPTree<K, V, Compare>::SplitResult> BPTree<K, V, Compare>::insert_internal(
+        Node* node,
+        K&& key,
+        V&& value,
+        std::optional<K>& old_key
+    ) {
+        if (node->is_leaf()) return insert_into_leaf(static_cast<LeafNode*>(node), std::move(key), std::move(value), old_key);
+        return insert_into_internal(static_cast<InternalNode*>(node), std::move(key), std::move(value), old_key);
     }
 
     template <typename K, typename V, typename Compare>
-    std::optional<typename BPTree<K, V, Compare>::SplitResult>
-    BPTree<K, V, Compare>::insert_into_leaf(LeafNode* leaf, const K& key, const V& value) {
-        // Update in place if key exists
+    std::optional<typename BPTree<K, V, Compare>::SplitResult> BPTree<K, V, Compare>::insert_into_leaf(
+        LeafNode* leaf,
+        K&& key,
+        V&& value,
+        std::optional<K>& old_key
+    ) {
+        // Update in place if key exists — move old out, move new in (no extra heap alloc)
         auto existing_idx = leaf->find_index(key, comp_);
         if (existing_idx) {
-            leaf->values[*existing_idx] = value;
+            old_key = std::move(leaf->keys[*existing_idx]);
+            leaf->keys[*existing_idx] = std::move(key);
+            leaf->values[*existing_idx] = std::move(value);
             return std::nullopt;
         }
 
         if (leaf->count >= LEAF_ORDER) {
-            // Split: heap-allocated vector to avoid ~32 KB stack frame (LEAF_ORDER can be ~185 for MemRecord).
+            // Split: heap-allocated vector to avoid ~32 KB stack frame (LEAF_ORDER can be ~500 for MemRecord).
             std::vector<std::pair<K, V>> temp;
             temp.reserve(leaf->count + 1);
             size_t insert_idx = leaf->find_insert_index(key, comp_);
 
-            for (size_t i = 0; i < insert_idx; ++i) temp.emplace_back(leaf->keys[i], leaf->values[i]);
-            temp.emplace_back(key, value);
-            for (size_t i = insert_idx; i < leaf->count; ++i) temp.emplace_back(leaf->keys[i], leaf->values[i]);
+            for (size_t i = 0; i < insert_idx; ++i) temp.emplace_back(std::move(leaf->keys[i]), std::move(leaf->values[i]));
+            temp.emplace_back(std::move(key), std::move(value));
+            for (size_t i = insert_idx; i < leaf->count; ++i) temp.emplace_back(std::move(leaf->keys[i]), std::move(leaf->values[i]));
 
             const size_t temp_idx = temp.size();
             size_t mid = (temp_idx + 1) / 2;
@@ -462,14 +480,14 @@ namespace akkaradb::engine::memtable {
             return SplitResult{leaf, right->keys[0], right};
         }
 
-        // No split: shift-right and insert
+        // No split: shift-right (move) and insert (move — no extra heap alloc)
         size_t insert_idx = leaf->find_insert_index(key, comp_);
         for (size_t i = leaf->count; i > insert_idx; --i) {
-            leaf->keys[i] = leaf->keys[i - 1];
-            leaf->values[i] = leaf->values[i - 1];
+            leaf->keys[i] = std::move(leaf->keys[i - 1]);
+            leaf->values[i] = std::move(leaf->values[i - 1]);
         }
-        leaf->keys[insert_idx] = key;
-        leaf->values[insert_idx] = value;
+        leaf->keys[insert_idx] = std::move(key);
+        leaf->values[insert_idx] = std::move(value);
         ++leaf->count;
         ++size_;
 
@@ -477,10 +495,14 @@ namespace akkaradb::engine::memtable {
     }
 
     template <typename K, typename V, typename Compare>
-    std::optional<typename BPTree<K, V, Compare>::SplitResult>
-    BPTree<K, V, Compare>::insert_into_internal(InternalNode* node, const K& key, const V& value) {
+    std::optional<typename BPTree<K, V, Compare>::SplitResult> BPTree<K, V, Compare>::insert_into_internal(
+        InternalNode* node,
+        K&& key,
+        V&& value,
+        std::optional<K>& old_key
+    ) {
         size_t child_idx = node->find_child_index(key, comp_);
-        auto split = insert_internal(node->children[child_idx], key, value);
+        auto split = insert_internal(node->children[child_idx], std::move(key), std::move(value), old_key);
         if (!split) return std::nullopt;
 
         if (node->count >= INTERNAL_ORDER) {
@@ -491,14 +513,14 @@ namespace akkaradb::engine::memtable {
             temp_children.reserve(node->count + 2);
 
             for (size_t i = 0; i < child_idx; ++i) {
-                temp_keys.push_back(node->keys[i]);
+                temp_keys.push_back(std::move(node->keys[i]));
                 temp_children.push_back(node->children[i]);
             }
             temp_children.push_back(split->left);
-            temp_keys.push_back(split->separator);
+            temp_keys.push_back(std::move(split->separator));
             temp_children.push_back(split->right);
             for (size_t i = child_idx; i < node->count; ++i) {
-                temp_keys.push_back(node->keys[i]);
+                temp_keys.push_back(std::move(node->keys[i]));
                 temp_children.push_back(node->children[i + 1]);
             }
 
@@ -526,12 +548,12 @@ namespace akkaradb::engine::memtable {
             return SplitResult{node, std::move(promote_key), right};
         }
 
-        // No split: shift-right and insert separator
+        // No split: shift-right (move) and insert separator (move — no extra heap alloc)
         for (size_t i = node->count; i > child_idx; --i) {
-            node->keys[i] = node->keys[i - 1];
+            node->keys[i] = std::move(node->keys[i - 1]);
             node->children[i + 1] = node->children[i];
         }
-        node->keys[child_idx] = split->separator;
+        node->keys[child_idx] = std::move(split->separator);
         node->children[child_idx] = split->left;
         node->children[child_idx + 1] = split->right;
         ++node->count;

@@ -192,12 +192,16 @@ namespace akkaradb::engine {
 
     std::unique_ptr<AkkEngine> AkkEngine::open(AkkEngineOptions options) {
         // ── Validate / fill defaults ─────────────────────────────────────────
-        if (options.wal_enabled && options.data_dir.empty()) { throw std::runtime_error("AkkEngine: data_dir must be set when wal_enabled=true"); }
+        // SyncMode::Off overrides wal_enabled: "WAL writes are disabled entirely
+        // (wal_enabled is ignored)" — data lives only in memory.
+        const bool persistent = options.wal_enabled && (options.sync_mode != SyncMode::Off);
 
-        if (options.wal_enabled) {
+        if (persistent && options.data_dir.empty()) { throw std::runtime_error("AkkEngine: data_dir must be set when wal_enabled=true"); }
+
+        if (persistent) {
             if (options.wal.wal_dir.empty()) options.wal.wal_dir = options.data_dir / "wal";
 
-            // SyncMode → fast_mode mapping
+            // SyncMode → fast_mode mapping (Off is already excluded above)
             options.wal.fast_mode = (options.sync_mode == SyncMode::Async);
         }
 
@@ -207,7 +211,7 @@ namespace akkaradb::engine {
         impl->opts_ = options;
 
         // ── Create directories ───────────────────────────────────────────────
-        if (options.wal_enabled) {
+        if (persistent) {
             fs::create_directories(options.data_dir);
             fs::create_directories(options.wal.wal_dir);
         }
@@ -220,13 +224,13 @@ namespace akkaradb::engine {
         }
 
         // ── BlobManager ──────────────────────────────────────────────────────
-        if (options.wal_enabled) {
+        if (persistent) {
             impl->blob_manager_ = blob::BlobManager::create(options.data_dir / "blobs", blob::BlobManager::DEFAULT_THRESHOLD);
             impl->blob_manager_->start(); // starts GC thread + startup cleanup
         }
 
         // ── Manifest ─────────────────────────────────────────────────────────
-        if (options.wal_enabled) {
+        if (persistent) {
             const bool fast_manifest = (options.sync_mode == SyncMode::Async);
             impl->manifest_ = manifest::Manifest::create(options.data_dir / "manifest.akmf", fast_manifest);
             impl->manifest_->start();
@@ -237,17 +241,19 @@ namespace akkaradb::engine {
         // directly into the MemTable.  The MemTable advances its seq_gen_ to
         // max(seq_gen_, seq+1) on every put/remove, so after replay the sequence
         // counter is correctly positioned for the next write.
-        if (options.wal_enabled) {
+        if (persistent) {
             auto& mt = *impl->memtable_;
 
             auto recovery = wal::WalRecovery::create();
             auto result = recovery->replay(
                 options.wal.wal_dir,
 
-                // Record handler: put or remove
+                // Record handler: put or remove.
+                // Pass the original flags (FLAG_BLOB, etc.) stored in the WAL header
+                // so the MemTable correctly reconstructs the record type after restart.
                 [&](const wal::WalRecordOpRef& ref) {
                     if (ref.is_tombstone()) { mt.remove(ref.key(), ref.seq()); }
-                    else { mt.put(ref.key(), ref.value(), ref.seq()); }
+                    else { mt.put(ref.key(), ref.value(), ref.seq(), ref.header().flags); }
                 },
 
                 // Commit handler: informational only at this stage
@@ -266,40 +272,32 @@ namespace akkaradb::engine {
         // orphan.  For Phase 2+3+4 (no SST yet) we conservatively keep all blobs
         // on startup; full orphan detection requires scanning MemTable records
         // and is deferred until SST compaction is implemented.
-        if (options.wal_enabled && impl->blob_manager_) { impl->blob_manager_->scan_orphans([](uint64_t) { return true; }); }
+        if (persistent && impl->blob_manager_) { impl->blob_manager_->scan_orphans([](uint64_t) { return true; }); }
 
         // ── WAL Writer ───────────────────────────────────────────────────────
         // Started after recovery so the first seq allocated by the writer is
         // strictly greater than the highest seq replayed.
-        if (options.wal_enabled) { impl->wal_writer_ = wal::WalWriter::create(options.wal); }
+        if (persistent) { impl->wal_writer_ = wal::WalWriter::create(options.wal); }
 
         // ── MemTable flush callback ──────────────────────────────────────────
-        // Placeholder for Phase 5 (SST writing).  When a shard overflows, the
-        // callback receives the sorted MemRecord batch; here we just record a
-        // Manifest checkpoint so the flush is durable in the audit trail.
-        {
-            manifest::Manifest* mf = impl->manifest_.get(); // raw ptr — safe (see close())
-            impl->memtable_->set_flush_callback(
-                [mf](const std::vector<core::MemRecord>& /*records*/) {
-                    // TODO (Phase 5): write SST file, call manifest_->sst_seal().
-                    if (mf) {
-                        mf->checkpoint(
-                            /*name=*/std::nullopt,
-                                     /*stripe=*/
-                                     std::nullopt,
-                                     /*last_seq=*/
-                                     std::nullopt
-                        );
-                    }
-                }
-            );
-        }
+        // SST writing is not yet implemented (Phase 5).
+        //
+        // Intentionally leaving on_flush = null so the MemTable never seals
+        // and discards records.  A no-op callback would silently drop flushed
+        // records from memory mid-run (WAL still has them, but get() would
+        // return nullopt until the next restart + recovery).
+        //
+        // With null callback the MemTable holds everything in memory.
+        // WAL provides crash-durability; data survives restart via replay.
+        // Memory growth is bounded by max_memory_bytes (backpressure: future).
+        //
+        // TODO (Phase 5): set_flush_callback → write SST, truncate WAL.
 
         // ── Cluster setup ────────────────────────────────────────────────────
         // If data_dir/cluster.akcc exists, initialise ClusterManager and elect
         // a role (Primary / Replica).  Then start the appropriate replication
         // component (ReplicationServer or ReplicationClient).
-        if (options.wal_enabled) {
+        if (persistent) {
             const auto cluster_cfg_path = options.data_dir / "cluster.akcc";
             if (fs::exists(cluster_cfg_path)) {
                 auto cfg = cluster::ClusterConfig::load(cluster_cfg_path);
@@ -368,11 +366,12 @@ namespace akkaradb::engine {
             const uint32_t cksum = core::CRC32C::compute(value.data(), value.size());
             uint8_t ref_buf[blob::BLOB_REF_SIZE];
             blob::encode_blob_ref(ref_buf, seq, value.size(), cksum);
-            constexpr auto ref_span = std::span<const uint8_t>(ref_buf, blob::BLOB_REF_SIZE);
+            const auto ref_span = std::span<const uint8_t>(ref_buf, blob::BLOB_REF_SIZE);
 
-            // 4. WAL + MemTable store the BlobRef (inline, 20 bytes)
-            if (impl_->wal_writer_) impl_->wal_writer_->append_put(key, ref_span, seq, fp64, mk);
-            impl_->memtable_->put(key, ref_span, seq);
+            // 4. WAL + MemTable store the BlobRef (inline, 20 bytes), tagged FLAG_BLOB
+            //    so get() can identify them reliably without heuristics.
+            if (impl_->wal_writer_) impl_->wal_writer_->append_put(key, ref_span, seq, fp64, mk, core::AKHdr32::FLAG_BLOB);
+            impl_->memtable_->put(key, ref_span, seq, core::AKHdr32::FLAG_BLOB);
 
             // 5. Ship WAL entry (carrying BlobRef) to Replicas
             if (impl_->repl_server_) impl_->repl_server_->ship(seq, wal::WalEntryType::Record, key, ref_span);
@@ -433,22 +432,13 @@ namespace akkaradb::engine {
         const auto stored_val = rec->value();
 
         // ── BLOB dereference ──────────────────────────────────────────────────
-        // Disambiguation heuristic: a stored value of exactly BLOB_REF_SIZE (20B)
-        // MAY be a BlobRef.  Confirm by checking total_size >= threshold:
-        //   - A genuine 20-byte inline value was stored because its size < threshold.
-        //   - A BlobRef records the original total_size which is >= threshold.
-        // Therefore total_size < threshold  ⟹  genuine inline value (safe to return
-        // raw bytes without touching the blob directory).
-        //
-        // Edge case: if threshold <= 20, the two cases overlap.  Requiring
-        // threshold > BLOB_REF_SIZE (20) in practice eliminates the ambiguity.
-        // The DEFAULT_THRESHOLD is 16 KiB, well above 20 bytes.
-        if (impl_->blob_manager_ && stored_val.size() == blob::BLOB_REF_SIZE) {
+        // FLAG_BLOB is set in both the WAL header and the MemRecord flags when
+        // put() externalises a large value.  It survives WAL recovery because
+        // open() passes ref.header().flags when replaying into the MemTable.
+        // This is fully reliable: no size heuristic, no false positives.
+        if (impl_->blob_manager_ && (rec->flags() & core::AKHdr32::FLAG_BLOB)) {
             const blob::BlobRef ref = blob::decode_blob_ref(stored_val.data());
-            if (ref.total_size >= impl_->blob_manager_->threshold()) {
-                // Read and return the blob content (validates header CRC)
-                return impl_->blob_manager_->read(ref.blob_id);
-            }
+            return impl_->blob_manager_->read(ref.blob_id);
         }
 
         // ── Inline value ──────────────────────────────────────────────────────

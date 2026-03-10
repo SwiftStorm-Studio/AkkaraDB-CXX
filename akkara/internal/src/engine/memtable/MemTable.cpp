@@ -103,17 +103,15 @@ namespace akkaradb::engine::memtable {
              * Inserts or replaces a record.
              * Returns true if the shard is now over the flush threshold.
              */
-            bool put(const core::MemRecord& record) {
+            bool put(core::MemRecord record) {
                 std::unique_lock lock{mutex_};
 
                 const size_t new_size = record.approx_size();
 
-                // If key already exists, subtract its old approx_size before overwriting.
-                // BPTree::put() handles the in-place update; we only need the size delta.
-                auto it = active_.lower_bound(record.key());
-                if (!it.is_end() && it->first.compare_key(record.key()) == 0) { approx_bytes_ -= it->first.approx_size(); }
-
-                active_.put(record, std::monostate{});
+                // BPTree::put() returns the displaced key on overwrite (nullopt on new insert).
+                // Use this to compute the size delta without a separate lower_bound traversal.
+                auto old = active_.put(std::move(record), std::monostate{});
+                if (old) approx_bytes_ -= old->approx_size();
                 approx_bytes_ += new_size;
 
                 return threshold_bytes_ > 0 && approx_bytes_ > threshold_bytes_;
@@ -186,7 +184,7 @@ namespace akkaradb::engine::memtable {
                 // This is only used for range scans (read path), not the flush hot path.
                 if (!active_.empty()) {
                     auto snap = std::make_shared<Map>();
-                    for (auto it = active_.begin(); !it.is_end(); ++it) { snap->put(it->first, it->second); }
+                    for (auto it = active_.begin(); !it.is_end(); ++it) { (void)snap->put(it->first, it->second); }
                     result.push_back(std::move(snap));
                 }
                 for (const auto& map : immutables_ | std::views::values) { result.push_back(map); }
@@ -445,24 +443,24 @@ namespace akkaradb::engine::memtable {
 
             // ── Write path ────────────────────────────────────────────────────
 
-            void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq) {
+            void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags) {
                 const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
                 const uint32_t si = shard_for(fp64, shard_count_);
 
-                auto record = core::MemRecord::create(key, value, seq);
+                auto record = core::MemRecord::create(key, value, seq, flags, fp64);
                 advance_seq_gen(seq);
 
-                if (shards_[si]->put(record)) { trigger_flush(si); }
+                if (shards_[si]->put(std::move(record))) { trigger_flush(si); }
             }
 
             void remove(std::span<const uint8_t> key, uint64_t seq) {
                 const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
                 const uint32_t si = shard_for(fp64, shard_count_);
 
-                auto record = core::MemRecord::tombstone(key, seq);
+                auto record = core::MemRecord::tombstone(key, seq, fp64);
                 advance_seq_gen(seq);
 
-                if (shards_[si]->put(record)) { trigger_flush(si); }
+                if (shards_[si]->put(std::move(record))) { trigger_flush(si); }
             }
 
             // ── Read path ─────────────────────────────────────────────────────
@@ -562,7 +560,7 @@ namespace akkaradb::engine::memtable {
 
     MemTable::~MemTable() = default;
 
-    void MemTable::put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq) { impl_->put(key, value, seq); }
+    void MemTable::put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags) { impl_->put(key, value, seq, flags); }
     void MemTable::remove(std::span<const uint8_t> key, uint64_t seq) { impl_->remove(key, seq); }
 
     std::shared_ptr<const core::MemRecord> MemTable::get(std::span<const uint8_t> key) const { return impl_->get(key); }

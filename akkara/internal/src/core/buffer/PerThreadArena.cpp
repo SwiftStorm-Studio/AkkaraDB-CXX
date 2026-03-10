@@ -26,6 +26,8 @@
 #if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
 #include <sys/mman.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <malloc.h>   // _aligned_free()
 #endif
 
 namespace akkaradb::core {
@@ -87,9 +89,10 @@ namespace akkaradb::core {
                         munmap(base_, total_size);
                     }
                     #else
-                    // For aligned_alloc fallback (Windows, etc)
-                    // MAP_FAILED doesn't exist here, just free
-                    std::free(base_);
+                    // Memory was allocated with _aligned_malloc (via OwnedBuffer::allocate).
+                    // On Windows/MSVC, aligned memory MUST be freed with _aligned_free,
+                    // not std::free — mismatching them triggers a CRT assertion.
+                    _aligned_free(base_);
                     #endif
                 }
 

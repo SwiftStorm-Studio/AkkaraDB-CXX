@@ -37,7 +37,7 @@ namespace akkaradb::core {
 
     // ── Factories ─────────────────────────────────────────────────────────────
 
-    MemRecord MemRecord::create(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags) {
+    MemRecord MemRecord::create(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
         // Build single contiguous buffer: [key | value].
         // One allocation regardless of key/value sizes.
         std::vector<uint8_t> data(key.size() + value.size());
@@ -50,7 +50,7 @@ namespace akkaradb::core {
             .seq = seq,
             .flags = flags,
             .pad0 = 0,
-            .key_fp64 = AKHdr32::compute_key_fp64(key.data(), key.size()),
+            .key_fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : AKHdr32::compute_key_fp64(key.data(), key.size()),
             .mini_key = AKHdr32::build_mini_key(key.data(), key.size()),
         };
 
@@ -66,9 +66,9 @@ namespace akkaradb::core {
         );
     }
 
-    MemRecord MemRecord::tombstone(std::span<const uint8_t> key, uint64_t seq) {
+    MemRecord MemRecord::tombstone(std::span<const uint8_t> key, uint64_t seq, uint64_t precomputed_fp64) {
         // Tombstone: value is empty → data_ holds only key bytes.
-        return create(key, {}, seq, AKHdr32::FLAG_TOMBSTONE);
+        return create(key, {}, seq, AKHdr32::FLAG_TOMBSTONE, precomputed_fp64);
     }
 
     MemRecord MemRecord::tombstone(std::string_view key, uint64_t seq) {

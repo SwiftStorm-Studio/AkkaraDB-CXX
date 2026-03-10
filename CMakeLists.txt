@@ -119,7 +119,27 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/engine/wal/WalWriter.cpp
         ${INTERNAL_SRC_DIR}/engine/wal/WalReader.cpp
         ${INTERNAL_SRC_DIR}/engine/wal/WalRecovery.cpp
+
+        # Engine - Blob
+        ${INTERNAL_SRC_DIR}/engine/blob/BlobFraming.cpp
+        ${INTERNAL_SRC_DIR}/engine/blob/BlobManager.cpp
+
+        # Engine - Manifest
+        ${INTERNAL_SRC_DIR}/engine/manifest/ManifestFraming.cpp
+        ${INTERNAL_SRC_DIR}/engine/manifest/Manifest.cpp
+
+        # Engine - Cluster
+        ${INTERNAL_SRC_DIR}/engine/cluster/ClusterConfig.cpp
+        ${INTERNAL_SRC_DIR}/engine/cluster/ClusterManager.cpp
+        ${INTERNAL_SRC_DIR}/engine/cluster/ReplFraming.cpp
+        ${INTERNAL_SRC_DIR}/engine/cluster/ReplicationServer.cpp
+        ${INTERNAL_SRC_DIR}/engine/cluster/ReplicationClient.cpp
 )
+
+# Windows: link Winsock2 for ReplicationServer / ReplicationClient TCP sockets
+if(WIN32)
+    target_link_libraries(akkaradb PRIVATE ws2_32)
+endif()
 
 # Include directories
 target_include_directories(akkaradb
@@ -144,10 +164,12 @@ if (BUILD_SHARED_LIBS)
     )
 endif ()
 
-# Windows-specific: explicit symbol export
+# Windows-specific: auto-export all symbols while the public API layer is not
+# yet implemented.  Once __declspec(dllexport) annotations are added to the
+# public headers, flip this back to OFF and control exports explicitly.
 if (WIN32 AND BUILD_SHARED_LIBS)
     set_target_properties(akkaradb PROPERTIES
-            WINDOWS_EXPORT_ALL_SYMBOLS OFF
+            WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
 endif ()
 

@@ -104,7 +104,8 @@ namespace akkaradb::wal {
         std::span<const uint8_t> value,
         uint64_t seq,
         uint64_t key_fp64 = 0,
-        uint64_t mini_key = 0
+        uint64_t mini_key = 0,
+        uint8_t flags = core::AKHdr32::FLAG_NORMAL
     );
 
     /**

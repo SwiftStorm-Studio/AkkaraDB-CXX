@@ -46,7 +46,8 @@ namespace akkaradb::wal {
         std::span<const uint8_t> value,
         uint64_t seq,
         uint64_t key_fp64,
-        uint64_t mini_key
+        uint64_t mini_key,
+        uint8_t flags
     ) {
         const size_t total = WalEntryHeader::SIZE + sizeof(core::AKHdr32) + key.size() + value.size();
 
@@ -58,7 +59,7 @@ namespace akkaradb::wal {
             .k_len = static_cast<uint16_t>(key.size()),
             .v_len = static_cast<uint32_t>(value.size()),
             .seq = seq,
-            .flags = core::AKHdr32::FLAG_NORMAL,
+            .flags = flags,
             .pad0 = 0,
             .key_fp64 = key_fp64,
             .mini_key = mini_key,

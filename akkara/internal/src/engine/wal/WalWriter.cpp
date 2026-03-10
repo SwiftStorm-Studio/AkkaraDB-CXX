@@ -619,12 +619,12 @@ namespace akkaradb::wal {
 
             ~Impl() { close(); }
 
-            void append_put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint64_t key_fp64, uint64_t mini_key) {
+            void append_put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint64_t key_fp64, uint64_t mini_key, uint8_t flags) {
                 if (!running_.load(std::memory_order_acquire)) { throw std::runtime_error("WalWriter is closed"); }
                 const size_t needed = WalEntryHeader::SIZE + sizeof(core::AKHdr32) + key.size() + value.size();
                 enqueue_entry(
                     key_fp64,
-                    serialize_to_owned(needed, [&](core::BufferView v) { return serialize_add_direct(v, key, value, seq, key_fp64, mini_key); })
+                    serialize_to_owned(needed, [&](core::BufferView v) { return serialize_add_direct(v, key, value, seq, key_fp64, mini_key, flags); })
                 );
             }
 
@@ -729,9 +729,14 @@ namespace akkaradb::wal {
         return w;
     }
 
-    void WalWriter::append_put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint64_t key_fp64, uint64_t mini_key) {
-        impl_->append_put(key, value, seq, key_fp64, mini_key);
-    }
+    void WalWriter::append_put(
+        std::span<const uint8_t> key,
+        std::span<const uint8_t> value,
+        uint64_t seq,
+        uint64_t key_fp64,
+        uint64_t mini_key,
+        uint8_t flags
+    ) { impl_->append_put(key, value, seq, key_fp64, mini_key, flags); }
 
     void WalWriter::append_delete(std::span<const uint8_t> key, uint64_t seq, uint64_t key_fp64, uint64_t mini_key) {
         impl_->append_delete(key, seq, key_fp64, mini_key);
