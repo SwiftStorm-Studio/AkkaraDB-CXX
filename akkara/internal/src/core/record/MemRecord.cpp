@@ -24,26 +24,11 @@
 namespace akkaradb::core {
     // ── Private constructor ────────────────────────────────────────────────────
 
-    MemRecord::MemRecord(const AKHdr32& header, std::vector<uint8_t> data) noexcept : header_{header}, data_{std::move(data)} { compute_approx_size(); }
-
-    // ── approx_size ───────────────────────────────────────────────────────────
-
-    void MemRecord::compute_approx_size() noexcept {
-        // Header + single contiguous data buffer + one vector overhead.
-        // Previous design had two vectors (key_ + value_), costing 2x vector overhead.
-        constexpr size_t vector_overhead = sizeof(std::vector<uint8_t>);
-        approx_size_ = sizeof(AKHdr32) + data_.size() + vector_overhead;
-    }
+    MemRecord::MemRecord(const AKHdr32& header, SmallBuffer data) noexcept : header_{header}, data_{std::move(data)} {}
 
     // ── Factories ─────────────────────────────────────────────────────────────
 
     MemRecord MemRecord::create(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
-        // Build single contiguous buffer: [key | value].
-        // One allocation regardless of key/value sizes.
-        std::vector<uint8_t> data(key.size() + value.size());
-        if (!key.empty()) std::memcpy(data.data(), key.data(), key.size());
-        if (!value.empty()) std::memcpy(data.data() + key.size(), value.data(), value.size());
-
         const AKHdr32 header{
             .k_len = static_cast<uint16_t>(key.size()),
             .v_len = static_cast<uint32_t>(value.size()),
@@ -53,8 +38,8 @@ namespace akkaradb::core {
             .key_fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : AKHdr32::compute_key_fp64(key.data(), key.size()),
             .mini_key = AKHdr32::build_mini_key(key.data(), key.size()),
         };
-
-        return MemRecord{header, std::move(data)};
+        // SmallBuffer: inline for key+value <= 24 bytes (zero heap alloc), heap otherwise.
+        return MemRecord{header, SmallBuffer{key.data(), key.size(), value.data(), value.size()}};
     }
 
     MemRecord MemRecord::create(std::string_view key, std::string_view value, uint64_t seq, uint8_t flags) {

@@ -42,7 +42,7 @@ namespace akkaradb::engine::memtable {
          * shard_count must be a power of 2.
          * Identical routing to WAL's shard_for(): shard = fp64 & (count - 1).
          */
-        [[nodiscard]] inline uint32_t shard_for(uint64_t key_fp64, uint32_t shard_count) noexcept {
+        [[nodiscard]] uint32_t shard_for(uint64_t key_fp64, uint32_t shard_count) noexcept {
             return static_cast<uint32_t>(key_fp64 & (shard_count - 1u));
         }
 

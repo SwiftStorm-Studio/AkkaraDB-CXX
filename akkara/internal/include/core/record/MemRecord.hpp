@@ -21,7 +21,7 @@
 
 #include "AKHdr32.hpp"
 #include "RecordView.hpp"
-#include <vector>
+#include <cstring>
 #include <string_view>
 #include <span>
 
@@ -171,7 +171,7 @@ namespace akkaradb::core {
             /**
             * Returns approximate size in bytes (header + data + vector overhead).
             */
-            [[nodiscard]] size_t approx_size() const noexcept { return approx_size_; }
+            [[nodiscard]] size_t approx_size() const noexcept { return sizeof(AKHdr32) + data_.size() + sizeof(SmallBuffer); }
 
             /**
             * Creates a zero-copy RecordView pointing to this record's data.
@@ -226,22 +226,121 @@ namespace akkaradb::core {
             [[nodiscard]] bool operator==(const MemRecord& other) const noexcept { return key_equals(other); }
 
         private:
+            /**
+             * SmallBuffer — SSO-style inline/heap data buffer.
+             *
+             * Replaces std::vector<uint8_t> (24 B) + size_t approx_size_ (8 B) = 32 B total.
+             * Records with total data <= INLINE_CAP (24 bytes) are stored completely inline
+             * with zero heap allocation. Larger records fall back to a single heap allocation.
+             *
+             * Layout (32 bytes):
+             *   uint32_t meta_  — bit31=is_heap, bits30:0=data size
+             *   uint32_t _pad   — alignment pad so body_ is at offset 8 (ptr_ aligned)
+             *   union Body {
+             *     uint8_t inl_[24]  — inline storage (active when !is_heap)
+             *     uint8_t* ptr_     — heap pointer   (active when  is_heap)
+             *   } body_
+             */
+            struct SmallBuffer {
+                static constexpr size_t INLINE_CAP = 22;
+
+                // active_ptr_ always points to the live data: inl_ when inline, heap when heap-allocated.
+                // data() = return active_ptr_ — zero branches on the hot read path.
+                uint8_t* active_ptr_ = nullptr; // 8 bytes (offset  0)
+                uint16_t meta_ = 0; // 2 bytes (offset  8) — data size, max 65535
+                uint8_t inl_[INLINE_CAP] = {}; // 22 bytes (offset 10) — inline storage
+                // Total: 8 + 2 + 22 = 32 bytes
+
+                [[nodiscard]] size_t size() const noexcept { return meta_; }
+                [[nodiscard]] bool is_heap() const noexcept { return active_ptr_ != inl_; }
+                [[nodiscard]] bool empty() const noexcept { return meta_ == 0; }
+
+                // Branch-free: active_ptr_ always points to valid data.
+                [[nodiscard]] const uint8_t* data() const noexcept { return active_ptr_; }
+                [[nodiscard]] uint8_t* data() noexcept { return active_ptr_; }
+
+                SmallBuffer() noexcept : active_ptr_{inl_} {}
+
+                // Constructs contiguous [key | value] buffer. Inline if k_len+v_len <= 22, else heap.
+                SmallBuffer(const uint8_t* key, size_t k_len, const uint8_t* val, size_t v_len) {
+                    const size_t n = k_len + v_len;
+                    meta_ = static_cast<uint16_t>(n);
+                    active_ptr_ = (n <= INLINE_CAP) ? inl_ : new uint8_t[n];
+                    if (k_len) std::memcpy(active_ptr_, key, k_len);
+                    if (v_len) std::memcpy(active_ptr_ + k_len, val, v_len);
+                }
+
+                ~SmallBuffer() noexcept { if (active_ptr_ != inl_) delete[] active_ptr_; }
+
+                SmallBuffer(SmallBuffer&& o) noexcept
+                    : meta_{o.meta_} {
+                    if (o.active_ptr_ != o.inl_) {
+                        active_ptr_ = o.active_ptr_;
+                        o.active_ptr_ = o.inl_;
+                        o.meta_ = 0;
+                    }
+                    else {
+                        active_ptr_ = inl_;
+                        std::memcpy(inl_, o.inl_, meta_);
+                    }
+                }
+
+                SmallBuffer& operator=(SmallBuffer&& o) noexcept {
+                    if (this == &o) return *this;
+                    if (active_ptr_ != inl_) delete[] active_ptr_;
+                    meta_ = o.meta_;
+                    if (o.active_ptr_ != o.inl_) {
+                        active_ptr_ = o.active_ptr_;
+                        o.active_ptr_ = o.inl_;
+                        o.meta_ = 0;
+                    }
+                    else {
+                        active_ptr_ = inl_;
+                        std::memcpy(inl_, o.inl_, meta_);
+                    }
+                    return *this;
+                }
+
+                SmallBuffer(const SmallBuffer& o)
+                    : meta_{o.meta_} {
+                    if (o.active_ptr_ != o.inl_) {
+                        active_ptr_ = new uint8_t[meta_];
+                        std::memcpy(active_ptr_, o.active_ptr_, meta_);
+                    }
+                    else {
+                        active_ptr_ = inl_;
+                        std::memcpy(inl_, o.inl_, meta_);
+                    }
+                }
+
+                SmallBuffer& operator=(const SmallBuffer& o) {
+                    if (this == &o) return *this;
+                    if (active_ptr_ != inl_) delete[] active_ptr_;
+                    meta_ = o.meta_;
+                    if (o.active_ptr_ != o.inl_) {
+                        active_ptr_ = new uint8_t[meta_];
+                        std::memcpy(active_ptr_, o.active_ptr_, meta_);
+                    }
+                    else {
+                        active_ptr_ = inl_;
+                        std::memcpy(inl_, o.inl_, meta_);
+                    }
+                    return *this;
+                }
+            };
+
+            static_assert(sizeof(SmallBuffer) == 32, "SmallBuffer must be 32 bytes");
+
             AKHdr32 header_{};
             /// Contiguous buffer: [key bytes (k_len)] [value bytes (v_len)]
-            /// Single heap allocation — eliminates the second alloc of the old key_+value_ design.
-            std::vector<uint8_t> data_;
-            size_t approx_size_{0};
+            /// Inline (zero heap alloc) when total <= 24 bytes; heap-allocated otherwise.
+            SmallBuffer data_;
 
-            MemRecord(const AKHdr32& header, std::vector<uint8_t> data) noexcept;
-
-            void compute_approx_size() noexcept;
+            MemRecord(const AKHdr32& header, SmallBuffer data) noexcept;
     };
 
-    // In Release (NDEBUG): sizeof(MemRecord) == 64  (AKHdr32=32 + vector=24 + size_t=8).
-    // In MSVC Debug: std::vector gains an 8-byte _Container_proxy* for checked iterators,
-    // making sizeof(vector) == 32 and sizeof(MemRecord) == 72.  The 64-byte guarantee is
-    // a Release-only cache-efficiency property, so the assert is guarded accordingly.
-    #ifdef NDEBUG
-    static_assert(sizeof(MemRecord) == 64, "MemRecord must be 64 bytes (AKHdr32=32 + vector=24 + size_t=8)");
-    #endif
+    // sizeof(MemRecord) == 64 in both Debug and Release:
+    //   AKHdr32=32 + SmallBuffer=32 (meta_=4 + _pad=4 + union Body[24]).
+    // SmallBuffer has no std::vector internals so no debug-mode size variance.
+    static_assert(sizeof(MemRecord) == 64, "MemRecord must be 64 bytes (AKHdr32=32 + SmallBuffer=32)");
 } // namespace akkaradb::core

@@ -494,7 +494,7 @@ static void bench_throughput() {
                     N, ms, N / (ms / 1000.0));
 
         t0 = Clock::now();
-        int found = 0;
+        auto found = 0;
         for (int i = 0; i < N; ++i) {
             auto k = std::format("wk_{:08d}", i);
             if (eng->get(as_span(k)).has_value()) ++found;
