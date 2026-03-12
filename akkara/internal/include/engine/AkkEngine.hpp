@@ -28,38 +28,8 @@
 #include <span>
 
 namespace akkaradb::engine {
-    // ============================================================================
-    // SyncMode
-    // ============================================================================
-
-    /**
-     * SyncMode - Controls how writes are persisted to the WAL.
-     *
-     * Only meaningful when AkkEngineOptions::wal_enabled == true.
-     */
-    enum class SyncMode : uint8_t {
-        /**
-         * fdatasync() after every write batch.
-         * Maximum durability: survives process crash and OS crash.
-         * Default.
-         */
-        Sync,
-
-        /**
-         * Background flusher writes without blocking the caller.
-         * Higher throughput; durability guaranteed only after the next Sync
-         * or an explicit force_sync() call.
-         * Survives process crash if the OS flushes its page cache.
-         */
-        Async,
-
-        /**
-         * WAL writes are disabled entirely (wal_enabled is ignored).
-         * Data lives only in memory; all writes are lost on process exit.
-         * Intended for pure in-memory cache use cases.
-         */
-        Off,
-    };
+    // SyncMode lives in the wal namespace; re-export for user convenience.
+    using wal::SyncMode;
 
     // ============================================================================
     // AkkEngineOptions
@@ -76,51 +46,87 @@ namespace akkaradb::engine {
      *   // Embedded cache (no persistence, no WAL)
      *   AkkEngineOptions opts;
      *   opts.wal_enabled = false;
-     *   opts.sync_mode   = SyncMode::Off;
      *   opts.memtable.threshold_bytes_per_shard = 32ULL << 20; // 32 MiB
+     *
+     *   // WAL-only cache (no large-value blobs, no manifest)
+     *   AkkEngineOptions opts;
+     *   opts.wal.wal_dir      = "/fast/wal";
+     *   opts.blob_enabled     = false;
+     *   opts.manifest_enabled = false;
      *
      *   // Local durable KV store
      *   AkkEngineOptions opts;
-     *   opts.data_dir  = "/var/lib/akkaradb";
-     *   opts.sync_mode = SyncMode::Sync;
+     *   opts.data_dir         = "/var/lib/akkaradb";
+     *   opts.wal.sync_mode    = SyncMode::Sync;
      *
      *   // High-throughput network DB (async WAL, large memtable)
      *   AkkEngineOptions opts;
-     *   opts.data_dir  = "/data/akkaradb";
-     *   opts.sync_mode = SyncMode::Async;
+     *   opts.data_dir              = "/data/akkaradb";
+     *   opts.wal.sync_mode         = SyncMode::Async;
+     *   opts.wal.group_n           = 1024;
+     *   opts.wal.group_micros      = 200;
      *   opts.memtable.threshold_bytes_per_shard = 128ULL << 20; // 128 MiB
-     *   opts.wal.group_n      = 1024;
-     *   opts.wal.group_micros = 200;
      */
     struct AkkEngineOptions {
         // ── Storage ──────────────────────────────────────────────────────────
 
         /**
          * Root directory for all persistent data.
-         * - WAL files go to  data_dir / "wal"  (unless wal.wal_dir is set explicitly).
-         * - SSTable files will go to  data_dir / "sst"  (future).
          *
-         * If wal_enabled == false this field is unused.
-         * Required when wal_enabled == true.
+         * Used as the base for component-specific subdirectories when their
+         * individual paths are not set explicitly:
+         *   - WAL:      data_dir / "wal"           (unless wal.wal_dir is set)
+         *   - Blob:     data_dir / "blobs"          (unless blob_dir is set)
+         *   - Manifest: data_dir / "manifest.akmf"  (unless manifest_path is set)
+         *
+         * Required when wal_enabled == true and any component path is empty.
+         * Safe to leave empty when wal_enabled == false, or when all active
+         * component paths are set explicitly.
          */
         std::filesystem::path data_dir;
 
-        // ── Durability ───────────────────────────────────────────────────────
+        // ── Component toggles ─────────────────────────────────────────────────
 
         /**
-         * When false the WAL is completely disabled.
-         * Equivalent to sync_mode == SyncMode::Off but also skips WAL
-         * file creation, making it safe to leave data_dir empty.
+         * When false, the WAL is completely disabled. No WAL files are created
+         * and it is safe to leave data_dir (and wal.wal_dir) empty.
          * Default: true
          */
         bool wal_enabled = true;
 
         /**
-         * Controls how writes are persisted. See SyncMode enum for details.
+         * When false, the BlobManager is not started. All values are stored
+         * inline in the MemTable regardless of size (no externalization to
+         * .blob files). Suitable when values are always small.
          * Ignored when wal_enabled == false.
-         * Default: SyncMode::Sync
+         * Default: true
          */
-        SyncMode sync_mode = SyncMode::Sync;
+        bool blob_enabled = true;
+
+        /**
+         * When false, the Manifest is not created or written. WAL compaction
+         * checkpoints are skipped. Suitable for ephemeral or cache-only setups
+         * where WAL truncation is not needed.
+         * Ignored when wal_enabled == false.
+         * Default: true
+         */
+        bool manifest_enabled = true;
+
+        // ── Component-specific paths ──────────────────────────────────────────
+
+        /**
+         * Directory for .blob files (large externalized values).
+         * Auto-set to data_dir / "blobs" when empty.
+         * Only used when blob_enabled == true.
+         */
+        std::filesystem::path blob_dir;
+
+        /**
+         * Full path to the manifest file.
+         * Auto-set to data_dir / "manifest.akmf" when empty.
+         * Only used when manifest_enabled == true.
+         */
+        std::filesystem::path manifest_path;
 
         // ── MemTable ─────────────────────────────────────────────────────────
 
@@ -134,13 +140,23 @@ namespace akkaradb::engine {
         // ── WAL ──────────────────────────────────────────────────────────────
 
         /**
-         * Fine-grained WAL tuning (batch sizes, segment rotation, etc.).
+         * Fine-grained WAL tuning (sync policy, batch sizes, segment rotation).
+         * wal.sync_mode controls durability vs. throughput trade-off.
          * wal.wal_dir is auto-set to data_dir / "wal" if left empty.
-         * wal.fast_mode is overridden by sync_mode: SyncMode::Async → fast_mode=true,
-         * SyncMode::Sync → fast_mode=false.
          * Ignored when wal_enabled == false.
          */
         wal::WalOptions wal;
+
+        // ── Blob ─────────────────────────────────────────────────────────────
+
+        /**
+         * Size threshold above which values are externalized to .blob files.
+         * Values >= blob_threshold_bytes are stored as BlobRefs in WAL/MemTable;
+         * smaller values are stored inline.
+         * Default: 16 KiB (matches BlobManager::DEFAULT_THRESHOLD).
+         * Only meaningful when blob_enabled == true and wal_enabled == true.
+         */
+        uint64_t blob_threshold_bytes = 16ULL * 1024;
 
         // ── Memory ───────────────────────────────────────────────────────────
 
@@ -149,6 +165,7 @@ namespace akkaradb::engine {
          * When exceeded, write pressure is applied (future: backpressure / eviction).
          * 0 = unlimited.
          * Default: 0
+         * NOTE: Not yet enforced — reserved for Phase 5 backpressure implementation.
          */
         size_t max_memory_bytes = 0;
     };
@@ -176,11 +193,13 @@ namespace akkaradb::engine {
             /**
              * Opens (or creates) an engine instance from the given options.
              *
-             * - Applies defaults (wal.wal_dir, fast_mode from sync_mode).
-             * - When wal_enabled: replays WAL into MemTable, then starts writer.
+             * - Fills empty component paths from data_dir.
+             * - When wal_enabled: replays WAL into MemTable, then starts WAL writer.
+             * - When blob_enabled: starts BlobManager (large-value externalization).
+             * - When manifest_enabled: starts Manifest (WAL checkpoint tracking).
              * - When !wal_enabled: starts with an empty MemTable.
              *
-             * @throws std::runtime_error if data_dir cannot be created or WAL replay fails
+             * @throws std::runtime_error if required paths cannot be created or WAL replay fails
              */
             [[nodiscard]] static std::unique_ptr<AkkEngine> open(AkkEngineOptions options);
 
@@ -197,7 +216,7 @@ namespace akkaradb::engine {
              * Inserts or updates a key-value pair.
              *
              * Write order: WAL append → MemTable put.
-             * When sync_mode == Sync, blocks until fdatasync() completes.
+             * When wal.sync_mode == Sync, blocks until fdatasync() completes.
              */
             void put(std::span<const uint8_t> key, std::span<const uint8_t> value);
 
@@ -223,7 +242,7 @@ namespace akkaradb::engine {
             /**
              * Forces all pending WAL writes to be fdatasync'd.
              * No-op when wal_enabled == false.
-             * Useful after a bulk load with sync_mode == Async.
+             * Useful after a bulk load with wal.sync_mode == Async or Off.
              */
             void force_sync();
 

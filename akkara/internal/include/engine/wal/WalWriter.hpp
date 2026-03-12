@@ -27,6 +27,48 @@
 
 namespace akkaradb::wal {
     // ============================================================================
+    // SyncMode - WAL durability policy
+    // ============================================================================
+
+    /**
+     * SyncMode - Controls how WAL writes are flushed to durable storage.
+     *
+     * Only meaningful when wal_enabled == true in AkkEngineOptions.
+     */
+    enum class SyncMode : uint8_t {
+        /**
+         * fdatasync() after every write batch.
+         * Maximum durability: survives both process crash and OS crash.
+         * put() blocks until the fdatasync completes.
+         * Default.
+         */
+        Sync,
+
+        /**
+         * The background flusher thread performs fdatasync() on every batch,
+         * but put() returns immediately after enqueue (no blocking).
+         * P/N thresholds (group_n / group_micros) control when the flusher wakes.
+         *
+         * Durability window: at most group_micros µs of writes can be lost on
+         * OS crash.  Survives process crash.
+         */
+        Async,
+
+        /**
+         * WAL entries are written to the OS page cache; fdatasync() is never
+         * called automatically.  put() returns immediately.
+         * force_sync() triggers an explicit fdatasync() on demand.
+         *
+         * Survives process crash; data is lost on OS crash or power failure.
+         * Maximum WAL write throughput — suitable for replicated setups where
+         * another node holds a fully-synced copy.
+         *
+         * To disable WAL entirely, set wal_enabled = false in AkkEngineOptions.
+         */
+        Off,
+    };
+
+    // ============================================================================
     // WalOptions - startup configuration for WalWriter
     // ============================================================================
 
@@ -42,6 +84,12 @@ namespace akkaradb::wal {
          * Created automatically if it does not exist.
          */
         std::filesystem::path wal_dir;
+
+        /**
+         * WAL durability policy. See SyncMode enum for details.
+         * Default: SyncMode::Sync
+         */
+        SyncMode sync_mode = SyncMode::Sync;
 
         /**
          * Number of WAL shards.
@@ -74,17 +122,6 @@ namespace akkaradb::wal {
         size_t group_micros = 500;
 
         /**
-         * If true, append_put/append_delete return immediately after
-         * enqueuing the entry without waiting for fdatasync().
-         * Durability is only guaranteed after the next force_sync() call.
-         *
-         * Use for bulk-load scenarios where throughput matters more than
-         * per-write durability.
-         * Default: false (durable writes)
-         */
-        bool fast_mode = false;
-
-        /**
          * Maximum segment file size in bytes before the shard rotates to a
          * new segment file.
          *   0 = unlimited (no rotation)
@@ -111,8 +148,9 @@ namespace akkaradb::wal {
      * - Shard count: configurable (0 = auto via compute_shard_count(), 1 = effectively disabled)
      * - Per-shard flusher thread: eliminates cross-shard fsync contention
      * - Global batch_seq: enables cross-shard ordering during recovery
-     * - fast_mode=false: blocks until fdatasync() completes (durability guarantee)
-     * - fast_mode=true:  returns immediately after enqueue (~300-500ns latency)
+     * - SyncMode::Sync:  blocks until fdatasync() completes (durability guarantee)
+     * - SyncMode::Async: returns immediately; background flusher calls fdatasync()
+     * - SyncMode::Off:   returns immediately; no fdatasync ever (OS page cache only)
      *
      * On-disk layout (per segment file):
      *   [WalSegmentHeader:32B]   written once at file start
@@ -148,8 +186,8 @@ namespace akkaradb::wal {
              *
              * Shard selection: shard_for(key_fp64, shard_count)
              *
-             * fast_mode=false: Blocks until fdatasync() completes.
-             * fast_mode=true:  Returns after enqueue. No durability guarantee until force_sync().
+             * SyncMode::Sync:  Blocks until fdatasync() completes.
+             * SyncMode::Async/Off: Returns after enqueue. Durability only after force_sync().
              *
              * @throws std::runtime_error if WAL is closed or write fails
              */

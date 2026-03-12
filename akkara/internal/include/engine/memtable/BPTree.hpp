@@ -195,6 +195,7 @@ namespace akkaradb::engine::memtable {
             Node* root_ = nullptr;
             size_t size_ = 0;
             [[no_unique_address]] Compare comp_;
+            LeafNode* rightmost_leaf_ = nullptr; ///< Cached pointer to the rightmost leaf for sequential-insert fast path.
 
             // ── Internal operations ───────────────────────────────────────────
             std::optional<V> search_leaf(const LeafNode* leaf, const K& key) const;
@@ -209,7 +210,7 @@ namespace akkaradb::engine::memtable {
              * Post-order iterative tree destruction.
              * Correctly dispatches to ~LeafNode / ~InternalNode via typed delete.
              */
-            void destroy_tree(Node* root) noexcept;
+            void destroy_tree(Node* node) noexcept;
 
         public:
             // ── Iterator ──────────────────────────────────────────────────────
@@ -278,9 +279,10 @@ namespace akkaradb::engine::memtable {
 
     template <typename K, typename V, typename Compare>
     BPTree<K, V, Compare>::BPTree(BPTree&& other) noexcept
-        : root_{other.root_}, size_{other.size_}, comp_{std::move(other.comp_)} {
+        : root_{other.root_}, size_{other.size_}, comp_{std::move(other.comp_)}, rightmost_leaf_{other.rightmost_leaf_} {
         other.root_ = nullptr;
         other.size_ = 0;
+        other.rightmost_leaf_ = nullptr;
     }
 
     template <typename K, typename V, typename Compare>
@@ -292,8 +294,10 @@ namespace akkaradb::engine::memtable {
             root_ = other.root_;
             size_ = other.size_;
             comp_ = std::move(other.comp_);
+            rightmost_leaf_ = other.rightmost_leaf_;
             other.root_ = nullptr;
             other.size_ = 0;
+            other.rightmost_leaf_ = nullptr;
         }
         return *this;
     }
@@ -336,6 +340,7 @@ namespace akkaradb::engine::memtable {
         if (root_) destroy_tree(root_);
         root_ = nullptr;
         size_ = 0;
+        rightmost_leaf_ = nullptr;
     }
 
     // ── Lookup ────────────────────────────────────────────────────────────────
@@ -388,12 +393,30 @@ namespace akkaradb::engine::memtable {
 
     template <typename K, typename V, typename Compare>
     std::optional<K> BPTree<K, V, Compare>::put(K key, V value) {
+        // ── Fast path: sequential (monotone-increasing) append ─────────────────
+        // When the new key is strictly greater than every existing key we can skip
+        // tree traversal and binary search entirely — just append to the rightmost
+        // leaf.  Common for time-ordered keys / sequential IDs (e.g. "bk_00000001").
+        if (rightmost_leaf_ && rightmost_leaf_->count > 0 && comp_(rightmost_leaf_->keys[rightmost_leaf_->count - 1], key)) {
+            if (rightmost_leaf_->count < LEAF_ORDER) {
+                rightmost_leaf_->keys[rightmost_leaf_->count] = std::move(key);
+                rightmost_leaf_->values[rightmost_leaf_->count] = std::move(value);
+                ++rightmost_leaf_->count;
+                ++size_;
+                return std::nullopt;
+            }
+            // Rightmost leaf is full: fall through to normal path.
+            // insert_into_leaf() will update rightmost_leaf_ when the split occurs.
+        }
+
+        // ── Normal path ────────────────────────────────────────────────────────
         if (!root_) {
             auto* leaf = new LeafNode{};
             leaf->keys[0] = std::move(key);
             leaf->values[0] = std::move(value);
             leaf->count = 1;
             root_ = leaf;
+            rightmost_leaf_ = leaf;
             ++size_;
             return std::nullopt;
         }
@@ -439,12 +462,17 @@ namespace akkaradb::engine::memtable {
         V&& value,
         std::optional<K>& old_key
     ) {
-        // Update in place if key exists — move old out, move new in (no extra heap alloc)
-        auto existing_idx = leaf->find_index(key, comp_);
-        if (existing_idx) {
-            old_key = std::move(leaf->keys[*existing_idx]);
-            leaf->keys[*existing_idx] = std::move(key);
-            leaf->values[*existing_idx] = std::move(value);
+        // Single lower_bound covers both "does key exist?" and "where to insert?" —
+        // avoids the redundant second lower_bound call in the original design.
+        auto it = std::lower_bound(leaf->keys.begin(), leaf->keys.begin() + leaf->count, key, comp_);
+        const auto insert_idx = static_cast<size_t>(it - leaf->keys.begin());
+
+        // Update in place if key exists — move old out, move new in (no extra heap alloc).
+        // After lower_bound: *it >= key.  Equal iff !(key < *it).
+        if (insert_idx < leaf->count && !comp_(key, *it)) {
+            old_key = std::move(leaf->keys[insert_idx]);
+            leaf->keys[insert_idx] = std::move(key);
+            leaf->values[insert_idx] = std::move(value);
             return std::nullopt;
         }
 
@@ -452,14 +480,13 @@ namespace akkaradb::engine::memtable {
             // Split: heap-allocated vector to avoid ~32 KB stack frame (LEAF_ORDER can be ~500 for MemRecord).
             std::vector<std::pair<K, V>> temp;
             temp.reserve(leaf->count + 1);
-            size_t insert_idx = leaf->find_insert_index(key, comp_);
 
             for (size_t i = 0; i < insert_idx; ++i) temp.emplace_back(std::move(leaf->keys[i]), std::move(leaf->values[i]));
             temp.emplace_back(std::move(key), std::move(value));
             for (size_t i = insert_idx; i < leaf->count; ++i) temp.emplace_back(std::move(leaf->keys[i]), std::move(leaf->values[i]));
 
             const size_t temp_idx = temp.size();
-            size_t mid = (temp_idx + 1) / 2;
+            const size_t mid = (temp_idx + 1) / 2;
 
             for (size_t i = 0; i < mid; ++i) {
                 leaf->keys[i] = std::move(temp[i].first);
@@ -476,17 +503,20 @@ namespace akkaradb::engine::memtable {
             right->next = leaf->next;
             leaf->next = right;
 
+            // Maintain rightmost_leaf_: if this was the rightmost leaf, the new right
+            // half becomes the rightmost (the split key went to the end).
+            if (rightmost_leaf_ == leaf) { rightmost_leaf_ = right; }
+
             ++size_;
             return SplitResult{leaf, right->keys[0], right};
         }
 
-        // No split: shift-right (move) and insert (move — no extra heap alloc)
-        size_t insert_idx = leaf->find_insert_index(key, comp_);
+        // No split: shift-right (move) and insert (move — no extra heap alloc).
         for (size_t i = leaf->count; i > insert_idx; --i) {
-            leaf->keys[i] = std::move(leaf->keys[i - 1]);
+            leaf->keys[i]   = std::move(leaf->keys[i - 1]);
             leaf->values[i] = std::move(leaf->values[i - 1]);
         }
-        leaf->keys[insert_idx] = std::move(key);
+        leaf->keys[insert_idx]   = std::move(key);
         leaf->values[insert_idx] = std::move(value);
         ++leaf->count;
         ++size_;

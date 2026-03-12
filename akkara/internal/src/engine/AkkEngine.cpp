@@ -35,9 +35,11 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 namespace akkaradb::engine {
@@ -94,13 +96,21 @@ namespace akkaradb::engine {
 
             // ── Persistent storage (present when wal_enabled) ─────────────────────
             std::unique_ptr<wal::WalWriter> wal_writer_; ///< null if !wal_enabled
-            std::unique_ptr<blob::BlobManager> blob_manager_; ///< null if !wal_enabled
-            std::unique_ptr<manifest::Manifest> manifest_; ///< null if !wal_enabled
+            std::unique_ptr<blob::BlobManager> blob_manager_; ///< null if !blob_enabled
+            std::unique_ptr<manifest::Manifest> manifest_; ///< null if !manifest_enabled
 
             // ── Cluster (present when cluster.akcc found in data_dir) ─────────────
             std::unique_ptr<cluster::ClusterManager> cluster_mgr_;
             std::unique_ptr<cluster::ReplicationServer> repl_server_; ///< Primary only
             std::unique_ptr<cluster::ReplicationClient> repl_client_; ///< Replica only
+
+            // ── Replica blob tracking ─────────────────────────────────────────────
+            // Tracks seqs for which a ReplBlobPut arrived (blob_callback) but the
+            // corresponding ReplEntry (apply_callback) has not yet been processed.
+            // Since blob_callback always fires before apply_callback on the same TCP
+            // stream, we can determine FLAG_BLOB reliably without changing the wire protocol.
+            std::mutex pending_blob_mu_;
+            std::unordered_set<uint64_t> pending_blob_seqs_;
 
             // =========================================================================
             // apply_record — internal write path used by the Replica apply_callback.
@@ -110,7 +120,7 @@ namespace akkaradb::engine {
             // The MemTable internally advances seq_gen_ to max(seq_gen_, seq+1) so the
             // local counter stays correctly positioned after replication.
             // =========================================================================
-            void apply_record(uint64_t seq, std::span<const uint8_t> key, std::span<const uint8_t> val) {
+            void apply_record(uint64_t seq, std::span<const uint8_t> key, std::span<const uint8_t> val, uint8_t flags = core::AKHdr32::FLAG_NORMAL) {
                 const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
                 const uint64_t mk = core::AKHdr32::build_mini_key(key.data(), key.size());
 
@@ -120,9 +130,11 @@ namespace akkaradb::engine {
                     memtable_->remove(key, seq);
                 }
                 else {
-                    // Put (may be an inline value or a 20-byte BlobRef)
-                    if (wal_writer_) wal_writer_->append_put(key, val, seq, fp64, mk);
-                    memtable_->put(key, val, seq);
+                    // Put (may be an inline value or a 20-byte BlobRef).
+                    // flags carries FLAG_BLOB when the Replica received a ReplBlobPut
+                    // for this seq before the ReplEntry arrived (TCP ordering guarantee).
+                    if (wal_writer_) wal_writer_->append_put(key, val, seq, fp64, mk, flags);
+                    memtable_->put(key, val, seq, flags, fp64);
                 }
             }
 
@@ -139,12 +151,23 @@ namespace akkaradb::engine {
                 if (!repl_client_) return;
 
                 repl_client_->set_blob_callback(
-                    [this](uint64_t blob_id, std::span<const uint8_t> content) { if (blob_manager_) blob_manager_->write(blob_id, content); }
+                    [this](uint64_t blob_id, std::span<const uint8_t> content) {
+                        if (blob_manager_) blob_manager_->write(blob_id, content);
+                        // blob_id == seq (Primary uses seq as blob_id in ship_blob).
+                        // Record it so apply_callback can set FLAG_BLOB on the matching entry.
+                        std::lock_guard lock(pending_blob_mu_);
+                        pending_blob_seqs_.insert(blob_id);
+                    }
                 );
 
                 repl_client_->set_apply_callback(
                     [this](uint64_t seq, wal::WalEntryType /*wal_type*/, std::span<const uint8_t> key, std::span<const uint8_t> val) {
-                        apply_record(seq, key, val);
+                        uint8_t flags = core::AKHdr32::FLAG_NORMAL;
+                        {
+                            std::lock_guard lock(pending_blob_mu_);
+                            if (pending_blob_seqs_.erase(seq)) { flags = core::AKHdr32::FLAG_BLOB; }
+                        }
+                        apply_record(seq, key, val, flags);
                     }
                 );
             }
@@ -161,8 +184,8 @@ namespace akkaradb::engine {
                     const cluster::NodeInfo* self = cfg.find_by_id(self_node_id);
                     const uint16_t repl_port = self ? self->repl_port : 0;
 
-                    // sync_mode=true mirrors WAL sync semantics (ships + waits for ACK)
-                    const bool sync_repl = (opts_.sync_mode == SyncMode::Sync);
+                    // sync_repl=true mirrors WAL sync semantics (ships + waits for ACK)
+                    const bool sync_repl = (opts_.wal.sync_mode == SyncMode::Sync);
 
                     repl_server_ = cluster::ReplicationServer::create(
                         repl_port,
@@ -192,17 +215,29 @@ namespace akkaradb::engine {
 
     std::unique_ptr<AkkEngine> AkkEngine::open(AkkEngineOptions options) {
         // ── Validate / fill defaults ─────────────────────────────────────────
-        // SyncMode::Off overrides wal_enabled: "WAL writes are disabled entirely
-        // (wal_enabled is ignored)" — data lives only in memory.
-        const bool persistent = options.wal_enabled && (options.sync_mode != SyncMode::Off);
-
-        if (persistent && options.data_dir.empty()) { throw std::runtime_error("AkkEngine: data_dir must be set when wal_enabled=true"); }
+        // WAL is active whenever wal_enabled == true.
+        // SyncMode::Off (wal.sync_mode) means "write to WAL but never fdatasync".
+        // To disable WAL entirely, set wal_enabled = false.
+        const bool persistent = options.wal_enabled;
 
         if (persistent) {
-            if (options.wal.wal_dir.empty()) options.wal.wal_dir = options.data_dir / "wal";
+            // Determine which active components still need their path derived from data_dir.
+            const bool wal_needs_data = options.wal.wal_dir.empty();
+            const bool blob_needs_data = options.blob_enabled && options.blob_dir.empty();
+            const bool manifest_needs_data = options.manifest_enabled && options.manifest_path.empty();
 
-            // SyncMode → fast_mode mapping (Off is already excluded above)
-            options.wal.fast_mode = (options.sync_mode == SyncMode::Async);
+            if (options.data_dir.empty() && (wal_needs_data || blob_needs_data || manifest_needs_data)) {
+                std::string msg = "AkkEngine: data_dir required for:";
+                if (wal_needs_data) msg += " wal";
+                if (blob_needs_data) msg += " blob";
+                if (manifest_needs_data) msg += " manifest";
+                throw std::runtime_error(msg);
+            }
+
+            // Fill component paths from data_dir where not explicitly set.
+            if (wal_needs_data) options.wal.wal_dir = options.data_dir / "wal";
+            if (blob_needs_data) options.blob_dir = options.data_dir / "blobs";
+            if (manifest_needs_data) options.manifest_path = options.data_dir / "manifest.akmf";
         }
 
         // ── Allocate objects ─────────────────────────────────────────────────
@@ -212,8 +247,10 @@ namespace akkaradb::engine {
 
         // ── Create directories ───────────────────────────────────────────────
         if (persistent) {
-            fs::create_directories(options.data_dir);
+            if (!options.data_dir.empty())    fs::create_directories(options.data_dir);
             fs::create_directories(options.wal.wal_dir);
+            if (options.blob_enabled)         fs::create_directories(options.blob_dir);
+            if (options.manifest_enabled && !options.manifest_path.empty()) fs::create_directories(options.manifest_path.parent_path());
         }
 
         // ── MemTable (flush callback wired after recovery) ───────────────────
@@ -224,15 +261,15 @@ namespace akkaradb::engine {
         }
 
         // ── BlobManager ──────────────────────────────────────────────────────
-        if (persistent) {
-            impl->blob_manager_ = blob::BlobManager::create(options.data_dir / "blobs", blob::BlobManager::DEFAULT_THRESHOLD);
+        if (persistent && options.blob_enabled) {
+            impl->blob_manager_ = blob::BlobManager::create(options.blob_dir, options.blob_threshold_bytes);
             impl->blob_manager_->start(); // starts GC thread + startup cleanup
         }
 
         // ── Manifest ─────────────────────────────────────────────────────────
-        if (persistent) {
-            const bool fast_manifest = (options.sync_mode == SyncMode::Async);
-            impl->manifest_ = manifest::Manifest::create(options.data_dir / "manifest.akmf", fast_manifest);
+        if (persistent && options.manifest_enabled) {
+            const bool fast_manifest = (options.wal.sync_mode == SyncMode::Async || options.wal.sync_mode == SyncMode::Off);
+            impl->manifest_ = manifest::Manifest::create(options.manifest_path, fast_manifest);
             impl->manifest_->start();
         }
 
@@ -297,7 +334,7 @@ namespace akkaradb::engine {
         // If data_dir/cluster.akcc exists, initialise ClusterManager and elect
         // a role (Primary / Replica).  Then start the appropriate replication
         // component (ReplicationServer or ReplicationClient).
-        if (persistent) {
+        if (persistent && !options.data_dir.empty()) {
             const auto cluster_cfg_path = options.data_dir / "cluster.akcc";
             if (fs::exists(cluster_cfg_path)) {
                 auto cfg = cluster::ClusterConfig::load(cluster_cfg_path);
@@ -371,7 +408,7 @@ namespace akkaradb::engine {
             // 4. WAL + MemTable store the BlobRef (inline, 20 bytes), tagged FLAG_BLOB
             //    so get() can identify them reliably without heuristics.
             if (impl_->wal_writer_) impl_->wal_writer_->append_put(key, ref_span, seq, fp64, mk, core::AKHdr32::FLAG_BLOB);
-            impl_->memtable_->put(key, ref_span, seq, core::AKHdr32::FLAG_BLOB);
+            impl_->memtable_->put(key, ref_span, seq, core::AKHdr32::FLAG_BLOB, fp64);
 
             // 5. Ship WAL entry (carrying BlobRef) to Replicas
             if (impl_->repl_server_) impl_->repl_server_->ship(seq, wal::WalEntryType::Record, key, ref_span);
@@ -381,7 +418,7 @@ namespace akkaradb::engine {
 
         // ── Inline path ───────────────────────────────────────────────────────
         if (impl_->wal_writer_) impl_->wal_writer_->append_put(key, value, seq, fp64, mk);
-        impl_->memtable_->put(key, value, seq);
+        impl_->memtable_->put(key, value, seq, core::AKHdr32::FLAG_NORMAL, fp64);
 
         if (impl_->repl_server_) impl_->repl_server_->ship(seq, wal::WalEntryType::Record, key, value);
     }
@@ -398,10 +435,9 @@ namespace akkaradb::engine {
         if (impl_->blob_manager_) {
             auto existing = impl_->memtable_->get(key);
             if (existing && !existing->is_tombstone()) {
-                const auto stored_val = existing->value();
-                if (stored_val.size() == blob::BLOB_REF_SIZE) {
-                    blob::BlobRef ref = blob::decode_blob_ref(stored_val.data());
-                    if (ref.total_size >= impl_->blob_manager_->threshold()) { impl_->blob_manager_->schedule_delete(ref.blob_id); }
+                if (existing->flags() & core::AKHdr32::FLAG_BLOB) {
+                    const blob::BlobRef ref = blob::decode_blob_ref(existing->value().data());
+                    impl_->blob_manager_->schedule_delete(ref.blob_id);
                 }
             }
         }

@@ -5,7 +5,7 @@
  *   1. Memory-only mode  (wal_enabled=false)
  *   2. WAL persistence   (wal_enabled=true, Sync)
  *   3. BLOB path         (value >= 16 KiB threshold)
- *   4. SyncMode::Off     (wal_enabled=true overridden to memory-only)
+ *   4. SyncMode::Off     (WAL enabled, OS page cache only — no fdatasync)
  *   5. Throughput        (write + read, in-memory)
  *
  * No external test framework — failures abort via CHECK().
@@ -176,26 +176,38 @@ static void test_memory_many_keys() {
 }
 
 // ============================================================================
-// 2. SyncMode::Off  (wal_enabled=true is ignored → in-memory)
+// 2. SyncMode::Off  (WAL enabled, OS page cache only — no fdatasync)
 // ============================================================================
 
 static void test_sync_off() {
-    section("SyncMode::Off overrides wal_enabled");
+    section("SyncMode::Off: WAL written, no fdatasync, data survives reopen");
 
     auto dir = make_temp_dir("sync_off");
 
-    AkkEngineOptions opts;
-    opts.data_dir   = dir;
-    opts.wal_enabled = true;           // should be overridden
-    opts.sync_mode  = SyncMode::Off;   // → memory-only
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off; // write to OS page cache, no fdatasync
 
-    auto eng = AkkEngine::open(opts);
-    eng->put(as_span("k"), as_span("v"));
-    CHECK(eng->get(as_span("k")).has_value());
+        auto eng = AkkEngine::open(opts);
+        eng->put(as_span("hello"), as_span("world"));
+        CHECK(eng->get(as_span("hello")).has_value());
 
-    // No WAL directory should have been created
-    CHECK(!fs::exists(dir / "wal"));
-    eng->close();
+        // WAL directory must exist — Off still writes WAL entries
+        CHECK(fs::exists(dir / "wal"));
+        eng->close();
+    }
+
+    // Reopen: WAL recovery should restore the entry
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+
+        auto eng = AkkEngine::open(opts);
+        CHECK(eng->get(as_span("hello")).has_value());
+        eng->close();
+    }
 
     fs::remove_all(dir);
     std::printf("  ok\n");
@@ -215,7 +227,7 @@ static void test_wal_recovery() {
         AkkEngineOptions opts;
         opts.data_dir   = dir;
         opts.wal_enabled = true;
-        opts.sync_mode  = SyncMode::Sync;
+        opts.wal.sync_mode = SyncMode::Sync;
         auto eng = AkkEngine::open(opts);
 
         for (int i = 0; i < 100; ++i) {
@@ -236,7 +248,7 @@ static void test_wal_recovery() {
         AkkEngineOptions opts;
         opts.data_dir   = dir;
         opts.wal_enabled = true;
-        opts.sync_mode  = SyncMode::Sync;
+        opts.wal.sync_mode = SyncMode::Sync;
         auto eng = AkkEngine::open(opts);
 
         int ok = 0, missing = 0, deleted = 0;
@@ -278,7 +290,7 @@ static void test_wal_async() {
     AkkEngineOptions opts;
     opts.data_dir   = dir;
     opts.wal_enabled = true;
-    opts.sync_mode  = SyncMode::Async;
+    opts.wal.sync_mode = SyncMode::Async;
     auto eng = AkkEngine::open(opts);
 
     for (int i = 0; i < 50; ++i) {
@@ -321,7 +333,7 @@ static void test_blob_roundtrip() {
         AkkEngineOptions opts;
         opts.data_dir   = dir;
         opts.wal_enabled = true;
-        opts.sync_mode  = SyncMode::Sync;
+        opts.wal.sync_mode = SyncMode::Sync;
         auto eng = AkkEngine::open(opts);
 
         eng->put(as_span("big_key"), as_span(payload));
@@ -346,7 +358,7 @@ static void test_blob_roundtrip() {
         AkkEngineOptions opts;
         opts.data_dir   = dir;
         opts.wal_enabled = true;
-        opts.sync_mode  = SyncMode::Sync;
+        opts.wal.sync_mode = SyncMode::Sync;
         auto eng = AkkEngine::open(opts);
 
         auto got = eng->get(as_span("big_key"));
@@ -362,7 +374,7 @@ static void test_blob_roundtrip() {
         AkkEngineOptions opts;
         opts.data_dir   = dir;
         opts.wal_enabled = true;
-        opts.sync_mode  = SyncMode::Sync;
+        opts.wal.sync_mode = SyncMode::Sync;
         auto eng = AkkEngine::open(opts);
 
         eng->remove(as_span("big_key"));
@@ -394,7 +406,7 @@ static void test_blob_no_false_positive() {
     AkkEngineOptions opts;
     opts.data_dir   = dir;
     opts.wal_enabled = true;
-    opts.sync_mode  = SyncMode::Sync;
+    opts.wal.sync_mode = SyncMode::Sync;
     auto eng = AkkEngine::open(opts);
 
     eng->put(as_span("tiny"), as_span(inline20));
@@ -477,9 +489,10 @@ static void bench_throughput() {
         AkkEngineOptions opts;
         opts.data_dir   = dir;
         opts.wal_enabled = true;
-        opts.sync_mode  = SyncMode::Async;
+        opts.wal.sync_mode = SyncMode::Async;
+        opts.wal.shard_count = 8; // single-threaded benchmark: 1 shard minimises fdatasync interrupt overhead
         opts.wal.group_n      = 1024;
-        opts.wal.group_micros = 200;
+        opts.wal.group_micros = 500;
         auto eng = AkkEngine::open(opts);
 
         auto t0 = Clock::now();
@@ -488,10 +501,8 @@ static void bench_throughput() {
             auto v = std::format("wv_{:08d}", i);
             eng->put(as_span(k), as_span(v));
         }
-        eng->force_sync();
         double ms = elapsed_ms(t0);
-        std::printf("  [wal]  write  %6d ops in %7.1f ms  →  %7.0f ops/s  (async+fsync)\n",
-                    N, ms, N / (ms / 1000.0));
+        std::printf("  [wal]  write  %6d ops in %7.1f ms  →  %7.0f ops/s  (async)\n", N, ms, N / (ms / 1000.0));
 
         t0 = Clock::now();
         auto found = 0;

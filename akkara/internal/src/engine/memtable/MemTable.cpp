@@ -443,8 +443,8 @@ namespace akkaradb::engine::memtable {
 
             // ── Write path ────────────────────────────────────────────────────
 
-            void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags) {
-                const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
+            void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
+                const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : core::AKHdr32::compute_key_fp64(key.data(), key.size());
                 const uint32_t si = shard_for(fp64, shard_count_);
 
                 auto record = core::MemRecord::create(key, value, seq, flags, fp64);
@@ -560,7 +560,10 @@ namespace akkaradb::engine::memtable {
 
     MemTable::~MemTable() = default;
 
-    void MemTable::put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags) { impl_->put(key, value, seq, flags); }
+    void MemTable::put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
+        impl_->put(key, value, seq, flags, precomputed_fp64);
+    }
+
     void MemTable::remove(std::span<const uint8_t> key, uint64_t seq) { impl_->remove(key, seq); }
 
     std::shared_ptr<const core::MemRecord> MemTable::get(std::span<const uint8_t> key) const { return impl_->get(key); }

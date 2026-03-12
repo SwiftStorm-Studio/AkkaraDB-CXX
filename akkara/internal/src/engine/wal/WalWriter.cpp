@@ -231,7 +231,8 @@ namespace akkaradb::wal {
         };
 
         Type type{Type::WRITE};
-        core::OwnedBuffer buffer; ///< Serialized WAL entry (WRITE only)
+        size_t entry_offset{0}; ///< Byte offset into the processing arena (WRITE only)
+        size_t entry_size{0}; ///< Byte count of the entry in the arena (WRITE only)
         std::shared_ptr<Waiter> waiter; ///< null = fast_mode (no notification needed)
 
         Command() = default;
@@ -240,10 +241,11 @@ namespace akkaradb::wal {
         Command(const Command&) = delete;
         Command& operator=(const Command&) = delete;
 
-        static Command write(core::OwnedBuffer buf, std::shared_ptr<Waiter> w) {
+        static Command write(size_t offset, size_t size, std::shared_ptr<Waiter> w) {
             Command c;
             c.type = Type::WRITE;
-            c.buffer = std::move(buf);
+            c.entry_offset = offset;
+            c.entry_size = size;
             c.waiter = std::move(w);
             return c;
         }
@@ -283,6 +285,7 @@ namespace akkaradb::wal {
                 size_t group_n,
                 size_t group_micros,
                 uint64_t max_segment_bytes,
+                bool nosync_mode,
                 std::atomic<uint64_t>& global_batch_seq
             )
                 : shard_id_{shard_id},
@@ -290,6 +293,7 @@ namespace akkaradb::wal {
                   group_n_{group_n},
                   group_micros_{group_micros},
                   max_segment_bytes_{max_segment_bytes},
+                  nosync_mode_{nosync_mode},
                   global_batch_seq_{global_batch_seq},
                   stopped_{false},
                   needs_segment_header_{false},
@@ -305,6 +309,9 @@ namespace akkaradb::wal {
                 else { current_segment_bytes_ = file_.file_size(); }
 
                 batch_arena_ = core::PerThreadArena::create(BATCH_ARENA_BLOCK_SIZE, 4096);
+                // Pre-reserve entry arenas to avoid first-batch reallocation.
+                entry_buf_[0].reserve(group_n_ * 128);
+                entry_buf_[1].reserve(group_n_ * 128);
                 flusher_ = std::thread([this] { flusher_loop(); });
             }
 
@@ -313,12 +320,18 @@ namespace akkaradb::wal {
             ShardWriter(const ShardWriter&) = delete;
             ShardWriter& operator=(const ShardWriter&) = delete;
 
-            void enqueue(core::OwnedBuffer entry_buf, std::shared_ptr<Waiter> waiter) {
+            void enqueue(const void* data, size_t size, std::shared_ptr<Waiter> waiter) {
                 bool was_empty;
                 {
                     std::lock_guard lock{queue_mutex_};
                     was_empty = queue_.empty();
-                    queue_.push_back(Command::write(std::move(entry_buf), std::move(waiter)));
+                    // Copy serialised entry into the active write arena — no heap alloc per put.
+                    auto& buf = entry_buf_[write_idx_];
+                    const size_t offset = write_pos_[write_idx_];
+                    if (buf.size() < offset + size) buf.resize((offset + size) * 2);
+                    std::memcpy(buf.data() + offset, data, size);
+                    write_pos_[write_idx_] += size;
+                    queue_.push_back(Command::write(offset, size, std::move(waiter)));
                 }
                 // Notify outside the lock: avoids the "notify-then-block" pattern
                 // where the flusher wakes up only to immediately contend on queue_mutex_.
@@ -408,6 +421,11 @@ namespace akkaradb::wal {
                                 continue;
                             }
                             std::swap(queue_, local);
+                            // Atomically swap entry arenas with the queue.
+                            // put() threads will write to the other arena from here on.
+                            proc_arena_idx_ = write_idx_;
+                            write_idx_ ^= 1;
+                            write_pos_[write_idx_] = 0;
                         }
 
                         bool do_shutdown = false;
@@ -439,8 +457,11 @@ namespace akkaradb::wal {
                     return;
                 }
 
-                try { file_.fdatasync(); }
-                catch (...) {}
+                // Final flush: skip if nosync_mode — caller uses force_sync() when needed.
+                if (!nosync_mode_) {
+                    try { file_.fdatasync(); }
+                    catch (...) {}
+                }
             }
 
             void flush_write_batch(std::vector<Command>& batch) {
@@ -460,7 +481,7 @@ namespace akkaradb::wal {
                 if (max_segment_bytes_ > 0 && current_segment_bytes_ >= max_segment_bytes_) { rotate_segment(); }
 
                 size_t entries_total = 0;
-                for (const auto& cmd : batch) entries_total += cmd.buffer.size();
+                for (const auto& cmd : batch) entries_total += cmd.entry_size;
 
                 const size_t batch_total = WalBatchHeader::SIZE + entries_total;
 
@@ -473,18 +494,24 @@ namespace akkaradb::wal {
                 const uint64_t bseq = global_batch_seq_.fetch_add(1, std::memory_order_relaxed);
                 WalBatchHeader::write(view, bseq, static_cast<uint32_t>(batch.size()), static_cast<uint32_t>(batch_total));
 
+                const auto& proc_arena = entry_buf_[proc_arena_idx_];
                 size_t offset = WalBatchHeader::SIZE;
                 for (const auto& cmd : batch) {
-                    std::memcpy(reinterpret_cast<uint8_t*>(view.data()) + offset, cmd.buffer.data(), cmd.buffer.size());
-                    offset += cmd.buffer.size();
+                    std::memcpy(reinterpret_cast<uint8_t*>(view.data()) + offset, proc_arena.data() + cmd.entry_offset, cmd.entry_size);
+                    offset += cmd.entry_size;
                 }
 
                 WalBatchHeader::finalize_checksum(view, batch_total);
 
+                // SyncMode::Sync  (fast_mode=false): waiter present → caller blocks until signal.
+                // SyncMode::Async (fast_mode=true, nosync_mode=false): fdatasync on every batch;
+                //   put() already returned, durability still guaranteed within group_micros.
+                // SyncMode::Off   (fast_mode=true, nosync_mode=true): skip fdatasync entirely;
+                //   data is in the OS page cache only, force_sync() for explicit flush.
                 std::exception_ptr write_ex;
                 try {
                     file_.write(view.data(), batch_total);
-                    file_.fdatasync();
+                    if (!nosync_mode_) file_.fdatasync();
                     current_segment_bytes_ += batch_total;
                 }
                 catch (...) { write_ex = std::current_exception(); }
@@ -566,6 +593,7 @@ namespace akkaradb::wal {
             size_t group_n_;
             size_t group_micros_;
             uint64_t max_segment_bytes_;
+            bool nosync_mode_;
 
             std::atomic<uint64_t>& global_batch_seq_;
 
@@ -581,6 +609,17 @@ namespace akkaradb::wal {
 
             bool needs_segment_header_;
             uint64_t current_segment_bytes_; ///< Bytes written to the active segment so far
+
+            // ── Double-buffered entry arenas ─────────────────────────────────────
+            // Eliminates per-entry heap allocation.  put() threads copy serialised
+            // WAL entries into entry_buf_[write_idx_] under queue_mutex_.  When the
+            // flusher swaps the queue it atomically flips write_idx_ and resets the
+            // new write arena's position to 0.  The flusher then reads exclusively
+            // from entry_buf_[proc_arena_idx_] without holding any lock.
+            std::vector<uint8_t> entry_buf_[2];
+            int write_idx_{0}; ///< Arena index currently used by put() (under queue_mutex_)
+            size_t write_pos_[2]{0, 0}; ///< Write-head position for each arena (under queue_mutex_)
+            int proc_arena_idx_{0}; ///< Arena the flusher is consuming (flusher thread only)
     };
 
     // ============================================================================
@@ -605,7 +644,8 @@ namespace akkaradb::wal {
                 : wal_dir_{std::move(opts.wal_dir)},
                   group_n_{opts.group_n},
                   group_micros_{opts.group_micros},
-                  fast_mode_{opts.fast_mode},
+                  fast_mode_{opts.sync_mode == SyncMode::Async || opts.sync_mode == SyncMode::Off},
+                  nosync_mode_{opts.sync_mode == SyncMode::Off},
                   shard_count_{resolve_shard_count(opts.shard_count)},
                   max_segment_bytes_{opts.max_segment_bytes},
                   global_batch_seq_{0},
@@ -613,7 +653,16 @@ namespace akkaradb::wal {
                 std::filesystem::create_directories(wal_dir_);
                 shards_.reserve(shard_count_);
                 for (uint32_t id = 0; id < shard_count_; ++id) {
-                    shards_.push_back(std::make_unique<ShardWriter>(id, wal_dir_, group_n_, group_micros_, max_segment_bytes_, global_batch_seq_));
+                    shards_.push_back(std::make_unique<ShardWriter>(
+                            id,
+                            wal_dir_,
+                            group_n_,
+                            group_micros_,
+                            max_segment_bytes_,
+                            nosync_mode_,
+                            global_batch_seq_
+                        )
+                    );
                 }
             }
 
@@ -621,20 +670,22 @@ namespace akkaradb::wal {
 
             void append_put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint64_t key_fp64, uint64_t mini_key, uint8_t flags) {
                 if (!running_.load(std::memory_order_acquire)) { throw std::runtime_error("WalWriter is closed"); }
+                thread_local std::vector<uint8_t> tls_buf;
                 const size_t needed = WalEntryHeader::SIZE + sizeof(core::AKHdr32) + key.size() + value.size();
-                enqueue_entry(
-                    key_fp64,
-                    serialize_to_owned(needed, [&](core::BufferView v) { return serialize_add_direct(v, key, value, seq, key_fp64, mini_key, flags); })
-                );
+                if (tls_buf.size() < needed) tls_buf.resize(needed);
+                core::BufferView view{reinterpret_cast<std::byte*>(tls_buf.data()), needed};
+                const size_t written = serialize_add_direct(view, key, value, seq, key_fp64, mini_key, flags);
+                enqueue_entry(key_fp64, tls_buf.data(), written);
             }
 
             void append_delete(std::span<const uint8_t> key, uint64_t seq, uint64_t key_fp64, uint64_t mini_key) {
                 if (!running_.load(std::memory_order_acquire)) { throw std::runtime_error("WalWriter is closed"); }
+                thread_local std::vector<uint8_t> tls_buf;
                 const size_t needed = WalEntryHeader::SIZE + sizeof(core::AKHdr32) + key.size();
-                enqueue_entry(
-                    key_fp64,
-                    serialize_to_owned(needed, [&](core::BufferView v) { return serialize_delete_direct(v, key, seq, key_fp64, mini_key); })
-                );
+                if (tls_buf.size() < needed) tls_buf.resize(needed);
+                core::BufferView view{reinterpret_cast<std::byte*>(tls_buf.data()), needed};
+                const size_t written = serialize_delete_direct(view, key, seq, key_fp64, mini_key);
+                enqueue_entry(key_fp64, tls_buf.data(), written);
             }
 
             void force_sync() {
@@ -667,38 +718,12 @@ namespace akkaradb::wal {
             }
 
         private:
-            // ── Serialization helper ──────────────────────────────────────────────
-            // Single TLS staging buffer shared by append_put and append_delete.
-            static constexpr size_t TLS_BUF_MAX = 1024 * 1024; // 1 MB
-
-            template <typename Fn>
-            [[nodiscard]] core::OwnedBuffer serialize_to_owned(size_t needed, Fn&& fn) {
-                thread_local std::vector<uint8_t> tls_buf;
-                core::OwnedBuffer entry_buf;
-                if (needed <= TLS_BUF_MAX) {
-                    if (tls_buf.size() < needed) tls_buf.resize(needed);
-                    core::BufferView tls_view{reinterpret_cast<std::byte*>(tls_buf.data()), needed};
-                    const size_t written = fn(tls_view);
-                    entry_buf = core::OwnedBuffer::allocate(written, 64);
-                    std::memcpy(entry_buf.data(), tls_buf.data(), written);
-                }
-                else {
-                    // Oversized entry: allocate directly, skip TLS
-                    entry_buf = core::OwnedBuffer::allocate(needed, 64);
-                    core::BufferView direct_view{reinterpret_cast<std::byte*>(entry_buf.data()), needed};
-                    fn(direct_view);
-                }
-                return entry_buf;
-            }
-
-            void enqueue_entry(uint64_t key_fp64, core::OwnedBuffer entry_buf) {
-                const uint32_t shard_id = (shard_count_ == 1)
-                                              ? 0u
-                                              : shard_for(key_fp64, shard_count_);
-                if (fast_mode_) { shards_[shard_id]->enqueue(std::move(entry_buf), nullptr); }
+            void enqueue_entry(uint64_t key_fp64, const void* data, size_t size) {
+                const uint32_t shard_id = (shard_count_ == 1) ? 0u : shard_for(key_fp64, shard_count_);
+                if (fast_mode_) { shards_[shard_id]->enqueue(data, size, nullptr); }
                 else {
                     auto waiter = std::make_shared<Waiter>();
-                    shards_[shard_id]->enqueue(std::move(entry_buf), waiter);
+                    shards_[shard_id]->enqueue(data, size, waiter);
                     waiter->wait();
                 }
             }
@@ -707,6 +732,7 @@ namespace akkaradb::wal {
             size_t group_n_;
             size_t group_micros_;
             bool fast_mode_;
+            bool nosync_mode_;
             uint32_t shard_count_;
             uint64_t max_segment_bytes_;
 

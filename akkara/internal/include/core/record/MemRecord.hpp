@@ -19,11 +19,11 @@
 // internal/include/core/record/MemRecord.hpp
 #pragma once
 
+#include <cstring>
+#include <span>
+#include <string_view>
 #include "AKHdr32.hpp"
 #include "RecordView.hpp"
-#include <cstring>
-#include <string_view>
-#include <span>
 
 namespace akkaradb::core {
     /**
@@ -230,16 +230,15 @@ namespace akkaradb::core {
              * SmallBuffer — SSO-style inline/heap data buffer.
              *
              * Replaces std::vector<uint8_t> (24 B) + size_t approx_size_ (8 B) = 32 B total.
-             * Records with total data <= INLINE_CAP (24 bytes) are stored completely inline
+             * Records with total data <= INLINE_CAP (22 bytes) are stored completely inline
              * with zero heap allocation. Larger records fall back to a single heap allocation.
              *
              * Layout (32 bytes):
-             *   uint32_t meta_  — bit31=is_heap, bits30:0=data size
-             *   uint32_t _pad   — alignment pad so body_ is at offset 8 (ptr_ aligned)
-             *   union Body {
-             *     uint8_t inl_[24]  — inline storage (active when !is_heap)
-             *     uint8_t* ptr_     — heap pointer   (active when  is_heap)
-             *   } body_
+             *   uint8_t* active_ptr_ (8 B) — always points to live data: inl_ when inline,
+             *                                heap pointer otherwise.  data() = return active_ptr_
+             *                                with zero branches on the hot read path.
+             *   uint16_t meta_       (2 B) — data size (max 65535)
+             *   uint8_t  inl_[22]   (22 B) — inline storage (INLINE_CAP = 22)
              */
             struct SmallBuffer {
                 static constexpr size_t INLINE_CAP = 22;
