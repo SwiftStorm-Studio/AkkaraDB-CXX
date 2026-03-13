@@ -26,11 +26,14 @@
 #include "engine/cluster/ReplicationClient.hpp"
 #include "engine/cluster/ReplicationServer.hpp"
 #include "engine/manifest/Manifest.hpp"
+#include "engine/sstable/SSTManager.hpp"
+#include "engine/vlog/VersionLog.hpp"
 #include "engine/wal/WalRecovery.hpp"
 #include "core/CRC32C.hpp"
 #include "core/record/AKHdr32.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -50,6 +53,12 @@ namespace akkaradb::engine {
     // ============================================================================
 
     namespace {
+        /// Returns the current wall-clock time in nanoseconds since epoch.
+        uint64_t now_ns() noexcept {
+            using namespace std::chrono;
+            return static_cast<uint64_t>(duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count());
+        }
+
         /**
          * Loads a persistent 64-bit node ID from data_dir/node.id.
          * If the file is missing or corrupt, generates a random ID and saves it.
@@ -99,6 +108,17 @@ namespace akkaradb::engine {
             std::unique_ptr<blob::BlobManager> blob_manager_; ///< null if !blob_enabled
             std::unique_ptr<manifest::Manifest> manifest_; ///< null if !manifest_enabled
 
+            // ── Node identity ─────────────────────────────────────────────────────
+            // 0 = non-persistent / non-cluster mode.
+            // Set during open() from data_dir/node.id when data_dir is non-empty.
+            uint64_t node_id_ = 0;
+
+            // ── SST (present when wal_enabled + manifest_enabled + data_dir set) ────
+            std::unique_ptr<sst::SSTManager> sst_manager_;
+
+            // ── Version log (present when version_log_enabled) ────────────────────
+            std::unique_ptr<vlog::VersionLog> version_log_;
+
             // ── Cluster (present when cluster.akcc found in data_dir) ─────────────
             std::unique_ptr<cluster::ClusterManager> cluster_mgr_;
             std::unique_ptr<cluster::ReplicationServer> repl_server_; ///< Primary only
@@ -120,7 +140,14 @@ namespace akkaradb::engine {
             // The MemTable internally advances seq_gen_ to max(seq_gen_, seq+1) so the
             // local counter stays correctly positioned after replication.
             // =========================================================================
-            void apply_record(uint64_t seq, std::span<const uint8_t> key, std::span<const uint8_t> val, uint8_t flags = core::AKHdr32::FLAG_NORMAL) {
+            // source_node_id: ID of the originating node (0 when not known, e.g. non-cluster replica applies).
+            void apply_record(
+                uint64_t seq,
+                std::span<const uint8_t> key,
+                std::span<const uint8_t> val,
+                uint8_t flags = core::AKHdr32::FLAG_NORMAL,
+                uint64_t source_node_id = 0
+            ) {
                 const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
                 const uint64_t mk = core::AKHdr32::build_mini_key(key.data(), key.size());
 
@@ -128,6 +155,7 @@ namespace akkaradb::engine {
                     // Tombstone (Primary shipped a remove)
                     if (wal_writer_) wal_writer_->append_delete(key, seq, fp64, mk);
                     memtable_->remove(key, seq);
+                    if (version_log_) version_log_->append(key, seq, source_node_id, now_ns(), core::AKHdr32::FLAG_TOMBSTONE, {});
                 }
                 else {
                     // Put (may be an inline value or a 20-byte BlobRef).
@@ -135,6 +163,7 @@ namespace akkaradb::engine {
                     // for this seq before the ReplEntry arrived (TCP ordering guarantee).
                     if (wal_writer_) wal_writer_->append_put(key, val, seq, fp64, mk, flags);
                     memtable_->put(key, val, seq, flags, fp64);
+                    if (version_log_) version_log_->append(key, seq, source_node_id, now_ns(), flags, val);
                 }
             }
 
@@ -253,6 +282,11 @@ namespace akkaradb::engine {
             if (options.manifest_enabled && !options.manifest_path.empty()) fs::create_directories(options.manifest_path.parent_path());
         }
 
+        // ── Node identity ────────────────────────────────────────────────────
+        // Always load (or create) a stable node ID when data_dir is available.
+        // Used in VersionLog entries for source attribution.
+        if (persistent && !options.data_dir.empty()) { impl->node_id_ = load_or_create_node_id(options.data_dir); }
+
         // ── MemTable (flush callback wired after recovery) ───────────────────
         {
             memtable::MemTable::Options mt_opts = options.memtable;
@@ -316,19 +350,35 @@ namespace akkaradb::engine {
         // strictly greater than the highest seq replayed.
         if (persistent) { impl->wal_writer_ = wal::WalWriter::create(options.wal); }
 
-        // ── MemTable flush callback ──────────────────────────────────────────
-        // SST writing is not yet implemented (Phase 5).
-        //
-        // Intentionally leaving on_flush = null so the MemTable never seals
-        // and discards records.  A no-op callback would silently drop flushed
-        // records from memory mid-run (WAL still has them, but get() would
-        // return nullopt until the next restart + recovery).
-        //
-        // With null callback the MemTable holds everything in memory.
-        // WAL provides crash-durability; data survives restart via replay.
-        // Memory growth is bounded by max_memory_bytes (backpressure: future).
-        //
-        // TODO (Phase 5): set_flush_callback → write SST, truncate WAL.
+        // ── Version Log ──────────────────────────────────────────────────────
+        // Opened after WAL recovery so that any previously logged history is
+        // recovered into the in-memory index before new writes are accepted.
+        if (persistent && options.version_log_enabled && !options.data_dir.empty()) {
+            vlog::VersionLogOptions vl_opts;
+            vl_opts.log_path = options.data_dir / "history.akvlog";
+            impl->version_log_ = vlog::VersionLog::create(std::move(vl_opts));
+        }
+
+        // ── SST Manager (Phase 5) ────────────────────────────────────────────
+        // Wire MemTable flush → SSTManager::flush() when all persistence
+        // components are enabled and a data directory is available.
+        if (persistent && options.manifest_enabled && !options.data_dir.empty()) {
+            sst::SSTManager::Options sst_opts;
+            sst_opts.sst_dir = options.data_dir / "sst";
+            sst_opts.max_l0_files = static_cast<int>(options.max_l0_sst_files);
+            sst_opts.bloom_bits_per_key = options.sst_bloom_bits_per_key;
+            sst_opts.index_stride = sst::INDEX_STRIDE;
+
+            impl->sst_manager_ = sst::SSTManager::create(sst_opts, impl->manifest_.get());
+            impl->sst_manager_->recover(); // load live SST files from Manifest
+
+            // MemTable flush callback: per-shard flusher threads call this
+            // with a sorted batch of MemRecords.  SSTManager::flush() writes
+            // the batch to a new L0 SST file and triggers compaction if needed.
+            impl->memtable_->set_flush_callback(
+                [sst_mgr = impl->sst_manager_.get()](std::vector<core::MemRecord> records) { if (!records.empty()) sst_mgr->flush(std::move(records)); }
+            );
+        }
 
         // ── Cluster setup ────────────────────────────────────────────────────
         // If data_dir/cluster.akcc exists, initialise ClusterManager and elect
@@ -338,7 +388,8 @@ namespace akkaradb::engine {
             const auto cluster_cfg_path = options.data_dir / "cluster.akcc";
             if (fs::exists(cluster_cfg_path)) {
                 auto cfg = cluster::ClusterConfig::load(cluster_cfg_path);
-                uint64_t self_nid = load_or_create_node_id(options.data_dir);
+                // node_id_ was already loaded above; reuse it for cluster setup.
+                uint64_t self_nid = impl->node_id_;
 
                 impl->cluster_mgr_ = cluster::ClusterManager::create(options.data_dir, cfg, self_nid);
 
@@ -410,7 +461,10 @@ namespace akkaradb::engine {
             if (impl_->wal_writer_) impl_->wal_writer_->append_put(key, ref_span, seq, fp64, mk, core::AKHdr32::FLAG_BLOB);
             impl_->memtable_->put(key, ref_span, seq, core::AKHdr32::FLAG_BLOB, fp64);
 
-            // 5. Ship WAL entry (carrying BlobRef) to Replicas
+            // 5. Record in VersionLog (stores the 20-byte BlobRef, FLAG_BLOB)
+            if (impl_->version_log_) impl_->version_log_->append(key, seq, impl_->node_id_, now_ns(), core::AKHdr32::FLAG_BLOB, ref_span);
+
+            // 6. Ship WAL entry (carrying BlobRef) to Replicas
             if (impl_->repl_server_) impl_->repl_server_->ship(seq, wal::WalEntryType::Record, key, ref_span);
 
             return;
@@ -419,6 +473,7 @@ namespace akkaradb::engine {
         // ── Inline path ───────────────────────────────────────────────────────
         if (impl_->wal_writer_) impl_->wal_writer_->append_put(key, value, seq, fp64, mk);
         impl_->memtable_->put(key, value, seq, core::AKHdr32::FLAG_NORMAL, fp64);
+        if (impl_->version_log_) impl_->version_log_->append(key, seq, impl_->node_id_, now_ns(), core::AKHdr32::FLAG_NORMAL, value);
 
         if (impl_->repl_server_) impl_->repl_server_->ship(seq, wal::WalEntryType::Record, key, value);
     }
@@ -448,6 +503,7 @@ namespace akkaradb::engine {
 
         if (impl_->wal_writer_) impl_->wal_writer_->append_delete(key, seq, fp64, mk);
         impl_->memtable_->remove(key, seq);
+        if (impl_->version_log_) impl_->version_log_->append(key, seq, impl_->node_id_, now_ns(), core::AKHdr32::FLAG_TOMBSTONE, {});
 
         // Ship tombstone to Replicas: empty val signals deletion.
         if (impl_->repl_server_) impl_->repl_server_->ship(seq, wal::WalEntryType::Record, key, {});
@@ -460,25 +516,41 @@ namespace akkaradb::engine {
     std::optional<std::vector<uint8_t>> AkkEngine::get(std::span<const uint8_t> key) const {
         if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
 
-        // Point lookup: MemTable (active + immutables, newest-first)
+        // ── MemTable lookup (active + immutables, newest-first) ──────────────
         const auto rec = impl_->memtable_->get(key);
-        if (!rec) return std::nullopt;
-        if (rec->is_tombstone()) return std::nullopt;
+        if (rec) {
+            if (rec->is_tombstone()) return std::nullopt;
 
-        const auto stored_val = rec->value();
+            const auto stored_val = rec->value();
 
-        // ── BLOB dereference ──────────────────────────────────────────────────
-        // FLAG_BLOB is set in both the WAL header and the MemRecord flags when
-        // put() externalises a large value.  It survives WAL recovery because
-        // open() passes ref.header().flags when replaying into the MemTable.
-        // This is fully reliable: no size heuristic, no false positives.
-        if (impl_->blob_manager_ && (rec->flags() & core::AKHdr32::FLAG_BLOB)) {
-            const blob::BlobRef ref = blob::decode_blob_ref(stored_val.data());
-            return impl_->blob_manager_->read(ref.blob_id);
+            // FLAG_BLOB: externalised large value — dereference via BlobManager.
+            if (impl_->blob_manager_ && (rec->flags() & core::AKHdr32::FLAG_BLOB)) {
+                const blob::BlobRef ref = blob::decode_blob_ref(stored_val.data());
+                return impl_->blob_manager_->read(ref.blob_id);
+            }
+
+            return std::vector<uint8_t>(stored_val.begin(), stored_val.end());
         }
 
-        // ── Inline value ──────────────────────────────────────────────────────
-        return std::vector<uint8_t>(stored_val.begin(), stored_val.end());
+        // ── SST fallthrough (Phase 5) ─────────────────────────────────────────
+        // MemTable miss: search SST files (L0 newest-first, then L1).
+        if (impl_->sst_manager_) {
+            const auto sst_rec = impl_->sst_manager_->get(key);
+            if (sst_rec) {
+                if (sst_rec->is_tombstone()) return std::nullopt;
+
+                const auto stored_val = sst_rec->value();
+
+                if (impl_->blob_manager_ && (sst_rec->flags() & core::AKHdr32::FLAG_BLOB)) {
+                    const blob::BlobRef ref = blob::decode_blob_ref(stored_val.data());
+                    return impl_->blob_manager_->read(ref.blob_id);
+                }
+
+                return std::vector<uint8_t>(stored_val.begin(), stored_val.end());
+            }
+        }
+
+        return std::nullopt;
     }
 
     // ============================================================================
@@ -528,12 +600,22 @@ namespace akkaradb::engine {
             impl_->repl_client_.reset();
         }
 
-        // 2. MemTable flush
+        // 2. MemTable flush → SST (all shards)
         impl_->memtable_->force_flush();
 
-        // 3. WAL sync
+        // 2b. SST manager: no background threads, just release readers.
+        //     Done after force_flush() so the flush callback has finished.
+        impl_->sst_manager_.reset();
+
+        // 3. WAL sync + optional truncation
         if (impl_->wal_writer_) {
             impl_->wal_writer_->force_sync();
+
+            // If SST was active, all MemTable data has been persisted to SST.
+            // Truncate the WAL so the next startup does not replay stale entries.
+            // (Manifest tracks live SSTs; data is recovered from SST on next open.)
+            if (impl_->opts_.manifest_enabled && !impl_->opts_.data_dir.empty()) { impl_->wal_writer_->truncate(); }
+
             impl_->wal_writer_->close();
             impl_->wal_writer_.reset();
         }
@@ -568,5 +650,104 @@ namespace akkaradb::engine {
             impl_->blob_manager_->close();
             impl_->blob_manager_.reset();
         }
+
+        // 8. Version log
+        if (impl_->version_log_) {
+            impl_->version_log_->close();
+            impl_->version_log_.reset();
+        }
+    }
+
+    // ============================================================================
+    // get_at
+    // ============================================================================
+
+    std::optional<std::vector<uint8_t>> AkkEngine::get_at(std::span<const uint8_t> key, uint64_t at_seq) const {
+        if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+        if (!impl_->version_log_) return std::nullopt;
+
+        const auto entry = impl_->version_log_->get_at(key, at_seq);
+        if (!entry) return std::nullopt;
+        if (entry->flags & core::AKHdr32::FLAG_TOMBSTONE) return std::nullopt;
+
+        // Resolve BLOB reference to actual value bytes
+        if (impl_->blob_manager_ && (entry->flags & core::AKHdr32::FLAG_BLOB)) {
+            const blob::BlobRef ref = blob::decode_blob_ref(entry->value.data());
+            return impl_->blob_manager_->read(ref.blob_id);
+        }
+
+        return entry->value;
+    }
+
+    // ============================================================================
+    // history
+    // ============================================================================
+
+    std::vector<VersionEntry> AkkEngine::history(std::span<const uint8_t> key) const {
+        if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+        if (!impl_->version_log_) return {};
+        return impl_->version_log_->history(key);
+    }
+
+    // ============================================================================
+    // rollback helpers
+    // ============================================================================
+
+    namespace {
+        // Resolves a VersionEntry's value, reading blobs if needed.
+        // Returns nullopt for tombstones / missing entries.
+        std::optional<std::vector<uint8_t>> resolve_ventry_value(const vlog::VersionEntry& entry, blob::BlobManager* blob_mgr) {
+            if (entry.flags & core::AKHdr32::FLAG_TOMBSTONE) return std::nullopt;
+            if (blob_mgr && (entry.flags & core::AKHdr32::FLAG_BLOB)) {
+                const blob::BlobRef ref = blob::decode_blob_ref(entry.value.data());
+                return blob_mgr->read(ref.blob_id);
+            }
+            return entry.value;
+        }
+    } // anonymous namespace (inner, extends the outer one declared above)
+
+    // Internal helper: restores a single key to its state at the previous
+    // version entry (or removes it if prev is nullopt / tombstone).
+    // Writes via the normal put/remove path so WAL + VersionLog are updated.
+    static void do_rollback_key(AkkEngine* eng, std::span<const uint8_t> key, const std::optional<vlog::VersionEntry>& prev, blob::BlobManager* blob_mgr) {
+        if (!prev.has_value() || (prev->flags & core::AKHdr32::FLAG_TOMBSTONE)) {
+            // Key did not exist (or was deleted) at target_seq → remove it now.
+            eng->remove(key);
+        }
+        else {
+            // Restore the previous value.
+            auto val = resolve_ventry_value(*prev, blob_mgr);
+            if (!val.has_value()) {
+                eng->remove(key); // blob lost → treat as deleted
+            }
+            else { eng->put(key, std::span<const uint8_t>(val->data(), val->size())); }
+        }
+    }
+
+    // ============================================================================
+    // rollback_to
+    // ============================================================================
+
+    void AkkEngine::rollback_to(uint64_t target_seq) {
+        if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+        if (!impl_->version_log_) throw std::runtime_error("AkkEngine: version_log_enabled must be true for rollback");
+
+        const auto targets = impl_->version_log_->collect_rollback_targets(target_seq);
+        for (const auto& [key_bytes, prev] : targets) {
+            const auto key = std::span<const uint8_t>(key_bytes.data(), key_bytes.size());
+            do_rollback_key(this, key, prev, impl_->blob_manager_.get());
+        }
+    }
+
+    // ============================================================================
+    // rollback_key
+    // ============================================================================
+
+    void AkkEngine::rollback_key(std::span<const uint8_t> key, uint64_t target_seq) {
+        if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+        if (!impl_->version_log_) throw std::runtime_error("AkkEngine: version_log_enabled must be true for rollback");
+
+        const auto prev = impl_->version_log_->get_at(key, target_seq);
+        do_rollback_key(this, key, prev, impl_->blob_manager_.get());
     }
 } // namespace akkaradb::engine

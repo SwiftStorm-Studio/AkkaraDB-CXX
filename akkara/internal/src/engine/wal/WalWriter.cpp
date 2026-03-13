@@ -35,13 +35,18 @@
 #include <vector>
 
 #ifdef _WIN32
-#  include <windows.h>
+#  include <windows.h>   // YieldProcessor(), HANDLE, ...
+#  include <intrin.h>    // _mm_pause()
+#  define AKK_CPU_PAUSE() _mm_pause()
+// C4324: structure padded due to alignas — intentional for cache-line isolation.
+#  pragma warning(disable: 4324)
 #else
 #  include <cerrno>
 #  include <cstring>
 #  include <fcntl.h>
 #  include <sys/stat.h>
 #  include <unistd.h>
+#  define AKK_CPU_PAUSE() __builtin_ia32_pause()
 #endif
 
 namespace akkaradb::wal {
@@ -222,7 +227,39 @@ namespace akkaradb::wal {
     };
 
     // ============================================================================
-    // Command - queue element
+    // SpinLock  (Plan 1)
+    //
+    // Replaces std::mutex for the enqueue critical section (body ≤ 15 ns).
+    // Cache-line aligned to prevent false sharing with adjacent ShardWriter fields.
+    //
+    // Design:
+    //   lock()   – optimistic test_and_set; spins with AKK_CPU_PAUSE() on contention.
+    //   unlock() – atomic clear (release).
+    // ============================================================================
+
+    struct alignas(64) SpinLock {
+        std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
+
+        void lock() noexcept {
+            for (;;) {
+                if (!flag_.test_and_set(std::memory_order_acquire)) return;
+                // Back-off: yields hyper-thread slot, reduces cache-line bouncing.
+                while (flag_.test(std::memory_order_relaxed))
+                    AKK_CPU_PAUSE();
+            }
+        }
+
+        void unlock() noexcept { flag_.clear(std::memory_order_release); }
+
+        struct Guard {
+            SpinLock& sl_;
+            explicit Guard(SpinLock& s) noexcept : sl_{s} { sl_.lock(); }
+            ~Guard() noexcept { sl_.unlock(); }
+        };
+    };
+
+    // ============================================================================
+    // Command - queue element (sync mode writes + control commands)
     // ============================================================================
 
     struct Command {
@@ -272,6 +309,23 @@ namespace akkaradb::wal {
     };
 
     // ============================================================================
+    // FastEntry  (Plan 2 - MPSC)
+    //
+    // Lightweight descriptor for fast-mode (no-waiter) write entries.
+    //   8 bytes vs Command's ~40 bytes (shared_ptr + type + padding).
+    //   No heap allocation: no shared_ptr<Waiter> construction/destruction.
+    //
+    // Fast-mode writes push a FastEntry into fast_queue_ instead of a Command
+    // into queue_. The flusher drains fast_queue_ as a single batch before
+    // processing sync-mode Commands.
+    // ============================================================================
+
+    struct FastEntry {
+        uint32_t offset; ///< Byte offset into the processing arena
+        uint32_t size; ///< Byte count of the entry
+    };
+
+    // ============================================================================
     // ShardWriter - one flusher thread per shard
     // ============================================================================
 
@@ -312,6 +366,8 @@ namespace akkaradb::wal {
                 // Pre-reserve entry arenas to avoid first-batch reallocation.
                 entry_buf_[0].reserve(group_n_ * 128);
                 entry_buf_[1].reserve(group_n_ * 128);
+                // Pre-reserve fast_queue_ for the typical batch size (Plan 2).
+                fast_queue_.reserve(group_n_);
                 flusher_ = std::thread([this] { flusher_loop(); });
             }
 
@@ -320,47 +376,70 @@ namespace akkaradb::wal {
             ShardWriter(const ShardWriter&) = delete;
             ShardWriter& operator=(const ShardWriter&) = delete;
 
+            // ── enqueue  ─────────────────────────────────────────────────────────
+            //
+            // Plan 1: spin_ (SpinLock) replaces queue_mutex_ (std::mutex).
+            //   Critical section: ~15 ns (memcpy + push_back).  Spinlock overhead:
+            //   ~2–5 ns vs ~50–80 ns for an uncontended std::mutex.
+            //
+            // Plan 2: fast_mode (waiter == null) pushes a FastEntry (8 B, no heap
+            //   alloc) instead of a Command (~40 B with shared_ptr).  The flusher
+            //   drains fast_queue_ as a dedicated batch before processing Commands.
+            // ─────────────────────────────────────────────────────────────────────
             void enqueue(const void* data, size_t size, std::shared_ptr<Waiter> waiter) {
                 bool was_empty;
                 {
-                    std::lock_guard lock{queue_mutex_};
-                    was_empty = queue_.empty();
-                    // Copy serialised entry into the active write arena — no heap alloc per put.
+                    SpinLock::Guard g{spin_};
+                    was_empty = queue_.empty() && fast_queue_.empty();
                     auto& buf = entry_buf_[write_idx_];
                     const size_t offset = write_pos_[write_idx_];
                     if (buf.size() < offset + size) buf.resize((offset + size) * 2);
                     std::memcpy(buf.data() + offset, data, size);
                     write_pos_[write_idx_] += size;
-                    queue_.push_back(Command::write(offset, size, std::move(waiter)));
+                    if (waiter) {
+                        // Sync mode: Command with waiter (offset/size for signaling).
+                        queue_.push_back(Command::write(offset, size, std::move(waiter)));
+                    }
+                    else {
+                        // Fast mode (Plan 2): lightweight FastEntry, no shared_ptr.
+                        fast_queue_.push_back(FastEntry{static_cast<uint32_t>(offset), static_cast<uint32_t>(size)});
+                    }
                 }
-                // Notify outside the lock: avoids the "notify-then-block" pattern
-                // where the flusher wakes up only to immediately contend on queue_mutex_.
-                if (was_empty) queue_cv_.notify_one();
+                // Notify outside the lock: avoids the "notify-then-block" pattern.
+                // Only notify when transitioning empty→non-empty; flusher is already
+                // awake while work is queued.
+                if (was_empty) {
+                    has_pending_.store(true, std::memory_order_release);
+                    sleep_cv_.notify_one();
+                }
             }
 
             void enqueue_force_sync(std::shared_ptr<Waiter> waiter) {
                 {
-                    std::lock_guard lock{queue_mutex_};
+                    SpinLock::Guard g{spin_};
                     queue_.push_back(Command::force_sync(std::move(waiter)));
                 }
-                queue_cv_.notify_one();
+                has_pending_.store(true, std::memory_order_release);
+                sleep_cv_.notify_one();
             }
 
             void enqueue_truncate(std::shared_ptr<Waiter> waiter) {
                 {
-                    std::lock_guard lock{queue_mutex_};
+                    SpinLock::Guard g{spin_};
                     queue_.push_back(Command::truncate(std::move(waiter)));
                 }
-                queue_cv_.notify_one();
+                has_pending_.store(true, std::memory_order_release);
+                sleep_cv_.notify_one();
             }
 
             void stop() {
                 if (stopped_.exchange(true, std::memory_order_acq_rel)) return;
                 {
-                    std::lock_guard lock{queue_mutex_};
+                    SpinLock::Guard g{spin_};
                     queue_.push_back(Command::shutdown());
                 }
-                queue_cv_.notify_all();
+                has_pending_.store(true, std::memory_order_release);
+                sleep_cv_.notify_all();
                 if (flusher_.joinable()) flusher_.join();
                 file_.close();
             }
@@ -399,35 +478,61 @@ namespace akkaradb::wal {
             }
 
             // ── Flusher loop ──────────────────────────────────────────────────────
+            //
+            // Separation of concerns:
+            //   sleep_mu_ / sleep_cv_  — sleeping/waking only; held for microseconds.
+            //   spin_                  — data structure access; held for nanoseconds.
+            //
+            // Flusher never holds both simultaneously, eliminating priority inversion
+            // between the short-lived spin_ and the longer-held sleep lock.
+            // ─────────────────────────────────────────────────────────────────────
 
             void flusher_loop() {
                 std::vector<Command> local;
+                std::vector<FastEntry> local_fast;
                 local.reserve(64);
+                local_fast.reserve(group_n_);
 
                 std::vector<Command> write_batch;
                 write_batch.reserve(group_n_);
 
                 try {
                     while (true) {
+                        // ── Sleep phase: hold sleep_mu_ only for the wait ─────────
                         {
-                            std::unique_lock lock{queue_mutex_};
-                            queue_cv_.wait_for(
-                                lock,
+                            std::unique_lock sleep_lock{sleep_mu_};
+                            sleep_cv_.wait_for(
+                                sleep_lock,
                                 std::chrono::microseconds(group_micros_),
-                                [this] { return !queue_.empty() || stopped_.load(std::memory_order_relaxed); }
+                                [this] { return has_pending_.load(std::memory_order_acquire) || stopped_.load(std::memory_order_relaxed); }
                             );
-                            if (queue_.empty()) {
+                        } // sleep_lock released; spin_ not held during sleep
+
+                        // ── Grab phase: hold spin_ briefly to swap queues/arena ───
+                        {
+                            SpinLock::Guard g{spin_};
+                            const bool both_empty = queue_.empty() && fast_queue_.empty();
+                            if (both_empty) {
+                                has_pending_.store(false, std::memory_order_relaxed);
                                 if (stopped_.load(std::memory_order_relaxed)) break;
                                 continue;
                             }
                             std::swap(queue_, local);
-                            // Atomically swap entry arenas with the queue.
-                            // put() threads will write to the other arena from here on.
+                            std::swap(fast_queue_, local_fast);
+                            // Atomically flip write arena; flusher owns proc_arena_idx_.
                             proc_arena_idx_ = write_idx_;
                             write_idx_ ^= 1;
                             write_pos_[write_idx_] = 0;
+                            has_pending_.store(false, std::memory_order_relaxed);
                         }
 
+                        // ── Process fast-mode entries as a single batch (Plan 2) ──
+                        if (!local_fast.empty()) {
+                            flush_fast_batch(local_fast);
+                            local_fast.clear();
+                        }
+
+                        // ── Process sync-mode Commands + control commands ──────────
                         bool do_shutdown = false;
                         size_t i = 0;
                         while (i < local.size() && !do_shutdown) {
@@ -464,6 +569,57 @@ namespace akkaradb::wal {
                 }
             }
 
+            // ── flush_fast_batch  (Plan 2) ────────────────────────────────────────
+            //
+            // Writes all fast-mode (no-waiter) entries as a single WAL batch.
+            // No waiters to signal on completion.
+            // ─────────────────────────────────────────────────────────────────────
+            void flush_fast_batch(const std::vector<FastEntry>& entries) {
+                if (entries.empty()) return;
+
+                if (needs_segment_header_) {
+                    write_segment_header();
+                    needs_segment_header_ = false;
+                    current_segment_bytes_ = WalSegmentHeader::SIZE;
+                }
+                if (max_segment_bytes_ > 0 && current_segment_bytes_ >= max_segment_bytes_) { rotate_segment(); }
+
+                size_t entries_total = 0;
+                for (const auto& e : entries) entries_total += e.size;
+
+                const size_t batch_total = WalBatchHeader::SIZE + entries_total;
+
+                core::OwnedBuffer batch_buf = (batch_total <= BATCH_ARENA_BLOCK_SIZE)
+                                                  ? batch_arena_->acquire(/*skip_zero_fill=*/true)
+                                                  : core::OwnedBuffer::allocate(batch_total, 4096);
+
+                core::BufferView view = batch_buf.view();
+
+                const uint64_t bseq = global_batch_seq_.fetch_add(1, std::memory_order_relaxed);
+                WalBatchHeader::write(view, bseq, static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(batch_total));
+
+                const auto& proc_arena = entry_buf_[proc_arena_idx_];
+                size_t offset = WalBatchHeader::SIZE;
+                for (const auto& e : entries) {
+                    std::memcpy(reinterpret_cast<uint8_t*>(view.data()) + offset, proc_arena.data() + e.offset, e.size);
+                    offset += e.size;
+                }
+
+                WalBatchHeader::finalize_checksum(view, batch_total);
+
+                std::exception_ptr write_ex;
+                try {
+                    file_.write(view.data(), batch_total);
+                    if (!nosync_mode_) file_.fdatasync();
+                    current_segment_bytes_ += batch_total;
+                }
+                catch (...) { write_ex = std::current_exception(); }
+
+                if (batch_total <= BATCH_ARENA_BLOCK_SIZE) { batch_arena_->release(std::move(batch_buf)); }
+                if (write_ex) std::rethrow_exception(write_ex);
+            }
+
+            // ── flush_write_batch  (sync mode + mixed) ────────────────────────────
             void flush_write_batch(std::vector<Command>& batch) {
                 if (batch.empty()) return;
 
@@ -580,9 +736,10 @@ namespace akkaradb::wal {
             }
 
             void drain_queue_on_error(const std::exception_ptr& ep) {
-                std::lock_guard lock{queue_mutex_};
+                SpinLock::Guard g{spin_};
                 for (auto& cmd : queue_) { if (cmd.waiter) cmd.waiter->signal_error(ep); }
                 queue_.clear();
+                fast_queue_.clear();
             }
 
             // ── Members ──────────────────────────────────────────────────────────
@@ -600,9 +757,26 @@ namespace akkaradb::wal {
             FileHandle file_;
             std::unique_ptr<core::PerThreadArena> batch_arena_;
 
-            std::vector<Command> queue_;
-            std::mutex queue_mutex_;
-            std::condition_variable queue_cv_;
+            // ── Synchronization (Plan 1 + Plan 2) ────────────────────────────────
+            //
+            //  spin_       – SpinLock; protects queue_, fast_queue_, and the arena
+            //                write-head (write_idx_, write_pos_).  Critical section
+            //                is ≤ 15 ns; spinlock overhead ~2–5 ns vs ~50–80 ns for
+            //                std::mutex (no syscall, no kernel transition).
+            //
+            //  sleep_mu_   – std::mutex used ONLY by the flusher's condition_variable
+            //                wait.  Never held concurrently with spin_.
+            //
+            //  sleep_cv_   – Wakes the flusher when new work arrives.
+            //
+            //  has_pending_ – Atomic flag checked by the CV predicate.  Set by writers
+            //                 (outside spin_) when the queue transitions empty→non-empty.
+            //                 Cleared by the flusher after grabbing the queues.
+            // ─────────────────────────────────────────────────────────────────────
+            SpinLock spin_;
+            std::mutex sleep_mu_;
+            std::condition_variable sleep_cv_;
+            std::atomic<bool> has_pending_{false};
 
             std::thread flusher_;
             std::atomic<bool> stopped_;
@@ -610,15 +784,26 @@ namespace akkaradb::wal {
             bool needs_segment_header_;
             uint64_t current_segment_bytes_; ///< Bytes written to the active segment so far
 
+            // ── Command queues ────────────────────────────────────────────────────
+            //
+            //  fast_queue_  (Plan 2) – No-waiter WRITE entries.  FastEntry = 8 B;
+            //                 no shared_ptr construction/destruction.
+            //
+            //  queue_       – Sync-mode WRITE Commands (with waiters) + control
+            //                 commands (FORCE_SYNC, TRUNCATE, SHUTDOWN).
+            // ─────────────────────────────────────────────────────────────────────
+            std::vector<FastEntry> fast_queue_;
+            std::vector<Command> queue_;
+
             // ── Double-buffered entry arenas ─────────────────────────────────────
             // Eliminates per-entry heap allocation.  put() threads copy serialised
-            // WAL entries into entry_buf_[write_idx_] under queue_mutex_.  When the
+            // WAL entries into entry_buf_[write_idx_] under spin_.  When the
             // flusher swaps the queue it atomically flips write_idx_ and resets the
             // new write arena's position to 0.  The flusher then reads exclusively
             // from entry_buf_[proc_arena_idx_] without holding any lock.
             std::vector<uint8_t> entry_buf_[2];
-            int write_idx_{0}; ///< Arena index currently used by put() (under queue_mutex_)
-            size_t write_pos_[2]{0, 0}; ///< Write-head position for each arena (under queue_mutex_)
+            int write_idx_{0}; ///< Arena index currently used by put() (under spin_)
+            size_t write_pos_[2]{0, 0}; ///< Write-head position for each arena (under spin_)
             int proc_arena_idx_{0}; ///< Arena the flusher is consuming (flusher thread only)
     };
 

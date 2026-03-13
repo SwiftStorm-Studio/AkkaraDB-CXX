@@ -422,7 +422,7 @@ namespace akkaradb::engine::memtable {
     class MemTable::Impl {
         public:
             explicit Impl(const Options& opts)
-                : shard_count_{resolve_shard_count(opts.shard_count)}, threshold_bytes_per_shard_{opts.threshold_bytes_per_shard}, seq_gen_{0} {
+                : shard_count_{resolve_shard_count(opts.shard_count)}, threshold_bytes_per_shard_{opts.threshold_bytes_per_shard}, seq_gen_{1} {
                 shards_.reserve(shard_count_);
                 flushers_.resize(shard_count_); // resize (not reserve): make_flusher uses [i] subscript
 

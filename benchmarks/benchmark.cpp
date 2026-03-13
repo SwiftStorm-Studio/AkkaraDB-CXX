@@ -490,7 +490,7 @@ static void bench_throughput() {
         opts.data_dir   = dir;
         opts.wal_enabled = true;
         opts.wal.sync_mode = SyncMode::Async;
-        opts.wal.shard_count = 8; // single-threaded benchmark: 1 shard minimises fdatasync interrupt overhead
+        opts.wal.shard_count = 1; // single-threaded benchmark: 1 shard minimises fdatasync interrupt overhead
         opts.wal.group_n      = 1024;
         opts.wal.group_micros = 500;
         auto eng = AkkEngine::open(opts);
@@ -520,6 +520,526 @@ static void bench_throughput() {
 }
 
 // ============================================================================
+// 9. VersionLog: basic history + get_at
+// ============================================================================
+
+static void test_vlog_basic() {
+    section("VersionLog: history and get_at");
+
+    auto dir = make_temp_dir("vlog_basic");
+
+    AkkEngineOptions opts;
+    opts.data_dir = dir;
+    opts.wal.sync_mode = SyncMode::Off;
+    opts.version_log_enabled = true;
+
+    auto eng = AkkEngine::open(opts);
+
+    // Write three versions of the same key
+    eng->put(as_span("fruit"), as_span("apple"));
+    eng->put(as_span("fruit"), as_span("banana"));
+    eng->put(as_span("fruit"), as_span("cherry"));
+
+    // history() must return 3 entries in ascending seq order
+    auto hist = eng->history(as_span("fruit"));
+    CHECK_EQ(static_cast<int>(hist.size()), 3);
+    if (hist.size() == 3) {
+        CHECK(to_str(hist[0].value) == "apple");
+        CHECK(to_str(hist[1].value) == "banana");
+        CHECK(to_str(hist[2].value) == "cherry");
+        CHECK(hist[0].seq < hist[1].seq);
+        CHECK(hist[1].seq < hist[2].seq);
+    }
+
+    // get_at: value at the seq of the first write
+    if (hist.size() >= 2) {
+        const uint64_t seq_after_first = hist[0].seq;
+        auto v = eng->get_at(as_span("fruit"), seq_after_first);
+        CHECK(v.has_value());
+        if (v)
+            CHECK(to_str(*v) == "apple");
+    }
+
+    // get_at: value at seq of second write
+    if (hist.size() >= 3) {
+        const uint64_t seq_after_second = hist[1].seq;
+        auto v = eng->get_at(as_span("fruit"), seq_after_second);
+        CHECK(v.has_value());
+        if (v)
+            CHECK(to_str(*v) == "banana");
+    }
+
+    // history() of unknown key → empty
+    auto empty = eng->history(as_span("no_such_key"));
+    CHECK(empty.empty());
+
+    // get_at before any write → nullopt
+    auto none = eng->get_at(as_span("fruit"), 0);
+    CHECK(!none.has_value());
+
+    eng->close();
+    std::printf("  ok\n");
+}
+
+// ============================================================================
+// 10. VersionLog: rollback_key
+// ============================================================================
+
+static void test_vlog_rollback_key() {
+    section("VersionLog: rollback_key restores previous value");
+
+    auto dir = make_temp_dir("vlog_rollback_key");
+
+    AkkEngineOptions opts;
+    opts.data_dir = dir;
+    opts.wal.sync_mode = SyncMode::Off;
+    opts.version_log_enabled = true;
+
+    auto eng = AkkEngine::open(opts);
+
+    eng->put(as_span("k"), as_span("v1"));
+    auto hist_after_v1 = eng->history(as_span("k"));
+    CHECK_EQ(static_cast<int>(hist_after_v1.size()), 1);
+    const uint64_t seq_v1 = hist_after_v1.empty() ? 0 : hist_after_v1[0].seq;
+
+    eng->put(as_span("k"), as_span("v2"));
+
+    // Current value is v2
+    auto cur = eng->get(as_span("k"));
+    CHECK(cur.has_value());
+    if (cur)
+        CHECK(to_str(*cur) == "v2");
+
+    // Rollback to the seq of v1 → should restore "v1"
+    eng->rollback_key(as_span("k"), seq_v1);
+
+    auto after = eng->get(as_span("k"));
+    CHECK(after.has_value());
+    if (after)
+        CHECK(to_str(*after) == "v1");
+
+    eng->close();
+    std::printf("  ok\n");
+}
+
+// ============================================================================
+// 11. VersionLog: rollback_to (full-DB rollback)
+// ============================================================================
+
+static void test_vlog_rollback_to() {
+    section("VersionLog: rollback_to restores entire DB");
+
+    auto dir = make_temp_dir("vlog_rollback_to");
+
+    AkkEngineOptions opts;
+    opts.data_dir = dir;
+    opts.wal.sync_mode = SyncMode::Off;
+    opts.version_log_enabled = true;
+
+    auto eng = AkkEngine::open(opts);
+
+    // Baseline: write two keys
+    eng->put(as_span("a"), as_span("a1"));
+    eng->put(as_span("b"), as_span("b1"));
+
+    // Record a snapshot point via seq of the last write in the baseline
+    auto hist_b = eng->history(as_span("b"));
+    const uint64_t snap_seq = hist_b.empty() ? 0 : hist_b.back().seq;
+
+    // More writes after the snapshot
+    eng->put(as_span("a"), as_span("a2")); // overwrite
+    eng->put(as_span("c"), as_span("c1")); // new key
+    eng->remove(as_span("b")); // delete existing key
+
+    // Verify state before rollback
+    CHECK(to_str(*eng->get(as_span("a"))) == "a2");
+    CHECK(!eng->get(as_span("b")).has_value());
+    CHECK(eng->get(as_span("c")).has_value());
+
+    // Full rollback to snap_seq
+    eng->rollback_to(snap_seq);
+
+    // "a" should be restored to "a1"
+    auto va = eng->get(as_span("a"));
+    CHECK(va.has_value());
+    if (va)
+        CHECK(to_str(*va) == "a1");
+
+    // "b" should be restored (was alive at snap_seq)
+    auto vb = eng->get(as_span("b"));
+    CHECK(vb.has_value());
+    if (vb)
+        CHECK(to_str(*vb) == "b1");
+
+    // "c" should be removed (did not exist at snap_seq)
+    CHECK(!eng->get(as_span("c")).has_value());
+
+    eng->close();
+    std::printf("  ok\n");
+}
+
+// ============================================================================
+// 12. VersionLog: persistence across restart
+// ============================================================================
+
+static void test_vlog_persist() {
+    section("VersionLog: history survives close + reopen");
+
+    auto dir = make_temp_dir("vlog_persist");
+
+    // First session: write some data
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+        opts.version_log_enabled = true;
+
+        auto eng = AkkEngine::open(opts);
+        eng->put(as_span("p"), as_span("p1"));
+        eng->put(as_span("p"), as_span("p2"));
+        eng->close();
+    }
+
+    // Second session: history must still be available
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+        opts.version_log_enabled = true;
+
+        auto eng = AkkEngine::open(opts);
+        auto hist = eng->history(as_span("p"));
+        CHECK_EQ(static_cast<int>(hist.size()), 2);
+        if (hist.size() == 2) {
+            CHECK(to_str(hist[0].value) == "p1");
+            CHECK(to_str(hist[1].value) == "p2");
+        }
+        eng->close();
+    }
+
+    std::printf("  ok\n");
+}
+
+// ============================================================================
+// 13. SST: basic write → flush → close → reopen → read from SST
+// ============================================================================
+
+static void test_sst_basic() {
+    section("SST: write / flush / reopen reads from SST");
+
+    auto dir = make_temp_dir("sst_basic");
+    constexpr int N = 1000;
+
+    // ── Session 1: write N keys, flush, close ──────────────────────────────
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+
+        auto eng = AkkEngine::open(opts);
+        for (int i = 0; i < N; ++i) {
+            auto key = std::format("skey{:06d}", i);
+            auto val = std::format("sval{:06d}", i);
+            eng->put(as_span(key), as_span(val));
+        }
+        eng->force_flush(); // MemTable → SST
+        eng->close(); // WAL truncated after flush
+    }
+
+    // ── Verify SST directory has .aksst files ──────────────────────────────
+    bool has_sst = false;
+    if (fs::exists(dir / "sst")) {
+        for (const auto& entry : fs::directory_iterator(dir / "sst")) {
+            if (entry.path().extension() == ".aksst") {
+                has_sst = true;
+                break;
+            }
+        }
+    }
+    CHECK(has_sst);
+
+    // ── Session 2: reopen; WAL was truncated so data must come from SST ────
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+
+        auto eng = AkkEngine::open(opts);
+
+        int found = 0;
+        for (int i = 0; i < N; ++i) {
+            auto key = std::format("skey{:06d}", i);
+            auto val = std::format("sval{:06d}", i);
+            auto r = eng->get(as_span(key));
+            if (r && to_str(*r) == val) ++found;
+        }
+        CHECK_EQ(found, N);
+
+        eng->close();
+    }
+
+    std::printf("  ok\n");
+}
+
+// ============================================================================
+// 14. SST: tombstone — deleted key absent after flush + reopen
+// ============================================================================
+
+static void test_sst_tombstone() {
+    section("SST: deleted key absent after flush + reopen");
+
+    auto dir = make_temp_dir("sst_tombstone");
+
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+
+        auto eng = AkkEngine::open(opts);
+
+        // Write keys, then delete some.
+        for (int i = 0; i < 20; ++i) {
+            auto key = std::format("tk{:03d}", i);
+            auto val = std::format("tv{:03d}", i);
+            eng->put(as_span(key), as_span(val));
+        }
+        // Delete every other key.
+        for (int i = 0; i < 20; i += 2) {
+            auto key = std::format("tk{:03d}", i);
+            eng->remove(as_span(key));
+        }
+
+        eng->force_flush();
+        eng->close();
+    }
+
+    // Session 2: verify presence / absence.
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+
+        auto eng = AkkEngine::open(opts);
+
+        int alive = 0, dead = 0;
+        for (int i = 0; i < 20; ++i) {
+            auto key = std::format("tk{:03d}", i);
+            auto r = eng->get(as_span(key));
+            if (i % 2 == 0) {
+                // deleted keys
+                if (!r.has_value()) ++dead;
+            }
+            else {
+                // live keys
+                auto val = std::format("tv{:03d}", i);
+                if (r && to_str(*r) == val) ++alive;
+            }
+        }
+        CHECK_EQ(alive, 10); // 10 odd-indexed keys alive
+        CHECK_EQ(dead, 10); // 10 even-indexed keys deleted
+
+        eng->close();
+    }
+
+    std::printf("  ok\n");
+}
+
+// ============================================================================
+// 15. SST: compaction — L0 files merged into L1, all data accessible
+// ============================================================================
+
+static void test_sst_compaction() {
+    section("SST: L0 → L1 compaction, all data survives");
+
+    auto dir = make_temp_dir("sst_compaction");
+    constexpr int BATCHES = 4;
+    constexpr int PER_BATCH = 25;
+
+    // ── Session 1: write 4 batches, each followed by force_flush ──────────
+    // With shard_count=2 and max_l0_sst_files=2 each force_flush produces
+    // 2 L0 files, immediately triggering compaction (2 >= 2).
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+        opts.max_l0_sst_files = 2; // compact every 2 L0 files
+        opts.memtable.shard_count = 2; // exactly 2 shards → 2 L0 per flush
+
+        auto eng = AkkEngine::open(opts);
+
+        for (int b = 0; b < BATCHES; ++b) {
+            for (int i = 0; i < PER_BATCH; ++i) {
+                auto key = std::format("ck{:01d}{:03d}", b, i);
+                auto val = std::format("cv{:01d}{:03d}", b, i);
+                eng->put(as_span(key), as_span(val));
+            }
+            eng->force_flush(); // creates 2 L0 files → compaction
+        }
+
+        eng->close();
+    }
+
+    // ── Verify L1 files exist ──────────────────────────────────────────────
+    bool has_l1 = false;
+    if (fs::exists(dir / "sst")) {
+        for (const auto& entry : fs::directory_iterator(dir / "sst")) {
+            if (entry.path().filename().string().starts_with("L1_")) {
+                has_l1 = true;
+                break;
+            }
+        }
+    }
+    CHECK(has_l1);
+
+    // ── Session 2: reopen, all keys accessible ────────────────────────────
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+        opts.max_l0_sst_files = 2;
+        opts.memtable.shard_count = 2;
+
+        auto eng = AkkEngine::open(opts);
+
+        int found = 0;
+        for (int b = 0; b < BATCHES; ++b) {
+            for (int i = 0; i < PER_BATCH; ++i) {
+                auto key = std::format("ck{:01d}{:03d}", b, i);
+                auto val = std::format("cv{:01d}{:03d}", b, i);
+                auto r = eng->get(as_span(key));
+                if (r && to_str(*r) == val) ++found;
+            }
+        }
+        CHECK_EQ(found, BATCHES * PER_BATCH);
+
+        eng->close();
+    }
+
+    std::printf("  ok\n");
+}
+
+// ============================================================================
+// 16. SST: overwrite deduplication — only latest value survives compaction
+// ============================================================================
+
+static void test_sst_overwrite() {
+    section("SST: overwrite deduplication across compaction");
+
+    auto dir = make_temp_dir("sst_overwrite");
+
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+        opts.max_l0_sst_files = 2;
+        opts.memtable.shard_count = 2;
+
+        auto eng = AkkEngine::open(opts);
+
+        // Write v1, flush → SST
+        for (int i = 0; i < 10; ++i) {
+            auto key = std::format("ok{:03d}", i);
+            eng->put(as_span(key), as_span("v1"));
+        }
+        eng->force_flush();
+
+        // Write v2 (overwrites), flush → new SST + compaction
+        for (int i = 0; i < 10; ++i) {
+            auto key = std::format("ok{:03d}", i);
+            eng->put(as_span(key), as_span("v2"));
+        }
+        eng->force_flush();
+
+        eng->close();
+    }
+
+    // All keys must return "v2" (the newer version wins).
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+        opts.max_l0_sst_files = 2;
+        opts.memtable.shard_count = 2;
+
+        auto eng = AkkEngine::open(opts);
+
+        int correct = 0;
+        for (int i = 0; i < 10; ++i) {
+            auto key = std::format("ok{:03d}", i);
+            auto r = eng->get(as_span(key));
+            if (r && to_str(*r) == "v2") ++correct;
+        }
+        CHECK_EQ(correct, 10);
+
+        eng->close();
+    }
+
+    std::printf("  ok\n");
+}
+
+// ============================================================================
+// 17. SST: WAL truncation — WAL files are empty after close()
+// ============================================================================
+
+static void test_wal_truncation() {
+    section("SST: WAL files truncated after close()");
+
+    auto dir = make_temp_dir("sst_wal_trunc");
+
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+
+        auto eng = AkkEngine::open(opts);
+        for (int i = 0; i < 200; ++i) {
+            auto key = std::format("wk{:04d}", i);
+            eng->put(as_span(key), as_span("wval"));
+        }
+        eng->force_flush();
+        eng->close(); // close() truncates all WAL shard files
+    }
+
+    // All WAL shard files must be very small (truncated to 0 or header-only).
+    bool wal_truncated = true;
+    const auto wal_dir = dir / "wal";
+    if (fs::exists(wal_dir)) {
+        for (const auto& entry : fs::directory_iterator(wal_dir)) {
+            if (entry.path().extension() == ".akwal") {
+                // After truncation, file should be 0 bytes (no data, no header).
+                // Allow up to 64 bytes to account for any implementation variation.
+                if (entry.file_size() > 64) {
+                    wal_truncated = false;
+                    break;
+                }
+            }
+        }
+    }
+    CHECK(wal_truncated);
+
+    // Reopen: with truncated WAL, all data must still be accessible via SST.
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+
+        auto eng = AkkEngine::open(opts);
+
+        int found = 0;
+        for (int i = 0; i < 200; ++i) {
+            auto key = std::format("wk{:04d}", i);
+            auto r = eng->get(as_span(key));
+            if (r && to_str(*r) == "wval") ++found;
+        }
+        CHECK_EQ(found, 200);
+
+        eng->close();
+    }
+
+    std::printf("  ok\n");
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -536,6 +1056,17 @@ int main() {
     test_blob_roundtrip();
     test_blob_no_false_positive();
     test_idempotent_close();
+    // ── VersionLog tests ─────────────────────────────────────────────────────
+    test_vlog_basic();
+    test_vlog_rollback_key();
+    test_vlog_rollback_to();
+    test_vlog_persist();
+    // ── SST tests (Phase 5) ───────────────────────────────────────────────────
+    test_sst_basic();
+    test_sst_tombstone();
+    test_sst_compaction();
+    test_sst_overwrite();
+    test_wal_truncation();
     // ── Throughput ───────────────────────────────────────────────────────────
     bench_throughput();
 

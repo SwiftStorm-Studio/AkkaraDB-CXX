@@ -79,6 +79,7 @@ target_sources(akkaradb PRIVATE
 
         # Engine
         ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/vlog/VersionLog.hpp
 
         # Engine - MemTable
         ${INTERNAL_INCLUDE_DIR}/engine/memtable/BPTree.hpp
@@ -90,6 +91,12 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalWriter.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalReader.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/wal/WalRecovery.hpp
+
+        # Engine - SST
+        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTFormat.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTWriter.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTReader.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTManager.hpp
 )
 
 # Internal implementation (internal/src)
@@ -134,6 +141,14 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/engine/cluster/ReplFraming.cpp
         ${INTERNAL_SRC_DIR}/engine/cluster/ReplicationServer.cpp
         ${INTERNAL_SRC_DIR}/engine/cluster/ReplicationClient.cpp
+
+        # Engine - Version Log
+        ${INTERNAL_SRC_DIR}/engine/vlog/VersionLog.cpp
+
+        # Engine - SST
+        ${INTERNAL_SRC_DIR}/engine/sstable/SSTWriter.cpp
+        ${INTERNAL_SRC_DIR}/engine/sstable/SSTReader.cpp
+        ${INTERNAL_SRC_DIR}/engine/sstable/SSTManager.cpp
 )
 
 # Windows: link Winsock2 for ReplicationServer / ReplicationClient TCP sockets

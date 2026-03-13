@@ -133,7 +133,7 @@ namespace akkaradb::engine::cluster {
         }
 
         ClusterConfig cfg{std::move(nodes), mode, repl_factor};
-        if (flags & ClusterConfig::FLAG_WEB_CONFIG_ENABLED) cfg.set_web_config_enabled(true);
+        (void)flags; // reserved for future cluster-level flags
         return cfg;
     }
 

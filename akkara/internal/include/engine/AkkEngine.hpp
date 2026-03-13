@@ -20,16 +20,21 @@
 #pragma once
 
 #include "engine/memtable/MemTable.hpp"
+#include "engine/vlog/VersionLog.hpp"
 #include "engine/wal/WalWriter.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace akkaradb::engine {
     // SyncMode lives in the wal namespace; re-export for user convenience.
     using wal::SyncMode;
+
+    // VersionEntry re-exported from vlog namespace for convenience.
+    using VersionEntry = vlog::VersionEntry;
 
     // ============================================================================
     // AkkEngineOptions
@@ -168,6 +173,66 @@ namespace akkaradb::engine {
          * NOTE: Not yet enforced — reserved for Phase 5 backpressure implementation.
          */
         size_t max_memory_bytes = 0;
+
+        // ── Version Log ──────────────────────────────────────────────────────
+
+        /**
+         * When true, every put() and remove() is also recorded in a per-key
+         * version log (.akvlog file).  This enables:
+         *   - get_at(key, seq)   — point-in-time reads
+         *   - history(key)       — full write history with node attribution
+         *   - rollback_to(seq)   — restore the entire DB to a past state
+         *   - rollback_key(...)  — restore a single key to a past state
+         *
+         * The log is persisted to:
+         *   data_dir / "history.akvlog"   (auto-derived from data_dir)
+         *
+         * Default: false  (no overhead when version history is not needed)
+         */
+        bool version_log_enabled = false;
+
+        // ── SST ──────────────────────────────────────────────────────────────
+
+        /**
+         * Maximum number of L0 SST files before triggering L0 → L1 compaction.
+         * Only meaningful when wal_enabled and manifest_enabled are both true
+         * and data_dir is non-empty.
+         * Default: 4
+         */
+        size_t max_l0_sst_files = 4;
+
+        /**
+         * Bloom filter bits per key for SST files.
+         * Higher values reduce false-positive rates at the cost of more memory.
+         * 0 = disable Bloom filter.
+         * Default: 10 (≈1% false-positive rate)
+         */
+        size_t sst_bloom_bits_per_key = 10;
+
+        // ── Integrated Management GUI ─────────────────────────────────────
+
+        /**
+         * When true, AkkEngine starts an embedded HTTP management server
+         * that serves a browser-based administration interface.
+         *
+         * Available in all modes (standalone, cluster Primary, cluster Replica).
+         * The server listens on web_config_port and provides:
+         *   - Key-value browse / search
+         *   - Version history viewer (requires version_log_enabled)
+         *   - Cluster topology view (when cluster is active)
+         *   - Live metrics (ops/s, memory usage, WAL lag)
+         *
+         * Default: false
+         * NOTE: HTTP server not yet implemented — reserved for a future phase.
+         */
+        bool web_config_enabled = false;
+
+        /**
+         * TCP port for the embedded management HTTP server.
+         * Only used when web_config_enabled == true.
+         * Default: 8080
+         */
+        uint16_t web_config_port = 8080;
     };
 
     // ============================================================================
@@ -236,6 +301,48 @@ namespace akkaradb::engine {
              * @return Value bytes, or std::nullopt if the key is not found or is deleted.
              */
             [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::span<const uint8_t> key) const;
+
+            // ── Version history ───────────────────────────────────────────────
+
+            /**
+             * Returns the value that key held at the given sequence number, i.e.
+             * the latest write with seq ≤ at_seq.
+             *
+             * Requires version_log_enabled == true.
+             * If FLAG_BLOB was set at that seq, the blob is read from BlobManager.
+             *
+             * @return Value bytes, or nullopt if the key was not found / was deleted.
+             */
+            [[nodiscard]] std::optional<std::vector<uint8_t>> get_at(std::span<const uint8_t> key, uint64_t at_seq) const;
+
+            /**
+             * Returns the full write history for a key, sorted ascending by seq.
+             * Each entry includes: seq, source_node_id, timestamp_ns, flags, value.
+             *
+             * Requires version_log_enabled == true.
+             * Returns empty vector when version logging is disabled or the key
+             * was never written.
+             */
+            [[nodiscard]] std::vector<VersionEntry> history(std::span<const uint8_t> key) const;
+
+            /**
+             * Rolls back the entire database to the state it was in at target_seq.
+             *
+             * All keys that were written or deleted after target_seq are restored
+             * to their value at target_seq (or removed if they did not exist then).
+             * The rollback writes are themselves logged as new WAL + VersionLog
+             * entries (attributed to source_node_id = ROLLBACK_NODE).
+             *
+             * Requires version_log_enabled == true.
+             */
+            void rollback_to(uint64_t target_seq);
+
+            /**
+             * Rolls back a single key to the state it was in at target_seq.
+             *
+             * Requires version_log_enabled == true.
+             */
+            void rollback_key(std::span<const uint8_t> key, uint64_t target_seq);
 
             // ── Durability ────────────────────────────────────────────────────
 
