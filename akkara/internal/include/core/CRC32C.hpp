@@ -50,5 +50,25 @@ namespace akkaradb::core {
              * @return CRC32C checksum
              */
             [[nodiscard]] static uint32_t compute(const void* data, size_t size) noexcept { return compute(static_cast<const uint8_t*>(data), size); }
+
+            /**
+             * Continues a CRC32C computation across multiple non-contiguous buffers.
+             * Equivalent to compute() over the concatenation of all parts.
+             *
+             * Usage:
+             *   uint32_t crc = CRC32C::compute(part1, len1);
+             *   crc = CRC32C::append(part2, len2, crc);
+             *   crc = CRC32C::append(part3, len3, crc);
+             *
+             * @param data     Pointer to next chunk
+             * @param size     Size of next chunk (may be 0 — no-op)
+             * @param prev_crc Result of the previous compute() or append() call
+             * @return         New running CRC32C
+             */
+            [[nodiscard]] static uint32_t append(const uint8_t* data, size_t size, uint32_t prev_crc) noexcept;
+
+            [[nodiscard]] static uint32_t append(const void* data, size_t size, uint32_t prev_crc) noexcept {
+                return append(static_cast<const uint8_t*>(data), size, prev_crc);
+            }
     };
 } // namespace akkaradb::core

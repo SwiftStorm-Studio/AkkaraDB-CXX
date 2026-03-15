@@ -114,6 +114,14 @@ namespace akkaradb::engine::blob {
          */
         [[nodiscard]] std::vector<uint8_t> read(uint64_t blob_id) const;
 
+        /**
+         * Reads, verifies header CRC, and then verifies the content CRC32C
+         * against expected_checksum (stored in BlobRef by the writer).
+         * Throws std::runtime_error on I/O error, header corruption, or
+         * content CRC mismatch.
+         */
+        [[nodiscard]] std::vector<uint8_t> read(uint64_t blob_id, uint32_t expected_checksum) const;
+
         // ── delete ───────────────────────────────────────────────────────────
 
         /**

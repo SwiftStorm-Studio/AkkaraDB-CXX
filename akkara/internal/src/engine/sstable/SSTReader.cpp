@@ -123,6 +123,16 @@ namespace akkaradb::engine::sst {
             std::vector<uint8_t> val(hdr.v_len);
             if (!fread_exact(file, val.data(), hdr.v_len)) return;
 
+            // Verify per-record CRC32C trailer
+            uint32_t stored_crc = 0;
+            if (!fread_exact(file, &stored_crc, sizeof(stored_crc))) return;
+            {
+                uint32_t expected = core::CRC32C::compute(&hdr, sizeof(hdr));
+                expected = core::CRC32C::append(key.data(), key.size(), expected);
+                expected = core::CRC32C::append(val.data(), val.size(), expected);
+                if (stored_crc != expected) return; // CRC mismatch: stop iteration
+            }
+
             pending = core::MemRecord::create(
                 std::span<const uint8_t>(key.data(), key.size()),
                 std::span<const uint8_t>(val.data(), val.size()),
@@ -371,9 +381,20 @@ namespace akkaradb::engine::sst {
                                    target_key.data(), target_key.size());
 
             if (c == 0) {
-                // Key match — read value and return
+                // Key match — read value, verify CRC, and return
                 std::vector<uint8_t> val(hdr.v_len);
                 if (!fread_exact(f, val.data(), hdr.v_len)) break;
+
+                // Verify per-record CRC32C trailer
+                uint32_t stored_crc = 0;
+                if (!fread_exact(f, &stored_crc, sizeof(stored_crc))) break;
+                {
+                    uint32_t expected = core::CRC32C::compute(&hdr, sizeof(hdr));
+                    expected = core::CRC32C::append(key.data(), key.size(), expected);
+                    expected = core::CRC32C::append(val.data(), val.size(), expected);
+                    if (stored_crc != expected) break; // CRC mismatch: treat as not found
+                }
+
                 result = core::MemRecord::create(
                     std::span<const uint8_t>(key.data(), key.size()),
                     std::span<const uint8_t>(val.data(), val.size()),
@@ -385,8 +406,8 @@ namespace akkaradb::engine::sst {
                 break;
             }
 
-            // key < target: skip value bytes and continue
-            if (hdr.v_len > 0 && sst_fseek(f, static_cast<int64_t>(hdr.v_len), SEEK_CUR) != 0) break;
+// key < target: skip value bytes + CRC trailer and continue
+if (sst_fseek(f, static_cast<int64_t>(hdr.v_len) + static_cast<int64_t>(RECORD_CRC_SIZE), SEEK_CUR) != 0) break;
         }
 
         fclose(f);
@@ -489,8 +510,8 @@ namespace akkaradb::engine::sst {
                               SEEK_CUR);
                     break;
                 }
-                // key < start_key: skip value and continue
-                if (hdr.v_len > 0) sst_fseek(impl->file, static_cast<int64_t>(hdr.v_len), SEEK_CUR);
+// key < start_key: skip value + CRC trailer and continue
+sst_fseek(impl->file, static_cast<int64_t>(hdr.v_len) + static_cast<int64_t>(RECORD_CRC_SIZE), SEEK_CUR);
             }
         }
 

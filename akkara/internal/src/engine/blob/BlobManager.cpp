@@ -373,6 +373,25 @@ namespace akkaradb::engine::blob {
             raw.begin() + static_cast<ptrdiff_t>(BlobFileHeader::SIZE + hdr.total_size));
     }
 
+    std::vector<uint8_t> BlobManager::read(uint64_t blob_id, uint32_t expected_checksum) const {
+        auto content = read(blob_id);
+        const uint32_t actual = core::CRC32C::compute(content.data(), content.size());
+        if (actual != expected_checksum) {
+            throw std::runtime_error(
+                "BlobManager: content CRC32C mismatch for blob " + std::to_string(blob_id) + " (expected=0x" + [](uint32_t v) {
+                    char buf[9];
+                    std::snprintf(buf, sizeof(buf), "%08x", v);
+                    return std::string(buf);
+                }(expected_checksum) + " actual=0x" + [](uint32_t v) {
+                    char buf[9];
+                    std::snprintf(buf, sizeof(buf), "%08x", v);
+                    return std::string(buf);
+                }(actual) + ")"
+            );
+        }
+        return content;
+    }
+
     // ============================================================================
     // schedule_delete
     // ============================================================================

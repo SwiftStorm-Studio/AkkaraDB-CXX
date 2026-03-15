@@ -66,6 +66,7 @@ target_sources(akkaradb PRIVATE
 target_sources(akkaradb PRIVATE
         # Core - Buffer
         ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferView.hpp
+        ${INTERNAL_INCLUDE_DIR}/core/buffer/MonotonicArena.hpp
         ${INTERNAL_INCLUDE_DIR}/core/buffer/OwnedBuffer.hpp
         ${INTERNAL_INCLUDE_DIR}/core/buffer/PerThreadArena.hpp
 
@@ -81,8 +82,17 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/vlog/VersionLog.hpp
 
+        # Engine - API Server
+        ${INTERNAL_INCLUDE_DIR}/engine/server/ApiFraming.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/server/AkkApiServer.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/server/TcpApiServer.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/server/HttpApiServer.hpp
+
         # Engine - MemTable
+        ${INTERNAL_INCLUDE_DIR}/engine/memtable/IMemMap.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/memtable/BPTree.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/memtable/BPTreeMap.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/memtable/SkipListMap.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/memtable/MemTable.hpp
 
         # Engine - WAL
@@ -119,6 +129,7 @@ target_sources(akkaradb PRIVATE
 
         # Engine - MemTable
         ${INTERNAL_SRC_DIR}/engine/memtable/MemTable.cpp
+        ${INTERNAL_SRC_DIR}/engine/memtable/SkipListMap.cpp
 
         # Engine - WAL
         ${INTERNAL_SRC_DIR}/engine/wal/WalOp.cpp
@@ -141,6 +152,12 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/engine/cluster/ReplFraming.cpp
         ${INTERNAL_SRC_DIR}/engine/cluster/ReplicationServer.cpp
         ${INTERNAL_SRC_DIR}/engine/cluster/ReplicationClient.cpp
+
+        # Engine - API Server
+        ${INTERNAL_SRC_DIR}/engine/server/ApiFraming.cpp
+        ${INTERNAL_SRC_DIR}/engine/server/AkkApiServer.cpp
+        ${INTERNAL_SRC_DIR}/engine/server/TcpApiServer.cpp
+        ${INTERNAL_SRC_DIR}/engine/server/HttpApiServer.cpp
 
         # Engine - Version Log
         ${INTERNAL_SRC_DIR}/engine/vlog/VersionLog.cpp
@@ -185,6 +202,7 @@ endif ()
 if (WIN32 AND BUILD_SHARED_LIBS)
     set_target_properties(akkaradb PROPERTIES
             WINDOWS_EXPORT_ALL_SYMBOLS ON
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
 endif ()
 
@@ -252,6 +270,30 @@ install(TARGETS akkaradb_benchmark
 )
 
 message(STATUS "Benchmark executable will be built at: ${CMAKE_BINARY_DIR}/bin/akkaradb_benchmark")
+
+# ── API Server test — interactive runner (type "stop" to exit) ────────────────
+add_executable(akkaradb_api_server_test
+        benchmarks/api_server_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_api_server_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_api_server_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_api_server_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_DIR}/include
+)
+
+set_target_properties(akkaradb_api_server_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+message(STATUS "API server test will be built at: ${CMAKE_BINARY_DIR}/bin/akkaradb_api_server_test")
 
 if (WIN32 AND BUILD_SHARED_LIBS)
     add_custom_command(TARGET akkaradb_benchmark POST_BUILD

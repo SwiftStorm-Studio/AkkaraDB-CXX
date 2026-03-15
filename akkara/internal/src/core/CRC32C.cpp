@@ -36,4 +36,17 @@ namespace akkaradb::core {
 
         return ~crc;
     }
+
+    uint32_t CRC32C::append(const uint8_t* data, size_t size, uint32_t prev_crc) noexcept {
+        auto crc = ~prev_crc; // undo final XOR to resume internal running state
+        for (size_t i = 0; i < size; ++i) {
+            crc ^= static_cast<uint32_t>(data[i]);
+            for (auto j = 0; j < 8; ++j) {
+                constexpr auto POLY = 0x82F63B78;
+                const uint32_t mask = (crc & 1) ? 0xFFFFFFFF : 0;
+                crc = (crc >> 1) ^ (POLY & mask);
+            }
+        }
+        return ~crc;
+    }
 } // namespace akkaradb::core

@@ -18,7 +18,8 @@
 
 // internal/src/engine/memtable/MemTable.cpp
 #include "engine/memtable/MemTable.hpp"
-#include "engine/memtable/BPTree.hpp"
+#include "engine/memtable/BPTreeMap.hpp"
+#include "engine/memtable/SkipListMap.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -37,80 +38,62 @@ namespace akkaradb::engine::memtable {
     // ============================================================================
 
     namespace {
-        /**
-         * Selects shard index from a pre-computed key_fp64.
-         * shard_count must be a power of 2.
-         * Identical routing to WAL's shard_for(): shard = fp64 & (count - 1).
-         */
         [[nodiscard]] uint32_t shard_for(uint64_t key_fp64, uint32_t shard_count) noexcept {
             return static_cast<uint32_t>(key_fp64 & (shard_count - 1u));
         }
 
-        /**
-         * Rounds n up to the next power of 2, clamped to [2, 16].
-         */
         [[nodiscard]] uint32_t resolve_shard_count(size_t n) {
-            // 0 = auto: use hardware_concurrency(), floor to power-of-2, clamp to [2, 16].
+            const bool is_auto = (n == 0);
             if (n == 0) n = std::max(2u, std::thread::hardware_concurrency());
-            if (n == 1) return 2; // minimum parallelism
+            if (n == 1) return 2;
             uint32_t p = 2;
             while (p < static_cast<uint32_t>(n)) p <<= 1;
-            return std::min(p, 16u);
+            return std::min(p, is_auto ? 16u : 256u);
         }
 
-        // ── Transparent comparator ────────────────────────────────────────────
-
-        struct MemRecordCmp {
-            using is_transparent = void;
-
-            bool operator()(const core::MemRecord& a, const core::MemRecord& b) const noexcept { return a.compare_key(b) < 0; }
-            bool operator()(const core::MemRecord& a, std::span<const uint8_t> b) const noexcept { return a.compare_key(b) < 0; }
-            bool operator()(std::span<const uint8_t> a, const core::MemRecord& b) const noexcept { return b.compare_key(a) > 0; }
-        };
+        /// Factory: create an empty IMemMap of the requested backend type.
+        std::unique_ptr<IMemMap> make_map(MemTable::Backend backend) {
+            switch (backend) {
+                case MemTable::Backend::SkipList: return std::make_unique<SkipListMap>();
+                case MemTable::Backend::BPTree: [[fallthrough]];
+                default: return std::make_unique<BPTreeMap>();
+            }
+        }
     } // anonymous namespace
 
     // ============================================================================
-    // Map alias
+    // Immutable snapshot type
     // ============================================================================
 
-    // BPTree keyed by MemRecord, value = std::monostate (key-only set).
-    // MemRecordCmp is transparent so lower_bound(span<const uint8_t>) works directly.
-    using Map = BPTree<core::MemRecord, std::monostate, MemRecordCmp>;
+    // Immutable snapshots are stored as sorted vectors of MemRecord.
+    // Immutables are produced by seal_active() (collect_sorted) and consumed by:
+    //   - Shard::get() / get_into(): binary search
+    //   - RangeIterator::Impl: forward scan from a lower_bound position
+    //   - Flusher: iterates and calls the FlushCallback
+    using ImmVec = std::vector<core::MemRecord>;
 
     // ============================================================================
     // Shard
     // ============================================================================
 
-    /**
-     * Shard - Single shard: one active map + zero or more immutable maps.
-     *
-     * Immutables are held as shared_ptr<const Map> so readers and the flusher
-     * thread share the same allocation without any record copying.
-     *
-     * seal_active() moves the active map into a new shared_ptr and records an
-     * immutable entry. The flusher receives the same shared_ptr and sorts/calls
-     * the callback. on_flushed() drops the immutable entry.
-     */
     class Shard {
         public:
             Shard() : approx_bytes_{0}, next_imm_id_{0}, threshold_bytes_{0} {}
 
-            void set_threshold(size_t t) noexcept { threshold_bytes_ = t; }
+            void init(size_t threshold, MemTable::Backend backend) {
+                threshold_bytes_ = threshold;
+                backend_ = backend;
+                active_ = make_map(backend_);
+            }
 
             // ── Write ─────────────────────────────────────────────────────────
 
-            /**
-             * Inserts or replaces a record.
-             * Returns true if the shard is now over the flush threshold.
-             */
+            /// Returns true when the shard exceeds its flush threshold.
             bool put(core::MemRecord record) {
                 std::unique_lock lock{mutex_};
 
                 const size_t new_size = record.approx_size();
-
-                // BPTree::put() returns the displaced key on overwrite (nullopt on new insert).
-                // Use this to compute the size delta without a separate lower_bound traversal.
-                auto old = active_.put(std::move(record), std::monostate{});
+                auto old = active_->put(std::move(record));
                 if (old) approx_bytes_ -= old->approx_size();
                 approx_bytes_ += new_size;
 
@@ -119,47 +102,72 @@ namespace akkaradb::engine::memtable {
 
             // ── Read ──────────────────────────────────────────────────────────
 
-            [[nodiscard]] std::shared_ptr<const core::MemRecord>
-            get(std::span<const uint8_t> key) const {
+            [[nodiscard]] std::optional<core::MemRecord> get(std::span<const uint8_t> key) const {
                 std::shared_lock lock{mutex_};
 
                 // Active map first
-                auto it = active_.lower_bound(key);
-                if (!it.is_end() && it->first.compare_key(key) == 0) { return std::make_shared<const core::MemRecord>(it->first); }
+                if (auto r = active_->find(key)) return r;
 
-                // Immutables: newest to oldest (highest id = last in deque)
+                // Immutables: newest to oldest (highest index = newest)
                 for (auto rit = immutables_.rbegin(); rit != immutables_.rend(); ++rit) {
-                    const auto& map = *rit->second;
-                    auto it2 = map.lower_bound(key);
-                    if (!it2.is_end() && it2->first.compare_key(key) == 0) { return std::make_shared<const core::MemRecord>(it2->first); }
+                    const ImmVec& vec = *rit->second;
+                    auto it = std::lower_bound(
+                        vec.begin(),
+                        vec.end(),
+                        key,
+                        [](const core::MemRecord& r, std::span<const uint8_t> k) { return r.compare_key(k) < 0; }
+                    );
+                    if (it != vec.end() && it->compare_key(key) == 0) return *it;
                 }
 
-                return nullptr;
+                return std::nullopt;
+            }
+
+            [[nodiscard]] std::optional<bool> get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const {
+                std::shared_lock lock{mutex_};
+
+                // Active map
+                if (auto r = active_->find_into(key, out)) return r;
+
+                // Immutables: newest to oldest
+                for (auto rit = immutables_.rbegin(); rit != immutables_.rend(); ++rit) {
+                    const ImmVec& vec = *rit->second;
+                    auto it = std::lower_bound(
+                        vec.begin(),
+                        vec.end(),
+                        key,
+                        [](const core::MemRecord& r, std::span<const uint8_t> k) { return r.compare_key(k) < 0; }
+                    );
+                    if (it != vec.end() && it->compare_key(key) == 0) {
+                        if (it->is_tombstone()) return false;
+                        const auto val = it->value();
+                        out.assign(val.begin(), val.end());
+                        return true;
+                    }
+                }
+
+                return std::nullopt;
             }
 
             // ── Flush lifecycle ───────────────────────────────────────────────
 
-            /**
-             * Seals the active map and moves it to immutables.
-             * Returns {id, shared_ptr<const Map>}. If active is empty, returns {0, nullptr}.
-             *
-             * No records are copied: the flusher receives the same shared_ptr.
-             */
-            [[nodiscard]] std::pair<uint64_t, std::shared_ptr<const Map>> seal_active() {
+            /// Seals the active map into a sorted ImmVec.
+            /// Returns {id, sorted_records_ptr}.  Empty active → {0, nullptr}.
+            [[nodiscard]] std::pair<uint64_t, std::shared_ptr<const ImmVec>> seal_active() {
                 std::unique_lock lock{mutex_};
-                if (active_.empty()) return {0, nullptr};
+                if (active_->empty()) return {0, nullptr};
 
                 const uint64_t id = next_imm_id_++;
 
-                // BPTree is movable: transfer active_ into a new heap-allocated Map.
-                auto imm = std::make_shared<Map>(std::move(active_));
-                // active_ is now in a valid-but-empty state after move.
+                auto vec = std::make_shared<ImmVec>();
+                vec->reserve(active_->size());
+                active_->collect_sorted(*vec); // IMemMap guarantees sorted order
+
+                active_ = active_->make_empty(); // reset to fresh empty map
                 approx_bytes_ = 0;
 
-                // Store as shared_ptr<const Map> for read-only sharing with flusher.
-                auto imm_const = std::shared_ptr<const Map>(imm);
-                immutables_.emplace_back(id, imm_const);
-                return {id, imm_const};
+                immutables_.emplace_back(id, vec);
+                return {id, vec};
             }
 
             void on_flushed(uint64_t id) {
@@ -169,25 +177,20 @@ namespace akkaradb::engine::memtable {
 
             // ── Range ─────────────────────────────────────────────────────────
 
-            /**
-             * Collects all maps (active + immutables) that overlap [start, end).
-             * Returns shared_ptrs so callers hold the maps alive without copying.
-             * The first entry is always the active map snapshot.
-             */
-            [[nodiscard]] std::vector<std::shared_ptr<const Map>>
-            snapshot_maps() const {
+            /// Snapshot all maps for range iteration.
+            /// Returns [active_snapshot, imm0, imm1, ...] — all sorted vectors.
+            [[nodiscard]] std::vector<std::shared_ptr<const ImmVec>> snapshot_sorted() const {
                 std::shared_lock lock{mutex_};
-                std::vector<std::shared_ptr<const Map>> result;
+                std::vector<std::shared_ptr<const ImmVec>> result;
                 result.reserve(1 + immutables_.size());
 
-                // Snapshot active: BPTree is non-copyable, so rebuild into a new tree.
-                // This is only used for range scans (read path), not the flush hot path.
-                if (!active_.empty()) {
-                    auto snap = std::make_shared<Map>();
-                    for (auto it = active_.begin(); !it.is_end(); ++it) { (void)snap->put(it->first, it->second); }
+                if (!active_->empty()) {
+                    auto snap = std::make_shared<ImmVec>();
+                    snap->reserve(active_->size());
+                    active_->collect_sorted(*snap);
                     result.push_back(std::move(snap));
                 }
-                for (const auto& map : immutables_ | std::views::values) { result.push_back(map); }
+                for (const auto& [id, vec] : immutables_) result.push_back(vec);
                 return result;
             }
 
@@ -200,8 +203,9 @@ namespace akkaradb::engine::memtable {
 
         private:
             mutable std::shared_mutex mutex_;
-            Map active_;
-            std::deque<std::pair<uint64_t, std::shared_ptr<const Map>>> immutables_;
+            std::unique_ptr<IMemMap> active_;
+            MemTable::Backend backend_ = MemTable::Backend::BPTree;
+            std::deque<std::pair<uint64_t, std::shared_ptr<const ImmVec>>> immutables_;
             size_t approx_bytes_;
             uint64_t next_imm_id_;
             size_t threshold_bytes_;
@@ -211,14 +215,6 @@ namespace akkaradb::engine::memtable {
     // Flusher - one per shard
     // ============================================================================
 
-    /**
-     * Flusher - Background thread that consumes sealed Maps, sorts them,
-     * calls FlushCallback, then notifies the shard via on_done.
-     *
-     * One Flusher per Shard: no cross-shard serialization.
-     * The flusher receives a shared_ptr<const Map> (zero record copies).
-     * Sorting happens inside the flusher thread to avoid blocking writers.
-     */
     class Flusher {
         public:
             using DoneCallback = std::function<void(uint64_t id)>;
@@ -238,17 +234,14 @@ namespace akkaradb::engine::memtable {
             Flusher(const Flusher&) = delete;
             Flusher& operator=(const Flusher&) = delete;
 
-            void enqueue(uint64_t id, std::shared_ptr<const Map> map) {
+            void enqueue(uint64_t id, std::shared_ptr<const ImmVec> vec) {
                 {
                     std::unique_lock lock{mutex_};
-                    queue_.push(Item{id, std::move(map)});
+                    queue_.push(Item{id, std::move(vec)});
                 }
                 cv_.notify_one();
             }
 
-            /**
-             * Blocks until the queue is empty and no callback is executing.
-             */
             void drain() {
                 std::unique_lock lock{mutex_};
                 cv_.wait(lock, [this] { return queue_.empty() && in_flight_ == 0; });
@@ -257,7 +250,7 @@ namespace akkaradb::engine::memtable {
         private:
             struct Item {
                 uint64_t id;
-                std::shared_ptr<const Map> map;
+                std::shared_ptr<const ImmVec> vec;
             };
 
             void run() {
@@ -272,15 +265,8 @@ namespace akkaradb::engine::memtable {
                         ++in_flight_;
                         lock.unlock();
 
-                        // Build sorted vector from the immutable BPTree.
-                        // BPTree::Iterator::operator*() returns pair<const K&, const V&>
-                        // (references into the node), so we copy the key (MemRecord) explicitly.
-                        // The BPTree is already key-sorted; no additional sort needed.
-                        std::vector<core::MemRecord> batch;
-                        batch.reserve(item.map->size());
-                        for (auto it = item.map->begin(); !it.is_end(); ++it) {
-                            batch.push_back(it->first); // copy MemRecord from reference
-                        }
+                        // Records are already sorted — copy into owned batch and hand off.
+                        std::vector<core::MemRecord> batch(*item.vec);
 
                         if (callback_) callback_(std::move(batch));
                         if (on_done_) on_done_(item.id);
@@ -289,7 +275,7 @@ namespace akkaradb::engine::memtable {
                             std::unique_lock done_lock{mutex_};
                             --in_flight_;
                         }
-                        cv_.notify_all(); // wake drain()
+                        cv_.notify_all();
                     }
                 }
             }
@@ -305,26 +291,30 @@ namespace akkaradb::engine::memtable {
     };
 
     // ============================================================================
-    // RangeIterator::Impl - k-way merge
+    // RangeIterator::Impl — k-way merge over sorted ImmVec snapshots
     // ============================================================================
 
     class MemTable::RangeIterator::Impl {
         public:
-            /**
-             * @param maps    Snapshots of all shard maps (each already key-sorted)
-             * @param range   Key range [start, end)
-             */
-            Impl(std::vector<std::shared_ptr<const Map>> maps, KeyRange range)
-                : maps_{std::move(maps)}, range_{std::move(range)} {
-                const auto start_span = std::span<const uint8_t>{range_.start};
+            Impl(std::vector<std::shared_ptr<const ImmVec>> vecs, KeyRange range)
+                : vecs_{std::move(vecs)}, range_{std::move(range)} {
+                const auto& start = range_.start;
+                positions_.reserve(vecs_.size());
 
-                for (size_t i = 0; i < maps_.size(); ++i) {
-                    const auto& m = *maps_[i];
-                    auto it = range_.start.empty()
-                                  ? m.begin()
-                                  : m.lower_bound(start_span);
-                    iters_.push_back(it);
-                    if (!it.is_end() && !past_end(it->first)) { pq_.push(static_cast<uint32_t>(i)); }
+                for (const auto& vp : vecs_) {
+                    const ImmVec& v = *vp;
+                    size_t pos = 0;
+                    if (!start.empty()) {
+                        auto it = std::lower_bound(
+                            v.begin(),
+                            v.end(),
+                            std::span<const uint8_t>{start},
+                            [](const core::MemRecord& r, std::span<const uint8_t> k) { return r.compare_key(k) < 0; }
+                        );
+                        pos = static_cast<size_t>(it - v.begin());
+                    }
+                    positions_.push_back(pos);
+                    if (pos < v.size() && !past_end(v[pos])) pq_.push(static_cast<uint32_t>(positions_.size() - 1));
                 }
 
                 prefetch();
@@ -347,14 +337,15 @@ namespace akkaradb::engine::memtable {
             }
 
             struct PqCmp {
-                const std::vector<Map::Iterator>* iters;
+                const std::vector<std::shared_ptr<const ImmVec>>* vecs;
+                const std::vector<size_t>* positions;
 
                 bool operator()(uint32_t a, uint32_t b) const {
-                    const auto& ra = (*iters)[a]->first;
-                    const auto& rb = (*iters)[b]->first;
+                    const auto& ra = (*vecs)[a]->at((*positions)[a]);
+                    const auto& rb = (*vecs)[b]->at((*positions)[b]);
                     const int cmp = ra.compare_key(rb);
                     if (cmp != 0) return cmp > 0; // min-heap by key
-                    return ra.seq() < rb.seq(); // tie-break: higher seq wins
+                    return ra.seq() < rb.seq(); // tie-break: higher seq first
                 }
             };
 
@@ -362,28 +353,26 @@ namespace akkaradb::engine::memtable {
                 while (!pq_.empty()) {
                     const uint32_t si = pq_.top();
                     pq_.pop();
+                    const ImmVec& v = *vecs_[si];
+                    size_t& pos = positions_[si];
 
-                    auto& it = iters_[si];
-                    core::MemRecord rec = it->first; // copy from reference pair
-                    ++it;
+                    core::MemRecord rec = v[pos];
+                    ++pos;
+                    if (pos < v.size() && !past_end(v[pos])) pq_.push(si);
 
-                    // Re-push if still in range
-                    if (!it.is_end() && !past_end(it->first)) { pq_.push(si); }
-
-                    // Drain heap entries with the same key (keep highest seq)
+                    // Drain same-key entries from heap, keep highest seq
                     while (!pq_.empty()) {
                         const uint32_t ni = pq_.top();
-                        const auto& nr = iters_[ni]->first;
+                        const core::MemRecord& nr = vecs_[ni]->at(positions_[ni]);
                         if (nr.compare_key(rec.key()) != 0) break;
-                        // Same key: keep the one with higher seq
+
                         if (nr.seq() > rec.seq()) rec = nr;
                         pq_.pop();
-                        auto& nit = iters_[ni];
-                        ++nit;
-                        if (!nit.is_end() && !past_end(nit->first)) { pq_.push(ni); }
+                        size_t& npos = positions_[ni];
+                        ++npos;
+                        if (npos < vecs_[ni]->size() && !past_end(vecs_[ni]->at(npos))) pq_.push(ni);
                     }
 
-                    // Skip if this key was already yielded
                     auto key_vec = std::vector<uint8_t>(rec.key().begin(), rec.key().end());
                     if (key_vec == last_key_) continue;
 
@@ -393,12 +382,10 @@ namespace akkaradb::engine::memtable {
                 }
             }
 
-            std::vector<std::shared_ptr<const Map>> maps_;
+            std::vector<std::shared_ptr<const ImmVec>> vecs_;
+            std::vector<size_t> positions_;
             MemTable::KeyRange range_;
-            std::vector<Map::Iterator> iters_;
-
-            std::priority_queue<uint32_t, std::vector<uint32_t>, PqCmp> pq_{PqCmp{&iters_}};
-
+            std::priority_queue<uint32_t, std::vector<uint32_t>, PqCmp> pq_{PqCmp{&vecs_, &positions_}};
             std::optional<core::MemRecord> next_;
             std::vector<uint8_t> last_key_;
     };
@@ -409,7 +396,6 @@ namespace akkaradb::engine::memtable {
     MemTable::RangeIterator& MemTable::RangeIterator::operator=(RangeIterator&&) noexcept = default;
 
     bool MemTable::RangeIterator::has_next() const noexcept { return impl_ && impl_->has_next(); }
-
     std::optional<core::MemRecord> MemTable::RangeIterator::next() {
         if (!impl_) return std::nullopt;
         return impl_->next();
@@ -422,26 +408,25 @@ namespace akkaradb::engine::memtable {
     class MemTable::Impl {
         public:
             explicit Impl(const Options& opts)
-                : shard_count_{resolve_shard_count(opts.shard_count)}, threshold_bytes_per_shard_{opts.threshold_bytes_per_shard}, seq_gen_{1} {
+                : shard_count_{resolve_shard_count(opts.shard_count)},
+                  threshold_bytes_per_shard_{opts.threshold_bytes_per_shard},
+                  backend_{opts.backend},
+                  seq_gen_{1} {
                 shards_.reserve(shard_count_);
-                flushers_.resize(shard_count_); // resize (not reserve): make_flusher uses [i] subscript
+                flushers_.resize(shard_count_);
 
                 for (uint32_t i = 0; i < shard_count_; ++i) {
                     auto shard = std::make_unique<Shard>();
-                    shard->set_threshold(threshold_bytes_per_shard_);
+                    shard->init(threshold_bytes_per_shard_, backend_);
                     shards_.push_back(std::move(shard));
                 }
 
-                // Flushers created separately so on_flush capture is correct
-                if (opts.on_flush) { for (uint32_t i = 0; i < shard_count_; ++i) { make_flusher(i, opts.on_flush); } }
+                if (opts.on_flush) { for (uint32_t i = 0; i < shard_count_; ++i) make_flusher(i, opts.on_flush); }
             }
 
-            ~Impl() {
-                // Flushers join their threads in destructor; destroy before shards.
-                flushers_.clear();
-            }
+            ~Impl() { flushers_.clear(); }
 
-            // ── Write path ────────────────────────────────────────────────────
+            // ── Write ─────────────────────────────────────────────────────────
 
             void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
                 const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : core::AKHdr32::compute_key_fp64(key.data(), key.size());
@@ -450,7 +435,7 @@ namespace akkaradb::engine::memtable {
                 auto record = core::MemRecord::create(key, value, seq, flags, fp64);
                 advance_seq_gen(seq);
 
-                if (shards_[si]->put(std::move(record))) { trigger_flush(si); }
+                if (shards_[si]->put(std::move(record))) trigger_flush(si);
             }
 
             void remove(std::span<const uint8_t> key, uint64_t seq) {
@@ -460,36 +445,35 @@ namespace akkaradb::engine::memtable {
                 auto record = core::MemRecord::tombstone(key, seq, fp64);
                 advance_seq_gen(seq);
 
-                if (shards_[si]->put(std::move(record))) { trigger_flush(si); }
+                if (shards_[si]->put(std::move(record))) trigger_flush(si);
             }
 
-            // ── Read path ─────────────────────────────────────────────────────
+            // ── Read ──────────────────────────────────────────────────────────
 
-            [[nodiscard]] std::shared_ptr<const core::MemRecord>
-            get(std::span<const uint8_t> key) const {
+            [[nodiscard]] std::optional<core::MemRecord> get(std::span<const uint8_t> key) const {
                 const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
-                const uint32_t si = shard_for(fp64, shard_count_);
-                return shards_[si]->get(key);
+                return shards_[shard_for(fp64, shard_count_)]->get(key);
+            }
+
+            [[nodiscard]] std::optional<bool> get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const {
+                const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
+                return shards_[shard_for(fp64, shard_count_)]->get_into(key, out);
             }
 
             [[nodiscard]] RangeIterator iterator(const KeyRange& range) const {
-                // Collect snapshots from all shards
-                std::vector<std::shared_ptr<const Map>> all_maps;
-                for (const auto& shard : shards_) { for (auto& m : shard->snapshot_maps()) { all_maps.push_back(std::move(m)); } }
-                return RangeIterator{std::make_unique<RangeIterator::Impl>(std::move(all_maps), range)};
+                std::vector<std::shared_ptr<const ImmVec>> all_vecs;
+                for (const auto& shard : shards_) for (auto& v : shard->snapshot_sorted()) all_vecs.push_back(std::move(v));
+                return RangeIterator{std::make_unique<RangeIterator::Impl>(std::move(all_vecs), range)};
             }
 
             // ── Sequence ──────────────────────────────────────────────────────
 
             [[nodiscard]] uint64_t next_seq() noexcept { return seq_gen_.fetch_add(1, std::memory_order_relaxed); }
-
             [[nodiscard]] uint64_t last_seq() const noexcept { return seq_gen_.load(std::memory_order_relaxed); }
 
             // ── Flush control ─────────────────────────────────────────────────
 
-            void flush_hint() {
-                for (uint32_t i = 0; i < shard_count_; ++i) { if (shards_[i]->approx_bytes() > threshold_bytes_per_shard_) { trigger_flush(i); } }
-            }
+            void flush_hint() { for (uint32_t i = 0; i < shard_count_; ++i) if (shards_[i]->approx_bytes() > threshold_bytes_per_shard_) trigger_flush(i); }
 
             void force_flush() {
                 for (uint32_t i = 0; i < shard_count_; ++i) trigger_flush(i);
@@ -497,15 +481,11 @@ namespace akkaradb::engine::memtable {
             }
 
             void set_flush_callback(const FlushCallback& cb) {
-                // Drain existing flushers first to avoid losing in-flight batches.
                 for (auto& f : flushers_) { if (f) f->drain(); }
                 flushers_.clear();
                 flushers_.resize(shard_count_);
-
-                if (cb) { for (uint32_t i = 0; i < shard_count_; ++i) { make_flusher(i, cb); } }
+                if (cb) { for (uint32_t i = 0; i < shard_count_; ++i) make_flusher(i, cb); }
             }
-
-            // ── Metrics ───────────────────────────────────────────────────────
 
             [[nodiscard]] size_t approx_size() const noexcept {
                 size_t total = 0;
@@ -514,35 +494,26 @@ namespace akkaradb::engine::memtable {
             }
 
         private:
-            // ── Helpers ───────────────────────────────────────────────────────
-
-            /**
-             * Advances seq_gen_ to max(current, observed_seq + 1).
-             * Used during WAL recovery (explicit seq values) to leave the counter
-             * correctly positioned past the highest recovered sequence number.
-             */
             void advance_seq_gen(uint64_t observed_seq) noexcept {
                 uint64_t cur = seq_gen_.load(std::memory_order_relaxed);
                 while (cur <= observed_seq) {
-                    if (seq_gen_.compare_exchange_weak(cur, observed_seq + 1, std::memory_order_relaxed, std::memory_order_relaxed)) { break; }
-                    // cur refreshed by CAS failure; loop retries
+                    if (seq_gen_.compare_exchange_weak(cur, observed_seq + 1, std::memory_order_relaxed, std::memory_order_relaxed)) break;
                 }
             }
 
             void trigger_flush(uint32_t si) {
                 if (!flushers_[si]) return;
-                auto [id, map] = shards_[si]->seal_active();
-                if (map) flushers_[si]->enqueue(id, std::move(map));
+                auto [id, vec] = shards_[si]->seal_active();
+                if (vec) flushers_[si]->enqueue(id, std::move(vec));
             }
 
             void make_flusher(uint32_t i, const FlushCallback& cb) {
                 flushers_[i] = std::make_unique<Flusher>(cb, [this, i](uint64_t id) { shards_[i]->on_flushed(id); });
             }
 
-            // ── Members ───────────────────────────────────────────────────────
-
             uint32_t shard_count_;
             size_t threshold_bytes_per_shard_;
+            MemTable::Backend backend_;
 
             std::vector<std::unique_ptr<Shard>> shards_;
             std::vector<std::unique_ptr<Flusher>> flushers_;
@@ -557,7 +528,6 @@ namespace akkaradb::engine::memtable {
     std::unique_ptr<MemTable> MemTable::create(const Options& options) { return std::unique_ptr<MemTable>(new MemTable(options)); }
 
     MemTable::MemTable(const Options& options) : impl_{std::make_unique<Impl>(options)} {}
-
     MemTable::~MemTable() = default;
 
     void MemTable::put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
@@ -566,7 +536,8 @@ namespace akkaradb::engine::memtable {
 
     void MemTable::remove(std::span<const uint8_t> key, uint64_t seq) { impl_->remove(key, seq); }
 
-    std::shared_ptr<const core::MemRecord> MemTable::get(std::span<const uint8_t> key) const { return impl_->get(key); }
+    std::optional<core::MemRecord> MemTable::get(std::span<const uint8_t> key) const { return impl_->get(key); }
+    std::optional<bool> MemTable::get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const { return impl_->get_into(key, out); }
     MemTable::RangeIterator MemTable::iterator(const KeyRange& range) const { return impl_->iterator(range); }
 
     uint64_t MemTable::next_seq() noexcept { return impl_->next_seq(); }

@@ -201,7 +201,7 @@ namespace akkaradb::engine::sst {
                 bloom_add(bloom_bits, hdr.key_fp64, bloom_k, bloom_num_bits);
             }
 
-            // Write: AKHdr32 + key bytes + value bytes
+            // Write: AKHdr32 + key bytes + value bytes + CRC32C trailer (4B)
             if (!fwrite_pod(fg.f, hdr)) {
                 throw std::runtime_error("SSTWriter: I/O error writing AKHdr32");
             }
@@ -212,7 +212,15 @@ namespace akkaradb::engine::sst {
                 throw std::runtime_error("SSTWriter: I/O error writing value bytes");
             }
 
-            data_bytes += sizeof(core::AKHdr32) + key_sp.size() + val_sp.size();
+            // Per-record CRC32C: covers [AKHdr32][key][value]
+            {
+                uint32_t rec_crc = core::CRC32C::compute(&hdr, sizeof(hdr));
+                rec_crc = core::CRC32C::append(key_sp.data(), key_sp.size(), rec_crc);
+                rec_crc = core::CRC32C::append(val_sp.data(), val_sp.size(), rec_crc);
+                if (!fwrite_pod(fg.f, rec_crc)) { throw std::runtime_error("SSTWriter: I/O error writing record CRC"); }
+            }
+
+            data_bytes += sizeof(core::AKHdr32) + key_sp.size() + val_sp.size() + RECORD_CRC_SIZE;
         }
 
         // ── Write sparse index section ────────────────────────────────────────

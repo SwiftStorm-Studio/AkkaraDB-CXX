@@ -812,11 +812,11 @@ namespace akkaradb::wal {
     // ============================================================================
 
     static uint32_t resolve_shard_count(uint32_t requested) {
-        if (requested == 0) return compute_shard_count();
+        if (requested == 0) return compute_shard_count(); // auto: hardware_concurrency, [2, 16]
         if (requested == 1) return 1;
         uint32_t n = 2;
         while (n < requested) n <<= 1;
-        return std::min(n, 16u);
+        return std::min(n, 64u); // explicit: up to 64 (file-based, higher than MemTable cap is rarely useful)
     }
 
     // ============================================================================

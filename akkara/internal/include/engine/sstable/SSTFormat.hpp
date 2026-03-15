@@ -28,9 +28,14 @@ namespace akkaradb::engine::sst {
 
     /// Magic bytes at start of every .aksst file: "AKSS"
     inline constexpr uint32_t SST_MAGIC   = 0x414B5353u;
+    /// v1: adds per-record CRC32C trailer (4 bytes after each [AKHdr32][key][value])
     inline constexpr uint16_t SST_VERSION = 0x0001u;
 
     // ── Tuning constants ─────────────────────────────────────────────────────
+
+    /// Size of the per-record CRC32C trailer appended after each [AKHdr32][key][value].
+    /// CRC32C is computed over the entire record (header + key + value bytes).
+    inline constexpr uint32_t RECORD_CRC_SIZE = 4;
 
     /// One sparse index entry is emitted every INDEX_STRIDE records,
     /// plus always for the first and last record.

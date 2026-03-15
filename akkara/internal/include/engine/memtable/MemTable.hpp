@@ -32,21 +32,20 @@ namespace akkaradb::engine::memtable {
      * MemTable - Multi-shard in-memory write buffer with background flush.
      *
      * Architecture:
-     * - Options::shard_count shards (power-of-2, 2..16), each with its own shared_mutex
+     * - Options::shard_count shards (power-of-2, 2..256), each with its own shared_mutex
      * - Shard selection: key_fp64 & (shard_count - 1)  (~1 ns, no division)
      *   key_fp64 = AKHdr32::compute_key_fp64(), same hash as WAL routing
      * - Per-shard Flusher thread: flushes independently, no cross-shard blocking
-     * - Active map: accepts new writes
-     * - Immutable maps: sealed maps awaiting flush, held as shared_ptr<const Map>
-     *   so readers and the flusher share the same allocation without copying
+     * - Active map: IMemMap (BPTree or SkipList, selected via Options::backend)
+     * - Immutable snapshots: sealed sorted vectors awaiting flush
      * - seq_gen_: atomic monotonic counter; advanced to max(current, observed+1)
      *   on every write so WAL recovery leaves it correctly positioned
      *
      * Flush lifecycle:
      *   put/remove exceeds threshold
-     *   → seal_active(): active_ → shared_ptr<const Map>, pushed to immutables_
-     *   → Flusher::enqueue(): receives shared_ptr (no copy of records)
-     *   → FlushCallback invoked with sorted records (sorted inside flusher thread)
+     *   → seal_active(): collect_sorted() → shared_ptr<const vector<MemRecord>>
+     *   → Flusher::enqueue(): receives shared_ptr (records already sorted)
+     *   → FlushCallback invoked with sorted records
      *   → on_flushed(id): immutable removed from shard
      *
      * Thread-safety: All public methods are thread-safe.
@@ -61,6 +60,25 @@ namespace akkaradb::engine::memtable {
              * Called from a per-shard flusher thread (not the writer thread).
              */
             using FlushCallback = std::function<void(std::vector<core::MemRecord>)>;
+
+            // ── Backend selection ─────────────────────────────────────────────
+
+            /**
+             * Selects the ordered-map implementation used inside each shard.
+             *
+             *   BPTree   — B+ tree with MonotonicArena node allocation.
+             *              Best point-lookup and scan throughput; default.
+             *
+             *   SkipList — Probabilistic skip list (p = 0.25, max height 12).
+             *              Industry-standard LSM MemTable structure (LevelDB / RocksDB).
+             *              Per-node heap allocation; simpler to adapt for lock-free writes.
+             */
+            enum class Backend : uint8_t {
+                BPTree = 0,
+                ///< B+ tree (default)
+                SkipList = 1,
+                ///< Skip list
+            };
 
             /**
              * Options - Configuration for MemTable creation.
@@ -83,6 +101,12 @@ namespace akkaradb::engine::memtable {
                  * Default: 64 MiB
                  */
                 size_t threshold_bytes_per_shard = 64ULL * 1024 * 1024;
+
+                /**
+                 * Ordered-map implementation used inside each shard.
+                 * Default: BPTree
+                 */
+                Backend backend = Backend::BPTree;
 
                 /**
                  * Optional flush callback. Can be set or replaced later via
@@ -175,10 +199,23 @@ namespace akkaradb::engine::memtable {
             /**
              * Point lookup. Searches active map then immutables (newest first).
              *
-             * @return Shared pointer to the record, or nullptr if not found.
-             *         Caller may hold the pointer beyond the next write.
+             * @return The record by value if found, std::nullopt otherwise.
              */
-            [[nodiscard]] std::shared_ptr<const core::MemRecord> get(std::span<const uint8_t> key) const;
+            [[nodiscard]] std::optional<core::MemRecord> get(std::span<const uint8_t> key) const;
+
+            /**
+             * Zero-copy point lookup: copies value bytes directly into out.
+             *
+             * Eliminates the intermediate MemRecord copy that get() produces.
+             * When out has sufficient capacity (e.g. pre-reserved), assign() reuses
+             * the existing allocation — no malloc on the hot path.
+             *
+             * Return convention:
+             *   nullopt → key not found; caller may check SST
+             *   false   → tombstone; caller must NOT check SST (delete is authoritative)
+             *   true    → found; value written to out
+             */
+            [[nodiscard]] std::optional<bool> get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const;
 
             /**
              * Returns a range iterator over [range.start, range.end).

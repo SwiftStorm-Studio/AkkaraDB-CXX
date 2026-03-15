@@ -133,6 +133,27 @@ namespace akkaradb::engine {
          */
         std::filesystem::path manifest_path;
 
+        // ── Concurrency ───────────────────────────────────────────────────────
+
+        /**
+         * Expected number of concurrent writer threads.
+         *
+         * When > 0 and the respective shard_count is 0 (auto), shard counts
+         * for MemTable and WAL are derived from this value targeting ~80%
+         * collision-free probability (birthday-paradox formula):
+         *
+         *   S = next_pow2( ceil( N(N-1) * 2.25 ) )
+         *
+         * Approximate results:
+         *   writer_threads = 2  →  8  MemTable shards,  8  WAL shards
+         *   writer_threads = 4  →  32 MemTable shards,  32 WAL shards
+         *   writer_threads = 8  →  128 MemTable shards, 64 WAL shards (capped)
+         *
+         * Caps: MemTable ≤ 256, WAL ≤ 64.
+         * 0 = use hardware_concurrency-based auto (existing behaviour).
+         */
+        uint32_t writer_threads = 0;
+
         // ── MemTable ─────────────────────────────────────────────────────────
 
         /**
@@ -233,6 +254,49 @@ namespace akkaradb::engine {
          * Default: 8080
          */
         uint16_t web_config_port = 8080;
+
+        // ── API Server ────────────────────────────────────────────────────
+
+        /**
+         * Transport backends available for the public data API.
+         * Add one or more to ApiOptions::backends to enable simultaneous access.
+         */
+        enum class ApiBackend : uint8_t {
+            Http = 0,
+            ///< HTTP/1.1 REST  (POST /v1/put, GET /v1/get, ...)
+            Tcp = 1,
+            ///< AkkaraDB binary TCP protocol
+            // Grpc = 2,  // TODO Phase 6
+        };
+
+        /**
+         * Configuration for the public data API server.
+         *
+         * Master switch: enabled = false → nothing starts (backends is ignored).
+         * Backends list: which transports to start; both may run simultaneously.
+         *
+         * Example — HTTP only (default when enabled):
+         *   opts.api.enabled  = true;
+         *
+         * Example — binary TCP only:
+         *   opts.api.enabled  = true;
+         *   opts.api.backends = { AkkEngineOptions::ApiBackend::Tcp };
+         *
+         * Example — both:
+         *   opts.api.enabled  = true;
+         *   opts.api.backends = { AkkEngineOptions::ApiBackend::Http,
+         *                         AkkEngineOptions::ApiBackend::Tcp };
+         */
+        struct ApiOptions {
+            bool enabled = false;
+            std::vector<ApiBackend> backends = {ApiBackend::Http};
+
+            uint16_t http_port = 7070;
+            uint16_t tcp_port = 7071;
+            // uint16_t              grpc_port      = 7072;  // TODO Phase 6
+
+            size_t worker_threads = 4; ///< Shared across all backends
+        } api;
     };
 
     // ============================================================================
@@ -301,6 +365,26 @@ namespace akkaradb::engine {
              * @return Value bytes, or std::nullopt if the key is not found or is deleted.
              */
             [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::span<const uint8_t> key) const;
+
+            /**
+             * Zero-allocation point lookup for hot paths.
+             *
+             * Copies value bytes directly into the caller-supplied buffer.
+             * When out.capacity() >= value_size, vector::assign() is an in-place memcpy:
+             * no heap allocation on the hot path. Pre-reserve out before the loop:
+             *
+             *   std::vector<uint8_t> buf;
+             *   buf.reserve(expected_value_size);
+             *   for (...) eng->get_into(key, buf);
+             *
+             * Blob values (blob_enabled == true): this function falls back to the
+             * standard get() path and writes the result into out.
+             *
+             * @param key Key to look up
+             * @param out Receives value bytes on success; capacity is reused.
+             * @return true if the key exists and is not deleted, false otherwise.
+             */
+            [[nodiscard]] bool get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const;
 
             // ── Version history ───────────────────────────────────────────────
 

@@ -448,71 +448,158 @@ static void test_idempotent_close() {
 // 8. Throughput benchmark
 // ============================================================================
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a benchmark key of exactly `key_size` bytes.
+ *
+ * Layout: 'k' × (key_size - 6)  +  zero-padded 6-digit index
+ * Example (key_size=11, i=42): "kkkkk000042"
+ * Uniqueness guaranteed for N ≤ 999,999 (6 digits).
+ */
+static std::string make_bench_key(int i, int key_size) {
+    const int pad = std::max(0, key_size - 6);
+    return std::string(pad, 'k') + std::format("{:06d}", i);
+}
+
+/**
+ * Generate a benchmark value of exactly `val_size` bytes.
+ *
+ * Layout: 'v' × (val_size - 6)  +  zero-padded 6-digit index  (if val_size ≥ 6)
+ * Values are intentionally non-identical to avoid trivial branch prediction.
+ */
+static std::string make_bench_val(int i, int val_size) {
+    std::string v(val_size, 'v');
+    if (val_size >= 6) {
+        auto num = std::format("{:06d}", i);
+        std::copy(num.begin(), num.end(), v.end() - 6);
+    }
+    return v;
+}
+
+struct SizeCase {
+    const char* label;
+    int key_size; ///< Key bytes
+    int val_size; ///< Value bytes
+};
+
+/**
+ * Run one mem-only write+read benchmark for a given key/value size.
+ *
+ * Keys and values are pre-generated before the timed section so that
+ * std::format / string-allocation overhead is excluded from the measurement.
+ *
+ * A warmup pass (untimed) runs before measurement to put all cases on equal footing:
+ *   - CRT heap: arena slab pools and SmallBuffer heap chunks are pre-cached so that
+ *     the first timed case doesn't pay cold-start malloc costs that later cases avoid.
+ *   - CPU I-cache / branch predictors: engine hot paths are warmed before timing.
+ *   - TLB: pages touched in warmup fill TLB entries ahead of the timed run.
+ */
+static void bench_mem_case(const SizeCase& sc, int N) {
+    // ── Pre-generate keys and values (outside timed section) ──────────────────
+    std::vector<std::string> keys(N), vals(N);
+    for (int i = 0; i < N; ++i) {
+        keys[i] = make_bench_key(i, sc.key_size);
+        vals[i] = make_bench_val(i, sc.val_size);
+    }
+
+    // ── Warmup pass (untimed) ─────────────────────────────────────────────────
+    {
+        AkkEngineOptions wo;
+        wo.wal_enabled = false;
+        auto eng = AkkEngine::open(wo);
+        for (int i = 0; i < N; ++i) eng->put(as_span(keys[i]), as_span(vals[i]));
+        eng->close(); // releases arena/SmallBuffer memory back to CRT heap free-lists
+    }
+
+    // ── Timed measurement ─────────────────────────────────────────────────────
+    AkkEngineOptions opts;
+    opts.wal_enabled = false;
+    auto eng = AkkEngine::open(opts);
+
+    // Write
+    auto t0 = Clock::now();
+    for (int i = 0; i < N; ++i) eng->put(as_span(keys[i]), as_span(vals[i]));
+    const double w_ops = N / (elapsed_ms(t0) / 1000.0);
+
+    // Read — get_into() reuses a single buffer each iteration (no per-call malloc).
+    // Pre-reserve so vector::assign() is always an in-place memcpy.
+    t0 = Clock::now();
+    std::vector<uint8_t> rbuf;
+    rbuf.reserve(static_cast<size_t>(sc.val_size));
+    int found = 0;
+    for (int i = 0; i < N; ++i) if (eng->get_into(as_span(keys[i]), rbuf)) ++found;
+    const double r_ops = N / (elapsed_ms(t0) / 1000.0);
+
+    eng->close();
+
+    const int total = sc.key_size + sc.val_size;
+    const bool inl = total <= 22; // SmallBuffer::INLINE_CAP
+    std::printf("  [mem] %-20s  total=%4dB (%s)   write %8.0f   read %8.0f ops/s\n", sc.label, total, inl ? "inline" : "heap  ", w_ops, r_ops);
+}
+
 static void bench_throughput() {
-    section("Throughput benchmark");
+    section("Throughput benchmark  (std::format excluded — keys/vals pre-generated)");
 
     constexpr int N = 100'000;
 
-    // ── In-memory write ───────────────────────────────────────────────────────
-    {
-        AkkEngineOptions opts;
-        opts.wal_enabled = false;
-        auto eng = AkkEngine::open(opts);
+    // ── 5 key/value size cases (mem-only) ────────────────────────────────────
+    //
+    // SmallBuffer::INLINE_CAP = 22 bytes.
+    //   total ≤ 22  →  zero heap alloc per record (inline path)
+    //   total > 22  →  one new uint8_t[total] per record (heap path)
+    //
+    static constexpr SizeCase CASES[] = {
+        {"k= 8  v=  8", 8, 8},
+        // total= 16  inline  ← headroom
+        {"k=11  v= 11", 11, 11},
+        // total= 22  inline  ← original benchmark (max)
+        {"k=16  v= 64", 16, 64},
+        // total= 80  heap    ← first heap tier
+        {"k=32  v=256", 32, 256},
+        // total=288  heap    ← medium
+        {"k=32  v=1k ", 32, 1024},
+        // total=1056 heap    ← large
+    };
 
-        auto t0 = Clock::now();
-        for (int i = 0; i < N; ++i) {
-            auto k = std::format("bk_{:08d}", i);
-            auto v = std::format("bv_{:08d}", i);
-            eng->put(as_span(k), as_span(v));
-        }
-        double ms = elapsed_ms(t0);
-        std::printf("  [mem]  write  %6d ops in %7.1f ms  →  %7.0f ops/s\n",
-                    N, ms, N / (ms / 1000.0));
+    std::printf("  %-20s  %-18s   %13s  %13s\n", "case", "data", "write", "read");
+    std::printf("  %-20s  %-18s   %13s  %13s\n", "────────────────────", "──────────────────", "─────────────", "─────────────");
+    for (const auto& sc : CASES) bench_mem_case(sc, N);
 
-        t0 = Clock::now();
-        int found = 0;
-        for (int i = 0; i < N; ++i) {
-            auto k = std::format("bk_{:08d}", i);
-            if (eng->get(as_span(k)).has_value()) ++found;
-        }
-        ms = elapsed_ms(t0);
-        std::printf("  [mem]  read   %6d ops in %7.1f ms  →  %7.0f ops/s  (found %d)\n",
-                    N, ms, N / (ms / 1000.0), found);
-
-        eng->close();
-    }
-
-    // ── WAL Async write ───────────────────────────────────────────────────────
+    // ── WAL Async (k=11, v=11 — inline, same as original benchmark) ──────────
+    std::printf("\n");
     {
         auto dir = make_temp_dir("bench_wal");
 
+        std::vector<std::string> keys(N), vals(N);
+        for (int i = 0; i < N; ++i) {
+            keys[i] = make_bench_key(i, 11);
+            vals[i] = make_bench_val(i, 11);
+        }
+
         AkkEngineOptions opts;
-        opts.data_dir   = dir;
+        opts.data_dir = dir;
         opts.wal_enabled = true;
         opts.wal.sync_mode = SyncMode::Async;
-        opts.wal.shard_count = 1; // single-threaded benchmark: 1 shard minimises fdatasync interrupt overhead
-        opts.wal.group_n      = 1024;
+        opts.wal.shard_count = 1; // single-threaded: 1 shard minimises fdatasync interrupt overhead
+        opts.wal.group_n = 1024;
         opts.wal.group_micros = 500;
         auto eng = AkkEngine::open(opts);
 
         auto t0 = Clock::now();
-        for (int i = 0; i < N; ++i) {
-            auto k = std::format("wk_{:08d}", i);
-            auto v = std::format("wv_{:08d}", i);
-            eng->put(as_span(k), as_span(v));
-        }
+        for (int i = 0; i < N; ++i) eng->put(as_span(keys[i]), as_span(vals[i]));
         double ms = elapsed_ms(t0);
-        std::printf("  [wal]  write  %6d ops in %7.1f ms  →  %7.0f ops/s  (async)\n", N, ms, N / (ms / 1000.0));
+        std::printf("  [wal] k=11  v= 11       total= 22B (inline)   write %8.0f ops/s  (async)\n", N / (ms / 1000.0));
 
         t0 = Clock::now();
-        auto found = 0;
-        for (int i = 0; i < N; ++i) {
-            auto k = std::format("wk_{:08d}", i);
-            if (eng->get(as_span(k)).has_value()) ++found;
-        }
+        int found = 0;
+        for (int i = 0; i < N; ++i) if (eng->get(as_span(keys[i])).has_value()) ++found;
         ms = elapsed_ms(t0);
-        std::printf("  [wal]  read   %6d ops in %7.1f ms  →  %7.0f ops/s  (found %d)\n",
-                    N, ms, N / (ms / 1000.0), found);
+        std::printf(
+            "  [wal] k=11  v= 11       total= 22B (inline)   read  %8.0f ops/s  (found %d)\n",
+            N / (ms / 1000.0),
+            found
+        );
 
         eng->close();
         fs::remove_all(dir);

@@ -21,6 +21,7 @@
 
 #include "engine/blob/BlobFraming.hpp"
 #include "engine/blob/BlobManager.hpp"
+#include "engine/server/AkkApiServer.hpp"
 #include "engine/cluster/ClusterConfig.hpp"
 #include "engine/cluster/ClusterManager.hpp"
 #include "engine/cluster/ReplicationClient.hpp"
@@ -47,6 +48,19 @@
 
 namespace akkaradb::engine {
     namespace fs = std::filesystem;
+
+    // ── writer_threads → shard count ─────────────────────────────────────────
+    // Birthday-paradox formula targeting ~80% collision-free probability.
+    //   P(no collision) ≈ e^{-N(N-1)/(2S)} ≥ 0.80
+    //   → S ≥ N(N-1) / (2 ln 1.25) ≈ N(N-1) × 2.25
+    // Returns the next power-of-2 at or above that bound (no cap — caller applies own cap).
+    static uint32_t shards_for_threads(uint32_t t) noexcept {
+        if (t <= 1) return 2;
+        const uint32_t raw = (t * (t - 1u) * 9u + 3u) / 4u; // ceil(N(N-1) × 2.25)
+        uint32_t p = 2;
+        while (p < raw) p <<= 1;
+        return p;
+    }
 
     // ============================================================================
     // Internal helpers
@@ -123,6 +137,9 @@ namespace akkaradb::engine {
             std::unique_ptr<cluster::ClusterManager> cluster_mgr_;
             std::unique_ptr<cluster::ReplicationServer> repl_server_; ///< Primary only
             std::unique_ptr<cluster::ReplicationClient> repl_client_; ///< Replica only
+
+            // ── API Server (present when options.api.enabled) ─────────────────────
+            std::unique_ptr<server::AkkApiServer> api_server_;
 
             // ── Replica blob tracking ─────────────────────────────────────────────
             // Tracks seqs for which a ReplBlobPut arrived (blob_callback) but the
@@ -287,9 +304,19 @@ namespace akkaradb::engine {
         // Used in VersionLog entries for source attribution.
         if (persistent && !options.data_dir.empty()) { impl->node_id_ = load_or_create_node_id(options.data_dir); }
 
+        // ── writer_threads → shard count ────────────────────────────────────
+        // When writer_threads > 0 and shard_count is left at 0 (auto),
+        // derive shard counts targeting ~80% collision-free probability.
+        memtable::MemTable::Options mt_opts = options.memtable;
+        wal::WalOptions wal_opts = options.wal;
+        if (options.writer_threads > 0) {
+            const uint32_t s = shards_for_threads(options.writer_threads);
+            if (mt_opts.shard_count == 0) mt_opts.shard_count = std::min(s, 256u);
+            if (wal_opts.shard_count == 0) wal_opts.shard_count = std::min(s, 64u);
+        }
+
         // ── MemTable (flush callback wired after recovery) ───────────────────
         {
-            memtable::MemTable::Options mt_opts = options.memtable;
             mt_opts.on_flush = nullptr; // installed after recovery
             impl->memtable_ = memtable::MemTable::create(mt_opts);
         }
@@ -348,7 +375,7 @@ namespace akkaradb::engine {
         // ── WAL Writer ───────────────────────────────────────────────────────
         // Started after recovery so the first seq allocated by the writer is
         // strictly greater than the highest seq replayed.
-        if (persistent) { impl->wal_writer_ = wal::WalWriter::create(options.wal); }
+        if (persistent) { impl->wal_writer_ = wal::WalWriter::create(wal_opts); }
 
         // ── Version Log ──────────────────────────────────────────────────────
         // Opened after WAL recovery so that any previously logged history is
@@ -408,6 +435,12 @@ namespace akkaradb::engine {
                 impl->setup_cluster(cfg, self_nid);
             }
             // No cluster.akcc → Standalone mode; no further cluster setup needed.
+        }
+
+        // ── API Server ───────────────────────────────────────────────────────
+        if (options.api.enabled && !options.api.backends.empty()) {
+            impl->api_server_ = server::AkkApiServer::create(*eng, options.api);
+            impl->api_server_->start();
         }
 
         eng->impl_ = std::move(impl);
@@ -526,7 +559,7 @@ namespace akkaradb::engine {
             // FLAG_BLOB: externalised large value — dereference via BlobManager.
             if (impl_->blob_manager_ && (rec->flags() & core::AKHdr32::FLAG_BLOB)) {
                 const blob::BlobRef ref = blob::decode_blob_ref(stored_val.data());
-                return impl_->blob_manager_->read(ref.blob_id);
+                return impl_->blob_manager_->read(ref.blob_id, ref.checksum);
             }
 
             return std::vector<uint8_t>(stored_val.begin(), stored_val.end());
@@ -543,7 +576,7 @@ namespace akkaradb::engine {
 
                 if (impl_->blob_manager_ && (sst_rec->flags() & core::AKHdr32::FLAG_BLOB)) {
                     const blob::BlobRef ref = blob::decode_blob_ref(stored_val.data());
-                    return impl_->blob_manager_->read(ref.blob_id);
+                    return impl_->blob_manager_->read(ref.blob_id, ref.checksum);
                 }
 
                 return std::vector<uint8_t>(stored_val.begin(), stored_val.end());
@@ -551,6 +584,42 @@ namespace akkaradb::engine {
         }
 
         return std::nullopt;
+    }
+
+    // ============================================================================
+    // get_into
+    // ============================================================================
+
+    bool AkkEngine::get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const {
+        if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+
+        // ── Fast path: no blob manager ───────────────────────────────────────
+        // When blob_enabled == false (or wal_enabled == false), no FLAG_BLOB records
+        // exist in MemTable or SST.  Skip the flags check entirely and copy value
+        // bytes directly into out — no intermediate MemRecord allocation.
+        if (!impl_->blob_manager_) {
+            const auto mt = impl_->memtable_->get_into(key, out);
+            if (mt.has_value()) return *mt; // true=found, false=tombstone
+
+            // MemTable miss: try SST (MemTable nullopt → not found, not tombstone)
+            if (impl_->sst_manager_) {
+                const auto sst_rec = impl_->sst_manager_->get(key);
+                if (sst_rec) {
+                    if (sst_rec->is_tombstone()) return false;
+                    const auto val = sst_rec->value();
+                    out.assign(val.begin(), val.end());
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // ── Slow path: blob manager active ───────────────────────────────────
+        // FLAG_BLOB values need flag inspection — fall back to get() which handles them.
+        const auto v = get(key);
+        if (!v) return false;
+        out = *v;
+        return true;
     }
 
     // ============================================================================
@@ -593,6 +662,12 @@ namespace akkaradb::engine {
         //  5. Stop Primary replication server.
         //  6. Stop ClusterManager (releases PRIMARY.lock if Primary).
         //  7. Stop BlobManager GC thread.
+
+        // 0. API Server: stop accepting new connections before flushing
+        if (impl_->api_server_) {
+            impl_->api_server_->close();
+            impl_->api_server_.reset();
+        }
 
         // 1. Replica client
         if (impl_->repl_client_) {
@@ -673,7 +748,7 @@ namespace akkaradb::engine {
         // Resolve BLOB reference to actual value bytes
         if (impl_->blob_manager_ && (entry->flags & core::AKHdr32::FLAG_BLOB)) {
             const blob::BlobRef ref = blob::decode_blob_ref(entry->value.data());
-            return impl_->blob_manager_->read(ref.blob_id);
+            return impl_->blob_manager_->read(ref.blob_id, ref.checksum);
         }
 
         return entry->value;
@@ -700,7 +775,7 @@ namespace akkaradb::engine {
             if (entry.flags & core::AKHdr32::FLAG_TOMBSTONE) return std::nullopt;
             if (blob_mgr && (entry.flags & core::AKHdr32::FLAG_BLOB)) {
                 const blob::BlobRef ref = blob::decode_blob_ref(entry.value.data());
-                return blob_mgr->read(ref.blob_id);
+                return blob_mgr->read(ref.blob_id, ref.checksum);
             }
             return entry.value;
         }

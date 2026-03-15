@@ -19,10 +19,13 @@
 // internal/include/engine/memtable/BPTree.hpp
 #pragma once
 
+#include "core/buffer/MonotonicArena.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -192,10 +195,25 @@ namespace akkaradb::engine::memtable {
             };
 
             // ── Tree state ────────────────────────────────────────────────────
+            core::MonotonicArena arena_; ///< Bump-pointer slab for node memory. Moves with the tree on seal_active().
             Node* root_ = nullptr;
             size_t size_ = 0;
             [[no_unique_address]] Compare comp_;
             LeafNode* rightmost_leaf_ = nullptr; ///< Cached pointer to the rightmost leaf for sequential-insert fast path.
+
+            // ── Node allocators ───────────────────────────────────────────────
+
+            /**
+             * Allocate + construct a LeafNode from the arena.
+             * Fast path: ~3–5 ns bump-pointer (vs ~50–100 ns malloc).
+             */
+            [[nodiscard]] LeafNode* alloc_leaf();
+
+            /**
+             * Allocate + construct an InternalNode from the arena.
+             * Fast path: ~3–5 ns bump-pointer (vs ~50–100 ns malloc).
+             */
+            [[nodiscard]] InternalNode* alloc_internal();
 
             // ── Internal operations ───────────────────────────────────────────
             std::optional<V> search_leaf(const LeafNode* leaf, const K& key) const;
@@ -208,7 +226,10 @@ namespace akkaradb::engine::memtable {
 
             /**
              * Post-order iterative tree destruction.
-             * Correctly dispatches to ~LeafNode / ~InternalNode via typed delete.
+             * Calls typed placement-destructors (~LeafNode / ~InternalNode) to run
+             * K/V destructors (e.g. MemRecord::~MemRecord frees vector data), but
+             * does NOT call delete — node slab memory is owned by arena_ and reclaimed
+             * in bulk by ~MonotonicArena() or arena_.reset().
              */
             void destroy_tree(Node* node) noexcept;
 
@@ -279,22 +300,25 @@ namespace akkaradb::engine::memtable {
 
     template <typename K, typename V, typename Compare>
     BPTree<K, V, Compare>::BPTree(BPTree&& other) noexcept
-        : root_{other.root_}, size_{other.size_}, comp_{std::move(other.comp_)}, rightmost_leaf_{other.rightmost_leaf_} {
+        : arena_{std::move(other.arena_)}, root_{other.root_}, size_{other.size_}, comp_{std::move(other.comp_)}, rightmost_leaf_{other.rightmost_leaf_} {
         other.root_ = nullptr;
         other.size_ = 0;
         other.rightmost_leaf_ = nullptr;
+        // other.arena_ is now in moved-from (empty) state: next alloc on 'other'
+        // will create fresh blocks, which is correct after seal_active().
     }
 
     template <typename K, typename V, typename Compare>
     BPTree<K, V, Compare>& BPTree<K, V, Compare>::operator=(BPTree&& other) noexcept {
         if (this != &other) {
-            // Fix: use destroy_tree instead of bare delete root_
-            // to correctly dispatch ~LeafNode / ~InternalNode.
+            // Destroy existing nodes: call placement-destructors (frees K vector data),
+            // then arena_ = std::move(...) below will bulk-free the slab memory.
             if (root_) destroy_tree(root_);
             root_ = other.root_;
             size_ = other.size_;
             comp_ = std::move(other.comp_);
             rightmost_leaf_ = other.rightmost_leaf_;
+            arena_ = std::move(other.arena_); // frees this->arena_ blocks, takes other's
             other.root_ = nullptr;
             other.size_ = 0;
             other.rightmost_leaf_ = nullptr;
@@ -310,13 +334,13 @@ namespace akkaradb::engine::memtable {
 
         // Post-order iterative traversal to avoid stack overflow on deep trees.
         std::vector<Node*> stack;
-        std::vector<Node*> to_delete;
+        std::vector<Node*> to_destroy;
         stack.push_back(node);
 
         while (!stack.empty()) {
             Node* cur = stack.back();
             stack.pop_back();
-            to_delete.push_back(cur);
+            to_destroy.push_back(cur);
 
             if (cur->is_internal()) {
                 auto* internal = static_cast<InternalNode*>(cur);
@@ -324,20 +348,24 @@ namespace akkaradb::engine::memtable {
             }
         }
 
-        // Delete children before parents; dispatch by type so destructors run correctly.
-        for (auto it = to_delete.rbegin(); it != to_delete.rend(); ++it) {
-            if ((*it)->is_leaf()) delete static_cast<LeafNode*>(*it);
-            else delete static_cast<InternalNode*>(*it);
+        // Call placement-destructors children-before-parents (reverse pre-order).
+        // This runs K/V destructors (e.g. ~MemRecord() frees vector data) without
+        // freeing the node slabs — arena_ owns and reclaims that memory in bulk.
+        for (auto it = to_destroy.rbegin(); it != to_destroy.rend(); ++it) {
+            if ((*it)->is_leaf()) static_cast<LeafNode*>(*it)->~LeafNode();
+            else static_cast<InternalNode*>(*it)->~InternalNode();
         }
+        // Slab memory is released by ~MonotonicArena() or arena_.reset() by the caller.
     }
 
     // ── clear ─────────────────────────────────────────────────────────────────
 
     template <typename K, typename V, typename Compare>
     void BPTree<K, V, Compare>::clear() {
-        // Fix: use destroy_tree to correctly dispatch typed delete,
-        // instead of bare delete root_ which bypasses LeafNode/InternalNode destructors.
-        if (root_) destroy_tree(root_);
+        if (root_) {
+            destroy_tree(root_); // runs K/V placement-destructors (frees vector data, etc.)
+            arena_.reset(); // reclaims all slab blocks in O(1) (rewinds pos/cur)
+        }
         root_ = nullptr;
         size_ = 0;
         rightmost_leaf_ = nullptr;
@@ -411,7 +439,7 @@ namespace akkaradb::engine::memtable {
 
         // ── Normal path ────────────────────────────────────────────────────────
         if (!root_) {
-            auto* leaf = new LeafNode{};
+            auto* leaf = alloc_leaf(); // arena bump-pointer, ~3–5 ns
             leaf->keys[0] = std::move(key);
             leaf->values[0] = std::move(value);
             leaf->count = 1;
@@ -423,7 +451,7 @@ namespace akkaradb::engine::memtable {
 
         std::optional<K> old_key;
         if (auto split = insert_internal(root_, std::move(key), std::move(value), old_key)) {
-            auto* new_root = new InternalNode{};
+            auto* new_root = alloc_internal(); // arena bump-pointer, ~3–5 ns
             new_root->keys[0] = std::move(split->separator);
             new_root->children[0] = split->left;
             new_root->children[1] = split->right;
@@ -494,7 +522,7 @@ namespace akkaradb::engine::memtable {
             }
             leaf->count = static_cast<uint16_t>(mid);
 
-            auto* right = new LeafNode{};
+            auto* right = alloc_leaf(); // arena bump-pointer, ~3–5 ns
             for (size_t i = mid; i < temp_idx; ++i) {
                 right->keys[i - mid] = std::move(temp[i].first);
                 right->values[i - mid] = std::move(temp[i].second);
@@ -567,7 +595,7 @@ namespace akkaradb::engine::memtable {
             node->children[mid] = temp_children[mid];
             node->count = static_cast<uint16_t>(mid);
 
-            auto* right = new InternalNode{};
+            auto* right = alloc_internal(); // arena bump-pointer, ~3–5 ns
             for (size_t i = mid + 1; i < key_idx; ++i) {
                 right->keys[i - mid - 1] = std::move(temp_keys[i]);
                 right->children[i - mid - 1] = temp_children[i];
@@ -653,5 +681,22 @@ namespace akkaradb::engine::memtable {
         auto idx = static_cast<size_t>(it - leaf->keys.begin());
         if (idx >= leaf->count) return Iterator{leaf->next, 0};
         return Iterator{leaf, idx};
+    }
+
+    // ── Node allocators (arena-backed) ────────────────────────────────────────
+
+    template <typename K, typename V, typename Compare>
+    BPTree<K, V, Compare>::LeafNode* BPTree<K, V, Compare>::alloc_leaf() {
+        // Placement-new into arena slab: O(1) bump-pointer (~3–5 ns) instead of malloc (~50–100 ns).
+        // LeafNode{} value-initializes all members: Node base, keys array (K default-ctors),
+        // values array (V default-ctors), next = nullptr.
+        void* mem = arena_.allocate(sizeof(LeafNode), alignof(LeafNode));
+        return ::new(mem) LeafNode{};
+    }
+
+    template <typename K, typename V, typename Compare>
+    BPTree<K, V, Compare>::InternalNode* BPTree<K, V, Compare>::alloc_internal() {
+        void* mem = arena_.allocate(sizeof(InternalNode), alignof(InternalNode));
+        return ::new(mem) InternalNode{};
     }
 } // namespace akkaradb::engine::memtable
