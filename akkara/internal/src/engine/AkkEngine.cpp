@@ -574,6 +574,13 @@ namespace akkaradb::engine {
 
                 const auto stored_val = sst_rec->value();
 
+                // ── SST read-through promotion ────────────────────────────────
+                // Re-insert into MemTable (no WAL) so the next read of this key
+                // is served from memory.  Blob records are promoted as-is (the
+                // inline BlobRef bytes are still correct); the BlobManager entry
+                // remains alive independently.
+                if (impl_->opts_.sst_promote_reads) { impl_->memtable_->put(key, stored_val, sst_rec->seq(), sst_rec->flags()); }
+
                 if (impl_->blob_manager_ && (sst_rec->flags() & core::AKHdr32::FLAG_BLOB)) {
                     const blob::BlobRef ref = blob::decode_blob_ref(stored_val.data());
                     return impl_->blob_manager_->read(ref.blob_id, ref.checksum);
@@ -608,6 +615,10 @@ namespace akkaradb::engine {
                     if (sst_rec->is_tombstone()) return false;
                     const auto val = sst_rec->value();
                     out.assign(val.begin(), val.end());
+
+                    // SST read-through promotion (no WAL, no blob expansion needed)
+                    if (impl_->opts_.sst_promote_reads) { impl_->memtable_->put(key, val, sst_rec->seq(), sst_rec->flags()); }
+
                     return true;
                 }
             }

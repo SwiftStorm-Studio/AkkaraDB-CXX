@@ -230,6 +230,23 @@ namespace akkaradb::engine {
          */
         size_t sst_bloom_bits_per_key = 10;
 
+        /**
+         * When true, a record fetched from SST on a MemTable miss is promoted
+         * back into the active MemTable (bypassing WAL).  Subsequent reads for
+         * the same hot key are served directly from memory without touching SST.
+         *
+         * Trade-offs:
+         *   + Repeated reads of cold keys become O(1) after the first SST hit.
+         *   - Each promoted record consumes MemTable space and may induce an
+         *     extra shard seal/flush cycle (write amplification on the read path).
+         *   - Blob-externalised values (FLAG_BLOB) are NOT promoted; only the
+         *     inline BlobRef (20 B) would be written, not the value itself.
+         *
+         * Recommended for read-heavy workloads with repeated key access patterns.
+         * Default: false
+         */
+        bool sst_promote_reads = false;
+
         // ── Integrated Management GUI ─────────────────────────────────────
 
         /**
