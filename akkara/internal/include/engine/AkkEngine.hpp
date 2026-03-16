@@ -231,6 +231,33 @@ namespace akkaradb::engine {
         size_t sst_bloom_bits_per_key = 10;
 
         /**
+         * Maximum number of SST levels (L0 + up to max_sst_levels-1 sorted levels).
+         * Level budgets: L1 = sst_l1_max_bytes, L(n) = L1 * multiplier^(n-1).
+         * Default: 7  (supports up to ~64PB before the deepest level is exhausted)
+         */
+        int max_sst_levels = 7;
+
+        /**
+         * Total byte budget for L1 SST files.
+         * L2 = sst_l1_max_bytes * sst_level_size_multiplier, etc.
+         * Default: 64 MiB
+         */
+        uint64_t sst_l1_max_bytes = 64ULL * 1024 * 1024;
+
+        /**
+         * Size multiplier between consecutive SST levels.
+         * Default: 10.0  (L1=64MB, L2=640MB, L3=6.4GB, ...)
+         */
+        double sst_level_size_multiplier = 10.0;
+
+        /**
+         * Maximum size of a single output SST file produced during compaction.
+         * Merged output is split into multiple files of at most this size.
+         * Default: 64 MiB
+         */
+        uint64_t sst_target_file_size = 64ULL * 1024 * 1024;
+
+        /**
          * When true, a record fetched from SST on a MemTable miss is promoted
          * back into the active MemTable (bypassing WAL).  Subsequent reads for
          * the same hot key are served directly from memory without touching SST.
@@ -246,31 +273,6 @@ namespace akkaradb::engine {
          * Default: false
          */
         bool sst_promote_reads = false;
-
-        // ── Integrated Management GUI ─────────────────────────────────────
-
-        /**
-         * When true, AkkEngine starts an embedded HTTP management server
-         * that serves a browser-based administration interface.
-         *
-         * Available in all modes (standalone, cluster Primary, cluster Replica).
-         * The server listens on web_config_port and provides:
-         *   - Key-value browse / search
-         *   - Version history viewer (requires version_log_enabled)
-         *   - Cluster topology view (when cluster is active)
-         *   - Live metrics (ops/s, memory usage, WAL lag)
-         *
-         * Default: false
-         * NOTE: HTTP server not yet implemented — reserved for a future phase.
-         */
-        bool web_config_enabled = false;
-
-        /**
-         * TCP port for the embedded management HTTP server.
-         * Only used when web_config_enabled == true.
-         * Default: 8080
-         */
-        uint16_t web_config_port = 8080;
 
         // ── API Server ────────────────────────────────────────────────────
 

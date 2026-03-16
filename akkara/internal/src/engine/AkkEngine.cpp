@@ -393,6 +393,10 @@ namespace akkaradb::engine {
             sst::SSTManager::Options sst_opts;
             sst_opts.sst_dir = options.data_dir / "sst";
             sst_opts.max_l0_files = static_cast<int>(options.max_l0_sst_files);
+            sst_opts.max_levels = options.max_sst_levels;
+            sst_opts.l1_max_bytes = options.sst_l1_max_bytes;
+            sst_opts.level_size_multiplier = options.sst_level_size_multiplier;
+            sst_opts.target_file_size_bytes = options.sst_target_file_size;
             sst_opts.bloom_bits_per_key = options.sst_bloom_bits_per_key;
             sst_opts.index_stride = sst::INDEX_STRIDE;
 
@@ -689,8 +693,9 @@ namespace akkaradb::engine {
         // 2. MemTable flush → SST (all shards)
         impl_->memtable_->force_flush();
 
-        // 2b. SST manager: no background threads, just release readers.
+        // 2b. SST manager: stop background compaction thread, then release.
         //     Done after force_flush() so the flush callback has finished.
+        if (impl_->sst_manager_) impl_->sst_manager_->shutdown();
         impl_->sst_manager_.reset();
 
         // 3. WAL sync + optional truncation
