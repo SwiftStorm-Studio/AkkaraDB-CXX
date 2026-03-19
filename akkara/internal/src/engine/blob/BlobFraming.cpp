@@ -61,38 +61,38 @@ namespace akkaradb::engine::blob {
     // ============================================================================
 
     void BlobFileHeader::serialize(uint8_t out[SIZE]) const noexcept {
-        put_u32(out,     magic);       // 0..3
-        put_u16(out + 4, version);     // 4..5
-        put_u16(out + 6, flags);       // 6..7
-        put_u64(out + 8, blob_id);     // 8..15
+        put_u32(out, magic); // 0..3
+        put_u16(out + 4, version); // 4..5
+        put_u16(out + 6, flags); // 6..7
+        put_u64(out + 8, blob_id); // 8..15
         put_u64(out + 16, total_size); // 16..23
-        put_u32(out + 24, crc32c);     // 24..27
-        std::memset(out + 28, 0, 4);   // 28..31  reserved
+        put_u32(out + 24, crc32c); // 24..27
+        put_u32(out + 28, compressed_size); // 28..31
     }
 
     BlobFileHeader BlobFileHeader::deserialize(const uint8_t in[SIZE]) noexcept {
         BlobFileHeader h{};
-        h.magic      = get_u32(in);
-        h.version    = get_u16(in + 4);
-        h.flags      = get_u16(in + 6);
-        h.blob_id    = get_u64(in + 8);
+        h.magic = get_u32(in);
+        h.version = get_u16(in + 4);
+        h.flags = get_u16(in + 6);
+        h.blob_id = get_u64(in + 8);
         h.total_size = get_u64(in + 16);
-        h.crc32c     = get_u32(in + 24);
-        std::memcpy(h.reserved, in + 28, 4);
+        h.crc32c = get_u32(in + 24);
+        h.compressed_size = get_u32(in + 28);
         return h;
     }
 
-    BlobFileHeader BlobFileHeader::build(uint64_t bid, uint64_t tsz) noexcept {
+    BlobFileHeader BlobFileHeader::build(uint64_t bid, uint64_t tsz, akkaradb::engine::Codec codec, uint32_t csz) noexcept {
         BlobFileHeader h{};
-        h.magic      = MAGIC;
-        h.version    = VERSION;
-        h.flags      = 0;
-        h.blob_id    = bid;
+        h.magic = MAGIC;
+        h.version = VERSION;
+        h.flags = static_cast<uint16_t>(codec);
+        h.blob_id = bid;
         h.total_size = tsz;
-        h.crc32c     = 0;
-        std::memset(h.reserved, 0, 4);
+        h.crc32c = 0;
+        h.compressed_size = csz;
 
-        // Serialize with crc32c=0, compute CRC, store it
+        // Serialize with crc32c=0, compute CRC over all 32 bytes, store it
         uint8_t buf[SIZE];
         h.serialize(buf);
         h.crc32c = core::CRC32C::compute(buf, SIZE);

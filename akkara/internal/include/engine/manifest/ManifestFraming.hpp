@@ -36,13 +36,29 @@ namespace akkaradb::engine::manifest {
      * ManifestRecordType - Discriminator for manifest record payload.
      */
     enum class ManifestRecordType : uint8_t {
-        StripeCommit    = 0x01, ///< Stripe counter advance
-        SSTSeal         = 0x02, ///< New SST file sealed
-        SSTDelete       = 0x03, ///< SST file deleted
-        CompactionStart = 0x04, ///< Compaction began
-        CompactionEnd   = 0x05, ///< Compaction completed
-        Checkpoint      = 0x06, ///< Checkpoint marker
-        Truncate        = 0x07, ///< Manifest truncate marker
+        StripeCommit = 0x01,
+        ///< Stripe counter advance
+        SSTSeal = 0x02,
+        ///< New SST file sealed (L0 flush only)
+        SSTDelete = 0x03,
+        ///< SST file deleted (legacy; superseded by CompactionCommit)
+        CompactionStart = 0x04,
+        ///< Compaction began (informational hint)
+        CompactionEnd = 0x05,
+        ///< Compaction completed (legacy single-output format)
+        Checkpoint = 0x06,
+        ///< Checkpoint marker
+        Truncate = 0x07,
+        ///< Manifest truncate marker
+        /**
+         * Atomic compaction commit — replaces CompactionEnd + SSTDelete.
+         *
+         * A single CRC-protected record that simultaneously adds all output files
+         * and removes all input files from the live set.  If this record is absent
+         * (e.g. process killed mid-write, detected by CRC mismatch), replay treats
+         * the old input files as still live and discards the orphan output files.
+         */
+        CompactionCommit = 0x08,
 
         // ── Cluster events (v4) ──────────────────────────────────────────
         NodeJoin = 0x10,
@@ -258,6 +274,27 @@ namespace akkaradb::engine::manifest {
         const std::optional<std::string>& reason
     );
 
+    /**
+     * Encodes a CompactionCommit payload (atomic multi-file compaction result).
+     *
+     * Payload fixed (12 bytes):
+     *   [ts_us:u64][output_count:u8][input_count:u8][reserved:u16]
+     * Variable:
+     *   output_count × [name_len:u16][name bytes]
+     *   input_count  × [name_len:u16][name bytes]
+     *
+     * During replay, this record atomically:
+     *   - Adds all output_files to the live set
+     *   - Removes all input_files from the live set
+     * If this record is absent (CRC mismatch = interrupted write), the live set
+     * is left unchanged (old input files remain live; orphan outputs are ignored).
+     */
+    [[nodiscard]] std::vector<uint8_t> encode_compaction_commit(
+        uint64_t ts_us,
+        const std::vector<std::string>& output_files,
+        const std::vector<std::string>& input_files
+    );
+
     // ============================================================================
     // Decode helpers — parse payload bytes into structured fields
     // ============================================================================
@@ -309,6 +346,12 @@ namespace akkaradb::engine::manifest {
         std::optional<std::string> reason;
     };
 
+    struct DecodedCompactionCommit {
+        uint64_t ts_us;
+        std::vector<std::string> output_files;
+        std::vector<std::string> input_files;
+    };
+
     /**
      * Decode functions.  Return false if payload is malformed / too short.
      */
@@ -319,6 +362,7 @@ namespace akkaradb::engine::manifest {
     [[nodiscard]] bool decode_compaction_end(const uint8_t* payload, uint16_t len, DecodedCompactionEnd& out);
     [[nodiscard]] bool decode_checkpoint(const uint8_t* payload, uint16_t len, DecodedCheckpoint& out);
     [[nodiscard]] bool decode_truncate(const uint8_t* payload, uint16_t len, DecodedTruncate& out);
+    [[nodiscard]] bool decode_compaction_commit(const uint8_t* payload, uint16_t len, DecodedCompactionCommit& out);
 
     // ========================================================================
     // Cluster event encode / decode (v4)

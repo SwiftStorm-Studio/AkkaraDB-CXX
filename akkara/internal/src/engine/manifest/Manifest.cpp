@@ -318,6 +318,22 @@ namespace akkaradb::engine::manifest {
                 deleted_sst_.insert(file);
             }
 
+            void compaction_commit(const std::vector<std::string>& output_files, const std::vector<std::string>& input_files) {
+                // Single append call → single CRC-protected record.
+                // Either fully applied on replay or entirely absent (CRC mismatch).
+                append(ManifestRecordType::CompactionCommit, encode_compaction_commit(now_us(), output_files, input_files));
+
+                std::lock_guard lock{mutex_};
+                for (const auto& f : output_files) {
+                    live_sst_.insert(f);
+                    deleted_sst_.erase(f);
+                }
+                for (const auto& f : input_files) {
+                    live_sst_.erase(f);
+                    deleted_sst_.insert(f);
+                }
+            }
+
             void truncate(const std::optional<std::string>& reason) {
                 append(ManifestRecordType::Truncate,
                        encode_truncate(now_us(), reason));
@@ -609,6 +625,22 @@ namespace akkaradb::engine::manifest {
                         last_checkpoint_ = CheckpointEvent{d.name, d.stripe, d.last_seq, d.ts_us};
                         break;
                     }
+                    case ManifestRecordType::CompactionCommit: {
+                        // Atomic multi-file compaction commit.
+                        // Adds all outputs and removes all inputs in one operation.
+                        DecodedCompactionCommit d;
+                        if (!decode_compaction_commit(payload, len, d)) { return; }
+                        std::lock_guard lock{mutex_};
+                        for (const auto& f : d.output_files) {
+                            live_sst_.insert(f);
+                            deleted_sst_.erase(f);
+                        }
+                        for (const auto& f : d.input_files) {
+                            live_sst_.erase(f);
+                            deleted_sst_.insert(f);
+                        }
+                        break;
+                    }
                     case ManifestRecordType::CompactionStart:
                     case ManifestRecordType::Truncate:
                         // Informational only — no state change
@@ -692,6 +724,10 @@ namespace akkaradb::engine::manifest {
     ) { impl_->compaction_end(level, output, inputs, entries, first_key_hex, last_key_hex); }
 
     void Manifest::sst_delete(const std::string& file) { impl_->sst_delete(file); }
+
+    void Manifest::compaction_commit(const std::vector<std::string>& output_files, const std::vector<std::string>& input_files) {
+        impl_->compaction_commit(output_files, input_files);
+    }
 
     void Manifest::truncate(const std::optional<std::string>& reason) { impl_->truncate(reason); }
 

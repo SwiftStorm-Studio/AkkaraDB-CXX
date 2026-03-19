@@ -71,6 +71,12 @@ namespace akkaradb::engine::memtable {
                 return std::nullopt;
             }
 
+            std::optional<bool> contains(std::span<const uint8_t> key) const override {
+                auto it = tree_.lower_bound(key);
+                if (!it.is_end() && it->first.compare_key(key) == 0) return !it->first.is_tombstone();
+                return std::nullopt;
+            }
+
             bool   empty() const noexcept override { return tree_.empty(); }
             size_t size()  const noexcept override { return tree_.size();  }
 

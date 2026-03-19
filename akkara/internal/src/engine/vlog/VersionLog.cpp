@@ -22,15 +22,21 @@
 #include "core/record/AKHdr32.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#ifdef _WIN32
+#  include <io.h>       // _fileno, _commit
+#else
+#  include <unistd.h>   // fdatasync, fileno
+#endif
 
 namespace akkaradb::engine::vlog {
     namespace fs = std::filesystem;
@@ -78,6 +84,18 @@ namespace akkaradb::engine::vlog {
     static constexpr size_t MAX_ENTRY_SIZE = 32u * 1024u * 1024u;
 
     // ============================================================================
+    // Platform fdatasync helper
+    // ============================================================================
+
+    static void do_fdatasync(FILE* f) {
+        #ifdef _WIN32
+        _commit(_fileno(f));
+        #else
+        fdatasync(fileno(f));
+        #endif
+    }
+
+    // ============================================================================
     // VersionLog::Impl
     // ============================================================================
 
@@ -85,14 +103,19 @@ namespace akkaradb::engine::vlog {
         public:
             VersionLogOptions opts_;
 
+            // ── Combined lock (① mutex consolidation) ────────────────────────
+            // Protects BOTH the file handle and the in-memory index.
+            // write_entry() and index update are always performed under the same
+            // lock, eliminating the race window that existed when two separate
+            // mutexes were held in sequence.
+            mutable std::mutex mu_;
+
             // ── In-memory index ───────────────────────────────────────────────
             // Maps key_bytes (as std::string) → versions sorted ascending by seq.
-            mutable std::mutex               index_mutex_;
             std::unordered_map<std::string, std::vector<VersionEntry>> index_;
 
             // ── File handle (append-only) ─────────────────────────────────────
-            std::mutex file_mutex_;
-            FILE*      file_ = nullptr;
+            FILE* file_ = nullptr;
 
             // ── Reusable serialization buffer ────────────────────────────────
             std::vector<uint8_t> write_buf_;
@@ -135,7 +158,10 @@ namespace akkaradb::engine::vlog {
                     hdr.version = AKVLOG_VERSION;
                     std::memset(hdr.reserved, 0, sizeof(hdr.reserved));
                     fwrite(&hdr, sizeof(hdr), 1, file_);
+                    // Always flush the file header regardless of sync_mode;
+                    // this is one-time initialisation, not a hot path.
                     fflush(file_);
+                    do_fdatasync(file_);
                 }
             }
 
@@ -175,25 +201,20 @@ namespace akkaradb::engine::vlog {
                         core::CRC32C::compute(buf.data(), entry_len - CRC_SIZE);
                     if (computed_crc != stored_crc) continue; // partial-write / corrupt
 
-                    // Parse entry header (starts at buf[sizeof(entry_len)])
-                    const uint8_t* p = buf.data() + sizeof(entry_len);
+                    // Parse entry header via struct (buf[0..ENTRY_HDR_SIZE-1])
+                    if (buf.size() < ENTRY_HDR_SIZE) continue;
+                    const AkvlogEntryHeader& ehdr = *reinterpret_cast<const AkvlogEntryHeader*>(buf.data());
 
-                    uint64_t seq = 0, source_node_id = 0, timestamp_ns = 0, key_fp64 = 0;
-                    uint16_t key_len = 0;
-                    uint32_t value_len = 0;
-                    uint8_t  flags = 0;
+                    const uint64_t seq = ehdr.seq;
+                    const uint64_t source_node_id = ehdr.source_node_id;
+                    const uint64_t timestamp_ns = ehdr.timestamp_ns;
+                    const uint8_t flags = ehdr.flags;
+                    const uint16_t key_len = ehdr.key_len;
+                    const uint32_t value_len = ehdr.value_len;
 
-                    std::memcpy(&seq,            p, 8); p += 8;
-                    std::memcpy(&source_node_id, p, 8); p += 8;
-                    std::memcpy(&timestamp_ns,   p, 8); p += 8;
-                    flags = *p++;
-                    std::memcpy(&key_fp64,  p, 8); p += 8;
-                    std::memcpy(&key_len,   p, 2); p += 2;
-                    std::memcpy(&value_len, p, 4); p += 4;
-
-                    // Sanity: parsed sizes must agree with entry_len
-                    const size_t consumed = static_cast<size_t>(p - buf.data());
-                    if (consumed + key_len + value_len + CRC_SIZE != entry_len) continue;
+                    // Sanity: field sizes must agree with entry_len
+                    const uint8_t* p = buf.data() + ENTRY_HDR_SIZE;
+                    if (ENTRY_HDR_SIZE + key_len + value_len + CRC_SIZE != entry_len) continue;
 
                     std::string key_str(reinterpret_cast<const char*>(p), key_len);
                     p += key_len;
@@ -226,38 +247,39 @@ namespace akkaradb::engine::vlog {
             }
 
             /// Serializes one entry into write_buf_ and writes it to file_.
-            /// Must be called with file_mutex_ held.
+            /// Must be called with mu_ held.
             void write_entry(std::span<const uint8_t> key,
                              uint64_t seq,
                              uint64_t source_node_id,
                              uint64_t timestamp_ns,
                              uint8_t  flags,
                              std::span<const uint8_t> value) {
-                const uint32_t key_len   = static_cast<uint32_t>(key.size());
-                const uint32_t value_len = static_cast<uint32_t>(value.size());
-                const uint32_t entry_len =
-                    static_cast<uint32_t>(ENTRY_HDR_SIZE + key.size() + value.size() + CRC_SIZE);
+                const uint32_t entry_len = static_cast<uint32_t>(ENTRY_HDR_SIZE + key.size() + value.size() + CRC_SIZE);
 
                 write_buf_.resize(entry_len);
                 uint8_t* p = write_buf_.data();
 
-                const uint64_t key_fp64 =
-                    core::AKHdr32::compute_key_fp64(key.data(), key.size());
-
-                // Serialize header
-                std::memcpy(p, &entry_len,      4); p += 4;
-                std::memcpy(p, &seq,             8); p += 8;
-                std::memcpy(p, &source_node_id, 8); p += 8;
-                std::memcpy(p, &timestamp_ns,   8); p += 8;
-                *p++ = flags;
-                std::memcpy(p, &key_fp64,        8); p += 8;
-                const uint16_t k16 = static_cast<uint16_t>(key.size());
-                std::memcpy(p, &k16,             2); p += 2;
-                std::memcpy(p, &value_len,       4); p += 4;
+                // Serialize header via struct — compiler verifies field layout
+                AkvlogEntryHeader& hdr = *reinterpret_cast<AkvlogEntryHeader*>(p);
+                hdr.entry_len = entry_len;
+                hdr.seq = seq;
+                hdr.source_node_id = source_node_id;
+                hdr.timestamp_ns = timestamp_ns;
+                hdr.flags = flags;
+                hdr.key_fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
+                hdr.key_len = static_cast<uint16_t>(key.size());
+                hdr.value_len = static_cast<uint32_t>(value.size());
+                p += ENTRY_HDR_SIZE;
 
                 // Payload
-                if (key_len   > 0) { std::memcpy(p, key.data(),   key_len);   p += key_len;   }
-                if (value_len > 0) { std::memcpy(p, value.data(), value_len); p += value_len; }
+                if (!key.empty()) {
+                    std::memcpy(p, key.data(), key.size());
+                    p += key.size();
+                }
+                if (!value.empty()) {
+                    std::memcpy(p, value.data(), value.size());
+                    p += value.size();
+                }
 
                 // CRC32C over [buf[0]..buf[entry_len-CRC_SIZE-1]] with CRC field = 0
                 std::memset(p, 0, CRC_SIZE);
@@ -266,7 +288,79 @@ namespace akkaradb::engine::vlog {
                 std::memcpy(p, &crc, CRC_SIZE);
 
                 fwrite(write_buf_.data(), 1, entry_len, file_);
-                fflush(file_);
+
+                // Sync mode: flush + optional fdatasync
+                if (opts_.sync_mode == VLogSyncMode::Sync) {
+                    fflush(file_);
+                    do_fdatasync(file_);
+                }
+                else if (opts_.sync_mode == VLogSyncMode::Async) { fflush(file_); }
+                // VLogSyncMode::Off: no flush; caller or close() handles it
+            }
+
+            /// Writes a file header to wf, then all currently live index_ entries,
+            /// each serialised in the standard format.  Used by prune_before().
+            /// Must be called with mu_ held.
+            size_t write_snapshot(FILE* wf, uint64_t seq_threshold, std::unordered_map<std::string, std::vector<VersionEntry>>& new_index) {
+                // File header
+                AkvlogFileHeader hdr{};
+                hdr.magic = AKVLOG_MAGIC;
+                hdr.version = AKVLOG_VERSION;
+                std::memset(hdr.reserved, 0, sizeof(hdr.reserved));
+                fwrite(&hdr, sizeof(hdr), 1, wf);
+
+                size_t removed = 0;
+
+                for (const auto& [key_str, versions] : index_) {
+                    std::vector<VersionEntry> kept;
+                    kept.reserve(versions.size());
+                    for (const auto& ve : versions) {
+                        if (ve.seq < seq_threshold) { ++removed; }
+                        else { kept.push_back(ve); }
+                    }
+                    if (kept.empty()) continue;
+
+                    // Write each kept entry to wf
+                    for (const auto& ve : kept) {
+                        const uint32_t k_len = static_cast<uint32_t>(key_str.size());
+                        const uint32_t v_len = static_cast<uint32_t>(ve.value.size());
+                        const uint32_t e_len = static_cast<uint32_t>(ENTRY_HDR_SIZE + k_len + v_len + CRC_SIZE);
+
+                        write_buf_.resize(e_len);
+                        uint8_t* p = write_buf_.data();
+
+                        AkvlogEntryHeader& ehdr = *reinterpret_cast<AkvlogEntryHeader*>(p);
+                        ehdr.entry_len = e_len;
+                        ehdr.seq = ve.seq;
+                        ehdr.source_node_id = ve.source_node_id;
+                        ehdr.timestamp_ns = ve.timestamp_ns;
+                        ehdr.flags = ve.flags;
+                        ehdr.key_fp64 = core::AKHdr32::compute_key_fp64(reinterpret_cast<const uint8_t*>(key_str.data()), key_str.size());
+                        ehdr.key_len = static_cast<uint16_t>(k_len);
+                        ehdr.value_len = v_len;
+                        p += ENTRY_HDR_SIZE;
+
+                        if (k_len > 0) {
+                            std::memcpy(p, key_str.data(), k_len);
+                            p += k_len;
+                        }
+                        if (v_len > 0) {
+                            std::memcpy(p, ve.value.data(), v_len);
+                            p += v_len;
+                        }
+                        std::memset(p, 0, CRC_SIZE);
+                        const uint32_t crc = core::CRC32C::compute(write_buf_.data(), e_len - CRC_SIZE);
+                        std::memcpy(p, &crc, CRC_SIZE);
+
+                        fwrite(write_buf_.data(), 1, e_len, wf);
+                    }
+
+                    new_index[key_str] = std::move(kept);
+                }
+
+                fflush(wf);
+                do_fdatasync(wf); // always sync the pruned file for correctness
+                return removed;
             }
     };
 
@@ -297,27 +391,21 @@ namespace akkaradb::engine::vlog {
                             std::span<const uint8_t> value) {
         if (!impl_) return;
 
-        // Persist first: if we crash after the file write but before the index
-        // update, recovery from the file will re-populate the index correctly.
-        {
-            std::lock_guard file_lock(impl_->file_mutex_);
-            impl_->write_entry(key, seq, source_node_id, timestamp_ns, flags, value);
-        }
+        // ① Single mutex: file write and index update are now atomic together.
+        std::lock_guard lock(impl_->mu_);
 
-        // Update in-memory index
-        {
-            std::lock_guard idx_lock(impl_->index_mutex_);
-            const std::string key_str(reinterpret_cast<const char*>(key.data()), key.size());
+        impl_->write_entry(key, seq, source_node_id, timestamp_ns, flags, value);
 
-            VersionEntry ve;
-            ve.seq            = seq;
-            ve.source_node_id = source_node_id;
-            ve.timestamp_ns   = timestamp_ns;
-            ve.flags          = flags;
-            ve.value.assign(value.begin(), value.end());
+        const std::string key_str(reinterpret_cast<const char*>(key.data()), key.size());
 
-            impl_->insert_sorted(key_str, std::move(ve));
-        }
+        VersionEntry ve;
+        ve.seq = seq;
+        ve.source_node_id = source_node_id;
+        ve.timestamp_ns = timestamp_ns;
+        ve.flags = flags;
+        ve.value.assign(value.begin(), value.end());
+
+        impl_->insert_sorted(key_str, std::move(ve));
     }
 
     // ============================================================================
@@ -328,7 +416,7 @@ namespace akkaradb::engine::vlog {
     VersionLog::get_at(std::span<const uint8_t> key, uint64_t at_seq) const {
         if (!impl_) return std::nullopt;
 
-        std::lock_guard lock(impl_->index_mutex_);
+        std::lock_guard lock(impl_->mu_);
         const std::string key_str(reinterpret_cast<const char*>(key.data()), key.size());
 
         const auto it = impl_->index_.find(key_str);
@@ -352,7 +440,7 @@ namespace akkaradb::engine::vlog {
     VersionLog::history(std::span<const uint8_t> key) const {
         if (!impl_) return {};
 
-        std::lock_guard lock(impl_->index_mutex_);
+        std::lock_guard lock(impl_->mu_);
         const std::string key_str(reinterpret_cast<const char*>(key.data()), key.size());
 
         const auto it = impl_->index_.find(key_str);
@@ -368,7 +456,7 @@ namespace akkaradb::engine::vlog {
     VersionLog::collect_rollback_targets(uint64_t target_seq) const {
         if (!impl_) return {};
 
-        std::lock_guard lock(impl_->index_mutex_);
+        std::lock_guard lock(impl_->mu_);
 
         std::vector<std::pair<std::vector<uint8_t>, std::optional<VersionEntry>>> result;
 
@@ -393,12 +481,88 @@ namespace akkaradb::engine::vlog {
     }
 
     // ============================================================================
+    // prune_before  (③)
+    // ============================================================================
+
+    size_t VersionLog::prune_before(uint64_t seq_threshold) {
+        if (!impl_) return 0;
+
+        std::lock_guard lock(impl_->mu_);
+
+        // Quick check: is there actually anything to prune?
+        bool has_old = false;
+        for (const auto& versions : impl_->index_ | std::views::values) {
+            if (!versions.empty() && versions.front().seq < seq_threshold) {
+                has_old = true;
+                break;
+            }
+        }
+        if (!has_old) return 0;
+
+        const auto& path = impl_->opts_.log_path;
+        const auto tmp_path = fs::path(path.string() + ".tmp");
+
+        // Open temp file
+        FILE* wf = nullptr;
+        #ifdef _WIN32
+        wf = _wfopen(tmp_path.wstring().c_str(), L"wb");
+        #else
+        wf = fopen(tmp_path.string().c_str(), "wb");
+        #endif
+        if (!wf) { throw std::runtime_error("VersionLog::prune_before: cannot open temp file: " + tmp_path.string()); }
+
+        // Build new index and write snapshot to tmp file
+        std::unordered_map<std::string, std::vector<VersionEntry>> new_index;
+        size_t removed = 0;
+        try { removed = impl_->write_snapshot(wf, seq_threshold, new_index); }
+        catch (...) {
+            fclose(wf);
+            fs::remove(tmp_path);
+            throw;
+        }
+        fclose(wf);
+
+        // Close current append handle
+        if (impl_->file_) {
+            fflush(impl_->file_);
+            fclose(impl_->file_);
+            impl_->file_ = nullptr;
+        }
+
+        // Atomic rename: tmp → main file
+        std::error_code ec;
+        fs::rename(tmp_path, path, ec);
+        if (ec) {
+            // Best-effort: try to reopen original file so the log stays usable
+            #ifdef _WIN32
+            impl_->file_ = _wfopen(path.wstring().c_str(), L"ab");
+            #else
+            impl_->file_ = fopen(path.string().c_str(), "ab");
+            #endif
+            throw std::runtime_error("VersionLog::prune_before: rename failed: " + ec.message());
+        }
+
+        // Swap in the pruned index
+        impl_->index_ = std::move(new_index);
+
+        // Reopen append handle on the pruned file
+        #ifdef _WIN32
+        impl_->file_ = _wfopen(path.wstring().c_str(), L"ab");
+        #else
+        impl_->file_ = fopen(path.string().c_str(), "ab");
+        #endif
+        if (!impl_->file_) { throw std::runtime_error("VersionLog::prune_before: cannot reopen log after prune: " + path.string()); }
+
+        return removed;
+    }
+
+    // ============================================================================
     // close
     // ============================================================================
 
     void VersionLog::close() {
         if (!impl_) return;
-        std::lock_guard lock(impl_->file_mutex_);
+        std::lock_guard lock(impl_->mu_);
         if (impl_->file_) {
             fflush(impl_->file_);
             fclose(impl_->file_);

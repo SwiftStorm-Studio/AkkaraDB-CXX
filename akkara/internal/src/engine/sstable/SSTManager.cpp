@@ -94,20 +94,30 @@ namespace akkaradb::engine::sst {
         : opts_(std::move(opts)), manifest_(manifest) {
         // Initialize level vectors.
         levels_.resize(static_cast<size_t>(opts_.max_levels));
+        // Publish initial (empty) snapshot so contains() never observes nullptr.
+        levels_snap_.store(std::make_shared<const LevelsData>(levels_), std::memory_order_release);
 
-        // Start background compaction thread immediately.
-        // The thread waits on compact_cv_ — safe to start before recover().
-        compact_thread_ = std::thread([this] { compaction_loop(); });
+        // Initialize cache shard capacities.
+        if (opts_.sst_cache_capacity > 0) {
+            const size_t per_shard = std::max(size_t{1}, opts_.sst_cache_capacity / kCacheShards);
+            for (auto& shard : cache_shards_) shard.capacity = per_shard;
+        }
+
+        // Start the background compaction thread pool.
+        // Threads wait on compact_cv_ — safe to start before recover().
+        const int n = std::max(1, opts_.compact_threads);
+        compact_pool_.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) { compact_pool_.emplace_back([this] { compaction_loop(); }); }
     }
 
     SSTManager::~SSTManager() {
         // shutdown() should already have been called by AkkEngine::close().
-        // Belt-and-suspenders: ensure thread is joined.
+        // Belt-and-suspenders: ensure all threads are joined.
         if (!shutting_down_.load(std::memory_order_relaxed)) {
             shutting_down_.store(true, std::memory_order_relaxed);
             compact_cv_.notify_all();
         }
-        if (compact_thread_.joinable()) compact_thread_.join();
+        for (auto& t : compact_pool_) { if (t.joinable()) t.join(); }
     }
 
     std::unique_ptr<SSTManager> SSTManager::create(Options opts,
@@ -123,7 +133,113 @@ namespace akkaradb::engine::sst {
     void SSTManager::shutdown() {
         shutting_down_.store(true, std::memory_order_relaxed);
         compact_cv_.notify_all();
-        if (compact_thread_.joinable()) compact_thread_.join();
+        // Wake any put() threads stalled on L0 backpressure.
+        {
+            std::lock_guard lk(l0_stall_mu_);
+        }
+        l0_stall_cv_.notify_all();
+        for (auto& t : compact_pool_) { if (t.joinable()) t.join(); }
+    }
+
+    // ============================================================================
+    // publish_snapshot_locked  (must be called under unique_lock(sst_mu_))
+    // ============================================================================
+
+    void SSTManager::publish_snapshot_locked() noexcept {
+        // Copy levels_ into a new heap-allocated snapshot and publish atomically.
+        // Callers holding an old snapshot (via atomic load) remain unaffected —
+        // their shared_ptr keeps the old LevelsData alive until they drop it.
+        levels_snap_.store(std::make_shared<const LevelsData>(levels_), std::memory_order_release);
+    }
+
+    // ============================================================================
+    // stall_if_l0_full
+    // ============================================================================
+
+    void SSTManager::stall_if_l0_full() {
+        const int threshold = (opts_.l0_stall_files > 0) ? opts_.l0_stall_files : opts_.max_l0_files * 2;
+        if (threshold >= INT_MAX) return;
+
+        // Fast path: L0 is not full.
+        {
+            std::shared_lock sst_lk(sst_mu_);
+            if (static_cast<int>(levels_[0].size()) < threshold) return;
+        }
+
+        // Slow path: wait for compaction to drain L0.
+        std::unique_lock lk(l0_stall_mu_);
+        l0_stall_cv_.wait(
+            lk,
+            [this, threshold] {
+                if (shutting_down_.load(std::memory_order_relaxed)) return true;
+                std::shared_lock sst_lk(sst_mu_);
+                return static_cast<int>(levels_[0].size()) < threshold;
+            }
+        );
+    }
+
+    // ============================================================================
+    // scan
+    // ============================================================================
+
+    std::vector<core::MemRecord> SSTManager::scan(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key) const {
+        // Take a snapshot of all readers under a brief shared lock.
+        // The readers are kept alive by shared_ptr even if compaction runs.
+        std::vector<std::shared_ptr<SSTReader>> snapshot;
+        {
+            std::shared_lock lock(sst_mu_);
+            for (const auto& meta : levels_[0]) { if (meta.reader) snapshot.push_back(meta.reader); }
+            for (int lvl = 1; lvl < opts_.max_levels; ++lvl) {
+                for (const auto& meta : levels_[static_cast<size_t>(lvl)]) {
+                    if (!meta.reader) continue;
+                    // Quick range filter using file metadata.
+                    if (!start_key.empty() && !meta.last_key.empty() && std::lexicographical_compare(
+                        meta.last_key.begin(),
+                        meta.last_key.end(),
+                        start_key.begin(),
+                        start_key.end()
+                    )) continue;
+                    if (!end_key.empty() && !meta.first_key.empty() && !std::lexicographical_compare(
+                        meta.first_key.begin(),
+                        meta.first_key.end(),
+                        end_key.begin(),
+                        end_key.end()
+                    )) continue;
+                    snapshot.push_back(meta.reader);
+                }
+            }
+        }
+
+        if (snapshot.empty()) return {};
+
+        // Build per-reader scan iterators (I/O happens outside the lock).
+        std::vector<SSTReader::Iterator> iters;
+        iters.reserve(snapshot.size());
+        for (const auto& rdr : snapshot) { iters.push_back(rdr->scan(start_key, end_key)); }
+
+        // k-way merge: smallest key first; equal keys → highest seq first.
+        std::priority_queue<MergeEntry, std::vector<MergeEntry>, MergeEntryGreater> heap;
+        for (size_t i = 0; i < iters.size(); ++i) { if (iters[i].has_next()) heap.push({iters[i].next(), i}); }
+
+        std::vector<core::MemRecord> result;
+        std::vector<uint8_t> prev_key;
+
+        while (!heap.empty()) {
+            core::MemRecord rec = heap.top().rec;
+            const size_t idx = heap.top().source_idx;
+            heap.pop();
+
+            if (iters[idx].has_next()) heap.push({iters[idx].next(), idx});
+
+            // Skip lower-seq duplicates of the same key.
+            const auto k = rec.key();
+            if (!prev_key.empty() && prev_key.size() == k.size() && std::equal(prev_key.begin(), prev_key.end(), k.begin())) continue;
+            prev_key.assign(k.begin(), k.end());
+
+            result.push_back(std::move(rec));
+        }
+
+        return result;
     }
 
     // ============================================================================
@@ -259,8 +375,38 @@ namespace akkaradb::engine::sst {
         // Advance next_sst_id_ past all recovered files.
         next_sst_id_.store(max_id + 1, std::memory_order_relaxed);
 
-        std::unique_lock lock(sst_mu_);
-        levels_ = std::move(tmp);
+        {
+            std::unique_lock lock(sst_mu_);
+            levels_ = std::move(tmp);
+            publish_snapshot_locked();
+        }
+
+        // ── Orphan scan ───────────────────────────────────────────────────────
+        // Delete any .aksst files in sst_dir that are NOT in the live set.
+        // These are remnants of interrupted compactions (output files written to
+        // disk but CompactionCommit not yet flushed) or interrupted L0 flushes
+        // (file written but sst_seal not yet flushed).  They are safe to delete
+        // because they are not referenced by any manifest record.
+        std::error_code dir_ec;
+        if (fs::exists(opts_.sst_dir, dir_ec) && !dir_ec) {
+            // Build live filename set from the freshly loaded levels_.
+            std::unordered_set<std::string> live_names;
+            {
+                std::shared_lock lock(sst_mu_);
+                for (const auto& level : levels_) { for (const auto& m : level) live_names.insert(m.filename); }
+            }
+
+            for (const auto& entry : fs::directory_iterator(opts_.sst_dir, dir_ec)) {
+                if (dir_ec) break;
+                if (entry.path().extension() != ".aksst") continue;
+                const auto fn = entry.path().filename().string();
+                if (live_names.find(fn) == live_names.end()) {
+                    std::error_code rm_ec;
+                    fs::remove(entry.path(), rm_ec);
+                    std::fprintf(stderr, "[SSTManager] recover: deleted orphan SST %s%s\n", fn.c_str(), rm_ec ? " (remove failed)" : "");
+                }
+            }
+        }
     }
 
     // ============================================================================
@@ -275,6 +421,7 @@ namespace akkaradb::engine::sst {
         wo.level              = 0;
         wo.bloom_bits_per_key = opts_.bloom_bits_per_key;
         wo.index_stride       = opts_.index_stride;
+        wo.codec = opts_.codec;
 
         const auto path     = make_sst_path(0);
         const auto filename = path.filename().string();
@@ -309,14 +456,16 @@ namespace akkaradb::engine::sst {
         {
             std::unique_lock lock(sst_mu_);
             levels_[0].insert(levels_[0].begin(), std::move(meta));
+            publish_snapshot_locked();
         }
 
-        // ── Wake background compaction thread (non-blocking) ─────────────────
+        // ── Wake background compaction pool (non-blocking) ───────────────────
+        // notify_all: with multiple worker threads all should check for new work.
         {
             std::lock_guard lk(compact_notify_mu_);
             compact_requested_ = true;
         }
-        compact_cv_.notify_one();
+        compact_cv_.notify_all();
 
         return res.max_seq;
     }
@@ -327,13 +476,27 @@ namespace akkaradb::engine::sst {
 
     std::optional<core::MemRecord>
     SSTManager::get(std::span<const uint8_t> key) const {
+        // ── Block cache lookup ────────────────────────────────────────────────
+        const size_t sidx = cache_shard_idx(key);
+        auto& shard = cache_shards_[sidx];
+        const std::string key_str(reinterpret_cast<const char*>(key.data()), key.size());
+        {
+            std::lock_guard lk(shard.mu);
+            if (auto cached = shard.cache_lookup(key_str)) return cached;
+        }
+
         std::shared_lock lock(sst_mu_);
 
         // ── L0: newest-first linear scan (files may overlap) ─────────────────
         for (const auto& meta : levels_[0]) {
             if (!meta.reader) continue;
             auto rec = meta.reader->get(key);
-            if (rec.has_value()) return rec;
+            if (rec.has_value()) {
+                lock.unlock();
+                std::lock_guard lk(shard.mu);
+                shard.cache_put(key_str, *rec);
+                return rec;
+            }
         }
 
         // ── L1+: binary search (non-overlapping, first_key sorted) ───────────
@@ -358,7 +521,60 @@ namespace akkaradb::engine::sst {
             if (!it->reader->key_in_range(key)) continue;
 
             auto rec = it->reader->get(key);
-            if (rec.has_value()) return rec;
+            if (rec.has_value()) {
+                lock.unlock();
+                std::lock_guard lk(shard.mu);
+                shard.cache_put(key_str, *rec);
+                return rec;
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    // ============================================================================
+    // SSTManager::contains
+    // ============================================================================
+
+    std::optional<bool> SSTManager::contains(std::span<const uint8_t> key) const {
+        // ── Lock-free read via atomic snapshot ───────────────────────────────
+        // Acquires the current levels snapshot without taking sst_mu_.
+        // The shared_ptr keeps all SSTReader objects (and for compressed SSTs,
+        // their in-memory data sections) alive for the duration of this call
+        // even if compaction concurrently publishes a new snapshot.
+        const auto snap = levels_snap_.load(std::memory_order_acquire);
+        if (!snap || snap->empty()) return std::nullopt;
+        const auto& levels = *snap;
+        const int nlevels = static_cast<int>(levels.size());
+
+        // ── L0: newest-first (files may overlap — check all until a hit) ──────
+        // key_in_range intentionally omitted: bloom provides fast rejection
+        // (~5 ns with BLOOM_TYPE_BLOCKED_FAST), saving the extra range cmp.
+        for (const auto& meta : levels[0]) {
+            if (!meta.reader) continue;
+            auto r = meta.reader->contains_fast(key);
+            if (r.has_value()) return r;
+        }
+
+        // ── L1+: non-overlapping, binary search per level ─────────────────────
+        for (int lvl = 1; lvl < nlevels; ++lvl) {
+            const auto& level = levels[static_cast<size_t>(lvl)];
+            if (level.empty()) continue;
+
+            // Find the first file whose last_key >= key.
+            auto it = std::lower_bound(
+                level.begin(),
+                level.end(),
+                key,
+                [](const SSTMeta& m, std::span<const uint8_t> k) {
+                    return std::lexicographical_compare(m.last_key.begin(), m.last_key.end(), k.begin(), k.end());
+                }
+            );
+            if (it == level.end() || !it->reader) continue;
+            if (!it->reader->key_in_range(key)) continue;
+
+            auto r = it->reader->contains_fast(key);
+            if (r.has_value()) return r;
         }
 
         return std::nullopt;
@@ -383,7 +599,7 @@ namespace akkaradb::engine::sst {
     }
 
     // ============================================================================
-    // compaction_loop  (background thread)
+    // compaction_loop  (one instance per pool thread)
     // ============================================================================
 
     void SSTManager::compaction_loop() {
@@ -392,29 +608,47 @@ namespace akkaradb::engine::sst {
             {
                 std::unique_lock lk(compact_notify_mu_);
                 compact_cv_.wait(lk, [this] { return compact_requested_ || shutting_down_.load(std::memory_order_relaxed); });
-                compact_requested_ = false;
+                // Don't clear compact_requested_ here: other threads in the pool
+                // also need to see it.  Each thread checks whether there is actually
+                // work available (via pick_and_claim_work) and loops until idle.
             }
 
             if (shutting_down_.load(std::memory_order_relaxed)) break;
 
-            // ── Drain: run cascading compactions until nothing left to do ─────
+            // ── Drain: run all compaction tasks available to this thread ──────
             while (!shutting_down_.load(std::memory_order_relaxed)) {
-                auto work = pick_compaction_work();
-                if (!work) break;
+                auto work = pick_and_claim_work();
+                if (!work) {
+                    // No non-conflicting work right now; another thread may have
+                    // claimed it.  Clear the flag only when the pool is fully idle.
+                    {
+                        std::lock_guard lk(compact_notify_mu_);
+                        // Only clear if nothing else is pending
+                        bool pool_idle;
+                        {
+                            std::lock_guard busy_lk(compact_busy_mu_);
+                            pool_idle = compact_busy_srcs_.empty();
+                        }
+                        if (pool_idle) compact_requested_ = false;
+                    }
+                    break;
+                }
                 run_compaction(std::move(*work));
+
+                // After completing a compaction, cascade: notify others in case
+                // the finished level now exceeds its budget.
+                compact_cv_.notify_all();
             }
         }
     }
 
     // ============================================================================
-    // pick_compaction_work
+    // pick_compaction_work  (requires sst_mu_ shared + compact_busy_mu_ held)
     // ============================================================================
 
-    std::optional<SSTManager::CompactionWork> SSTManager::pick_compaction_work() const {
-        std::shared_lock lock(sst_mu_);
-
+    std::optional<SSTManager::CompactionWork> SSTManager::pick_compaction_work(const std::set<int>& busy_srcs) const {
         // ── Priority 1: L0 file count trigger ────────────────────────────────
-        if (static_cast<int>(levels_[0].size()) >= opts_.max_l0_files) {
+        if (busy_srcs.find(0) == busy_srcs.end() && static_cast<int>(levels_[0].size()) >= opts_.max_l0_files) {
             CompactionWork w;
             w.src_level = 0;
             w.dst_level = 1;
@@ -428,6 +662,9 @@ namespace akkaradb::engine::sst {
 
         // ── Priority 2: size-based trigger for L1+ ───────────────────────────
         for (int lvl = 1; lvl < opts_.max_levels - 1; ++lvl) {
+            // Skip levels already being compacted by another thread
+            if (busy_srcs.find(lvl) != busy_srcs.end()) continue;
+
             const auto& level = levels_[static_cast<size_t>(lvl)];
             if (level.empty()) continue;
 
@@ -458,6 +695,22 @@ namespace akkaradb::engine::sst {
     }
 
     // ============================================================================
+    // pick_and_claim_work  (atomically picks + marks src_level busy)
+    // ============================================================================
+
+    std::optional<SSTManager::CompactionWork> SSTManager::pick_and_claim_work() {
+        std::shared_lock sst_lock(sst_mu_);
+        std::lock_guard busy_lock(compact_busy_mu_);
+
+        auto work = pick_compaction_work(compact_busy_srcs_);
+        if (!work) return std::nullopt;
+
+        // Claim: mark this src_level so other pool threads skip it
+        compact_busy_srcs_.insert(work->src_level);
+        return work;
+    }
+
+    // ============================================================================
     // write_output_files
     // ============================================================================
 
@@ -469,6 +722,7 @@ namespace akkaradb::engine::sst {
         wo.level = dst_level;
         wo.bloom_bits_per_key = opts_.bloom_bits_per_key;
         wo.index_stride = opts_.index_stride;
+        wo.codec = opts_.codec;
 
         // Split merged vector into chunks of at most target_file_size_bytes.
         size_t chunk_start = 0;
@@ -493,11 +747,9 @@ namespace akkaradb::engine::sst {
             const auto filename = path.filename().string();
             const auto res = SSTWriter::write(path, chunk, wo);
 
-            if (manifest_) {
-                const auto fk_hex = res.first_key.empty() ? std::optional<std::string>{} : std::optional<std::string>(bytes_to_hex(res.first_key));
-                const auto lk_hex = res.last_key.empty() ? std::optional<std::string>{} : std::optional<std::string>(bytes_to_hex(res.last_key));
-                manifest_->sst_seal(dst_level, filename, res.entry_count, fk_hex, lk_hex);
-            }
+            // Note: sst_seal is NOT called here for compaction outputs.
+            // The caller (run_compaction) will issue a single atomic
+            // compaction_commit() that adds all outputs and removes all inputs.
 
             auto reader = SSTReader::open(path);
             if (!reader) { throw std::runtime_error(std::format("[SSTManager] compact: cannot re-open output file: {}", path.string())); }
@@ -522,7 +774,14 @@ namespace akkaradb::engine::sst {
     // ============================================================================
 
     void SSTManager::run_compaction(CompactionWork work) {
-        if (work.inputs.empty()) return;
+        if (work.inputs.empty()) {
+            // Release claim (src_level was marked busy in pick_and_claim_work)
+            {
+                std::lock_guard lk(compact_busy_mu_);
+                compact_busy_srcs_.erase(work.src_level);
+            }
+            return;
+        }
 
         const int src = work.src_level;
         const int dst = work.dst_level;
@@ -586,22 +845,17 @@ namespace akkaradb::engine::sst {
         // Note: write_output_files handles empty merged (returns empty vector).
         auto output_metas = write_output_files(std::move(merged), dst);
 
-        // ── 7. Update manifest ────────────────────────────────────────────────
+        // ── 7. Atomic manifest commit ─────────────────────────────────────────
+        // Single CRC-protected record: adds all outputs, removes all inputs.
+        // If the process is killed before this write completes, replay sees no
+        // CompactionCommit → input files remain live, output files become orphans
+        // (cleaned by recover()'s orphan scan on next startup).
         if (manifest_) {
-            const std::string output_summary = output_metas.empty() ? std::string{} : output_metas.front().filename; // primary output name for logging
+            std::vector<std::string> output_filenames;
+            output_filenames.reserve(output_metas.size());
+            for (const auto& m : output_metas) output_filenames.push_back(m.filename);
 
-            const auto fk_hex = output_metas.empty() || output_metas.front().first_key.empty()
-                                    ? std::optional<std::string>{}
-                                    : std::optional<std::string>(bytes_to_hex(output_metas.front().first_key));
-            const auto lk_hex = output_metas.empty() || output_metas.back().last_key.empty()
-                                    ? std::optional<std::string>{}
-                                    : std::optional<std::string>(bytes_to_hex(output_metas.back().last_key));
-
-            uint64_t total_entries = 0;
-            for (const auto& m : output_metas) total_entries += m.entry_count;
-
-            manifest_->compaction_end(src, output_summary, input_filenames, total_entries, fk_hex, lk_hex);
-            for (const auto& fn : input_filenames) manifest_->sst_delete(fn);
+            manifest_->compaction_commit(output_filenames, input_filenames);
         }
 
         // ── 8. Atomically update levels_ ─────────────────────────────────────
@@ -627,9 +881,33 @@ namespace akkaradb::engine::sst {
             for (auto& m : output_metas) dst_vec.push_back(std::move(m));
 
             if (dst > 0) { std::sort(dst_vec.begin(), dst_vec.end(), [](const SSTMeta& a, const SSTMeta& b) { return a.first_key < b.first_key; }); }
+
+            // Publish updated snapshot so lock-free contains() sees the new state.
+            publish_snapshot_locked();
         }
 
-        // ── 9. Delete old files from disk ─────────────────────────────────────
+        // ── 9. Notify stall CV + clear block cache ────────────────────────────
+        // L0 files were removed: wake any put() threads blocked in stall_if_l0_full().
+        // Acquire l0_stall_mu_ momentarily to ensure the notify is not missed by a
+        // thread between its predicate check and its wait() call.
+        {
+            std::lock_guard stall_lk(l0_stall_mu_);
+        }
+        l0_stall_cv_.notify_all();
+
+        // Invalidate the block cache: compacted files were replaced with new
+        // output files, so any cached entries may reference stale SST data.
+        cache_clear_all();
+
+        // ── 10. Release src_level busy claim ──────────────────────────────────
+        // Done before I/O so other threads can pick new work for this level
+        // immediately (the level_ state has already been updated under sst_mu_).
+        {
+            std::lock_guard lk(compact_busy_mu_);
+            compact_busy_srcs_.erase(work.src_level);
+        }
+
+        // ── 11. Delete old files from disk ─────────────────────────────────────
         // Windows: close all handles before deleting.
         iters.clear();
         for (auto& m : work.inputs) m.reader.reset();

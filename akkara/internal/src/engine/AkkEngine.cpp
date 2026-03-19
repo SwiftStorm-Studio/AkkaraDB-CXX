@@ -49,6 +49,103 @@
 namespace akkaradb::engine {
     namespace fs = std::filesystem;
 
+    // ============================================================================
+    // AkkEngine::ScanIterator::Impl
+    // ============================================================================
+
+    class AkkEngine::ScanIterator::Impl {
+        public:
+            Impl(memtable::MemTable::RangeIterator mt_iter, std::vector<core::MemRecord> sst_records, blob::BlobManager* blob_mgr)
+                : mt_iter_(std::move(mt_iter)), sst_records_(std::move(sst_records)), blob_mgr_(blob_mgr) {
+                advance_mt();
+                pre_compute();
+            }
+
+            [[nodiscard]] bool has_next() const noexcept { return pending_.has_value(); }
+
+            std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> next() {
+                auto result = std::move(pending_);
+                pre_compute();
+                return result;
+            }
+
+        private:
+            memtable::MemTable::RangeIterator mt_iter_;
+            std::optional<core::MemRecord> mt_cur_; ///< peeked MemTable record
+            std::vector<core::MemRecord> sst_records_;
+            size_t sst_idx_ = 0;
+            blob::BlobManager* blob_mgr_ = nullptr;
+
+            std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> pending_;
+
+            void advance_mt() { mt_cur_ = (mt_iter_.has_next()) ? mt_iter_.next() : std::nullopt; }
+
+            void pre_compute() { pending_ = pick_one(); }
+
+            std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> pick_one() {
+                while (mt_cur_.has_value() || sst_idx_ < sst_records_.size()) {
+                    const bool mt_ok = mt_cur_.has_value();
+                    const bool sst_ok = sst_idx_ < sst_records_.size();
+
+                    // Compare keys to determine which source wins.
+                    int cmp = 0;
+                    if (mt_ok && sst_ok) {
+                        const auto mk = mt_cur_->key();
+                        const auto sk = sst_records_[sst_idx_].key();
+                        cmp = std::ranges::lexicographical_compare(mk, sk) ? -1 : std::ranges::lexicographical_compare(sk, mk) ? 1 : 0;
+                    }
+                    else { cmp = mt_ok ? -1 : 1; }
+
+                    // Extract winner without requiring default-constructible MemRecord.
+                    auto process = [&](const core::MemRecord& rec) -> std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> {
+                        if (rec.is_tombstone()) return std::nullopt;
+                        const auto key_sp = rec.key();
+                        std::vector<uint8_t> key_vec(key_sp.begin(), key_sp.end());
+                        const auto val_sp = rec.value();
+                        if (blob_mgr_ && (rec.flags() & core::AKHdr32::FLAG_BLOB)) {
+                            const blob::BlobRef ref = blob::decode_blob_ref(val_sp.data());
+                            auto blob_val = blob_mgr_->read(ref.blob_id, ref.checksum);
+                            if (blob_val.empty()) return std::nullopt;
+                            return std::make_pair(std::move(key_vec), std::move(blob_val));
+                        }
+                        return std::make_pair(std::move(key_vec), std::vector<uint8_t>(val_sp.begin(), val_sp.end()));
+                    };
+
+                    if (cmp <= 0) {
+                        // MemTable wins (or tie → MemTable wins since it is newer)
+                        core::MemRecord rec = std::move(*mt_cur_);
+                        advance_mt();
+                        if (cmp == 0) ++sst_idx_; // skip the matching SST entry
+                        if (auto r = process(std::move(rec))) return r;
+                    }
+                    else {
+                        // SST wins
+                        core::MemRecord rec = std::move(sst_records_[sst_idx_++]);
+                        if (auto r = process(std::move(rec))) return r;
+                    }
+                }
+                return std::nullopt;
+            }
+    };
+
+    // ============================================================================
+    // ScanIterator methods
+    // ============================================================================
+
+    AkkEngine::ScanIterator::ScanIterator(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+    AkkEngine::ScanIterator::~ScanIterator() = default;
+
+    AkkEngine::ScanIterator::ScanIterator(ScanIterator&&) noexcept = default;
+    AkkEngine::ScanIterator& AkkEngine::ScanIterator::operator=(ScanIterator&&) noexcept = default;
+
+    bool AkkEngine::ScanIterator::has_next() const noexcept { return impl_ && impl_->has_next(); }
+
+    std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> AkkEngine::ScanIterator::next() {
+        if (!impl_) return std::nullopt;
+        return impl_->next();
+    }
+
     // ── writer_threads → shard count ─────────────────────────────────────────
     // Birthday-paradox formula targeting ~80% collision-free probability.
     //   P(no collision) ≈ e^{-N(N-1)/(2S)} ≥ 0.80
@@ -323,7 +420,7 @@ namespace akkaradb::engine {
 
         // ── BlobManager ──────────────────────────────────────────────────────
         if (persistent && options.blob_enabled) {
-            impl->blob_manager_ = blob::BlobManager::create(options.blob_dir, options.blob_threshold_bytes);
+            impl->blob_manager_ = blob::BlobManager::create(options.blob_dir, options.blob_threshold_bytes, options.blob_codec);
             impl->blob_manager_->start(); // starts GC thread + startup cleanup
         }
 
@@ -365,12 +462,6 @@ namespace akkaradb::engine {
             (void)result;
         }
 
-        // ── BlobManager orphan scan ──────────────────────────────────────────
-        // After WAL recovery, any blob whose WAL entry did not survive is an
-        // orphan.  For Phase 2+3+4 (no SST yet) we conservatively keep all blobs
-        // on startup; full orphan detection requires scanning MemTable records
-        // and is deferred until SST compaction is implemented.
-        if (persistent && impl->blob_manager_) { impl->blob_manager_->scan_orphans([](uint64_t) { return true; }); }
 
         // ── WAL Writer ───────────────────────────────────────────────────────
         // Started after recovery so the first seq allocated by the writer is
@@ -382,7 +473,8 @@ namespace akkaradb::engine {
         // recovered into the in-memory index before new writes are accepted.
         if (persistent && options.version_log_enabled && !options.data_dir.empty()) {
             vlog::VersionLogOptions vl_opts;
-            vl_opts.log_path = options.data_dir / "history.akvlog";
+            vl_opts.log_path  = options.data_dir / "history.akvlog";
+            vl_opts.sync_mode = options.version_log_sync_mode;
             impl->version_log_ = vlog::VersionLog::create(std::move(vl_opts));
         }
 
@@ -399,6 +491,8 @@ namespace akkaradb::engine {
             sst_opts.target_file_size_bytes = options.sst_target_file_size;
             sst_opts.bloom_bits_per_key = options.sst_bloom_bits_per_key;
             sst_opts.index_stride = sst::INDEX_STRIDE;
+            sst_opts.codec = options.sst_codec;
+            sst_opts.l0_stall_files = options.sst_l0_stall_files;
 
             impl->sst_manager_ = sst::SSTManager::create(sst_opts, impl->manifest_.get());
             impl->sst_manager_->recover(); // load live SST files from Manifest
@@ -409,6 +503,44 @@ namespace akkaradb::engine {
             impl->memtable_->set_flush_callback(
                 [sst_mgr = impl->sst_manager_.get()](std::vector<core::MemRecord> records) { if (!records.empty()) sst_mgr->flush(std::move(records)); }
             );
+        }
+
+        // ── BlobManager orphan scan ──────────────────────────────────────────
+        // Build the live blob reference set by scanning:
+        //   • MemTable  — WAL-recovered, non-tombstone FLAG_BLOB entries
+        //   • SST files — all FLAG_BLOB entries (over-inclusive: if a key was
+        //                  tombstoned in MemTable but a blob record survives in
+        //                  an older SST layer we keep it alive.  It will be
+        //                  collected after compaction propagates the tombstone.)
+        // Any blob_id absent from both sources was orphaned by a previous crash
+        // (WAL record lost) and is safe to schedule for deletion now.
+        if (persistent && impl->blob_manager_) {
+            std::unordered_set<uint64_t> referenced;
+
+            const auto collect_blob_refs = [&](const core::MemRecord& rec) {
+                if (rec.flags() & core::AKHdr32::FLAG_BLOB) {
+                    const auto val = rec.value();
+                    if (val.size() >= sizeof(uint64_t)) {
+                        uint64_t bid;
+                        std::memcpy(&bid, val.data(), sizeof(bid));
+                        referenced.insert(bid);
+                    }
+                }
+            };
+
+            // MemTable: non-tombstone records only (tombstones carry no blob ref)
+            {
+                auto it = impl->memtable_->iterator(memtable::MemTable::KeyRange{});
+                while (it.has_next()) {
+                    const auto rec = it.next();
+                    if (!rec->is_tombstone()) collect_blob_refs(*rec);
+                }
+            }
+
+            // SST: all records from all levels (over-inclusive, see above)
+            if (impl->sst_manager_) { for (const auto& rec : impl->sst_manager_->scan({}, {})) { collect_blob_refs(rec); } }
+
+            impl->blob_manager_->scan_orphans([&referenced](uint64_t id) { return referenced.contains(id); });
         }
 
         // ── Cluster setup ────────────────────────────────────────────────────
@@ -463,6 +595,11 @@ namespace akkaradb::engine {
 
     void AkkEngine::put(std::span<const uint8_t> key, std::span<const uint8_t> value) {
         if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+
+        // ── L0 write backpressure ─────────────────────────────────────────────
+        // Block until compaction drains L0 below the stall threshold.
+        // This prevents L0 from growing unboundedly when compaction lags behind.
+        if (impl_->sst_manager_) impl_->sst_manager_->stall_if_l0_full();
 
         // Allocate a globally-unique sequence number.  On Primary/Standalone,
         // this is the authoritative seq.  On Replica, direct puts are allowed
@@ -638,6 +775,58 @@ namespace akkaradb::engine {
     }
 
     // ============================================================================
+    // exists
+    // ============================================================================
+
+    bool AkkEngine::exists(std::span<const uint8_t> key) const {
+        if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+
+        // MemTable: skip entirely when empty (e.g. SST-only read after reopen with no writes).
+        // approx_size() is a relaxed atomic load — safe and cheap.
+        if (impl_->memtable_->approx_size() > 0) {
+            const auto mt = impl_->memtable_->contains(key);
+            if (mt.has_value()) return *mt;
+        }
+
+        // SST: same 3-way semantics
+        if (impl_->sst_manager_) {
+            const auto sst = impl_->sst_manager_->contains(key);
+            if (sst.has_value()) return *sst;
+        }
+
+        return false;
+    }
+
+    // ============================================================================
+    // count
+    // ============================================================================
+
+    size_t AkkEngine::count(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key) const {
+        if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+
+        // Build MemTable range iterator
+        const std::vector<uint8_t> start_vec(start_key.begin(), start_key.end());
+        const std::vector<uint8_t> end_vec(end_key.begin(), end_key.end());
+        auto mt_iter = impl_->memtable_->iterator(memtable::MemTable::KeyRange{start_vec, end_vec});
+
+        // Collect SST records (tombstones included — Impl handles suppression)
+        std::vector<core::MemRecord> sst_records;
+        if (impl_->sst_manager_) sst_records = impl_->sst_manager_->scan(start_key, end_key);
+
+        // Pass blob_mgr = nullptr → blob I/O skipped; FLAG_BLOB records are still
+        // counted correctly because we only need existence, not the actual value.
+        auto iter_impl = std::make_unique<ScanIterator::Impl>(std::move(mt_iter), std::move(sst_records), nullptr);
+
+        ScanIterator it(std::move(iter_impl));
+        size_t n = 0;
+        while (it.has_next()) {
+            (void)it.next();
+            ++n;
+        }
+        return n;
+    }
+
+    // ============================================================================
     // force_sync
     // ============================================================================
 
@@ -742,8 +931,15 @@ namespace akkaradb::engine {
             impl_->blob_manager_.reset();
         }
 
-        // 8. Version log
+        // 8. Version log: auto-prune then close
         if (impl_->version_log_) {
+            if (impl_->opts_.version_log_prune_on_close) {
+                const uint64_t last = impl_->memtable_->last_seq();
+                const uint64_t keep = impl_->opts_.version_log_keep_seqs;
+                if (last > keep) {
+                    impl_->version_log_->prune_before(last - keep);
+                }
+            }
             impl_->version_log_->close();
             impl_->version_log_.reset();
         }
@@ -841,4 +1037,39 @@ namespace akkaradb::engine {
         const auto prev = impl_->version_log_->get_at(key, target_seq);
         do_rollback_key(this, key, prev, impl_->blob_manager_.get());
     }
+
+    // ============================================================================
+    // scan
+    // ============================================================================
+
+    AkkEngine::ScanIterator AkkEngine::scan(
+        std::span<const uint8_t> start_key,
+        std::span<const uint8_t> end_key) const {
+        if (!impl_ || impl_->closed_.load(std::memory_order_relaxed))
+            throw std::runtime_error("AkkEngine: engine is closed");
+
+        // ── 1. MemTable snapshot iterator ─────────────────────────────────────
+        memtable::MemTable::KeyRange mt_range;
+        if (!start_key.empty())
+            mt_range.start.assign(start_key.begin(), start_key.end());
+        if (!end_key.empty())
+            mt_range.end.assign(end_key.begin(), end_key.end());
+
+        auto mt_iter = impl_->memtable_->iterator(mt_range);
+
+        // ── 2. SST scan (snapshot under reader shared_ptrs) ───────────────────
+        std::vector<core::MemRecord> sst_records;
+        if (impl_->sst_manager_) {
+            sst_records = impl_->sst_manager_->scan(start_key, end_key);
+        }
+
+        // ── 3. Build merge iterator ───────────────────────────────────────────
+        auto impl = std::make_unique<ScanIterator::Impl>(
+            std::move(mt_iter),
+            std::move(sst_records),
+            impl_->blob_manager_.get()
+        );
+        return ScanIterator(std::move(impl));
+    }
+
 } // namespace akkaradb::engine

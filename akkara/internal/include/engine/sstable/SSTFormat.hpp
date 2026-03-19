@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace akkaradb::engine::sst {
 
@@ -123,6 +124,16 @@ namespace akkaradb::engine::sst {
     //   [52] max_seq[8]         → [60]
     //   [60] crc32c[4]          → [64] ✓
 
+    // ── Codec flag values (stored in SSTFileHeader::flags) ───────────────────
+    //
+    // flags == SST_CODEC_NONE (0x00): data section is raw (backward compatible).
+    // flags == SST_CODEC_ZSTD (0x01): data section is Zstd-compressed.
+    //   Compressed size  = index_offset - DATA_OFFSET  (derived, no extra field needed).
+    //   Uncompressed size = data_size   (existing field; used for ZSTD_decompress bound).
+
+    inline constexpr uint8_t SST_CODEC_NONE = 0x00u;
+    inline constexpr uint8_t SST_CODEC_ZSTD = 0x01u;
+
     #pragma pack(push, 1)
     struct SSTFileHeader {
         uint32_t magic;          ///< [0]  "AKSS" = 0x414B5353
@@ -173,11 +184,49 @@ namespace akkaradb::engine::sst {
     //   h2 = (uint32_t)(key_fp64 >> 32) | 1  — always odd to avoid cycles
     //   bit_i = (h1 + i * h2) % num_bits,  for i in [0, num_hashes)
 
+    /// Bloom filter layout variants (stored in BloomHeader::type).
+    inline constexpr uint8_t BLOOM_TYPE_STANDARD = 0x00u; ///< legacy: double-hashing across full bit array
+    inline constexpr uint8_t BLOOM_TYPE_BLOCKED = 0x01u; ///< cache-line blocked: SipHash-2-4
+    inline constexpr uint8_t BLOOM_TYPE_BLOCKED_FAST = 0x02u; ///< cache-line blocked: fast multiply-xorshift hash (~5ns vs ~30ns)
+
+    /// Fast 64-bit hash for bloom filter internal use ONLY.
+    /// NOT a cryptographic hash and NOT interchangeable with AKHdr32::key_fp64.
+    /// Produces sufficient bit distribution for bloom filter false-positive rates.
+    /// ~5-8 ns for a 16-byte key (vs SipHash-2-4 ~25-35 ns).
+    inline uint64_t bloom_fast_hash64(const uint8_t* key, size_t len) noexcept {
+        uint64_t h = 0x9e3779b97f4a7c15ULL ^ static_cast<uint64_t>(len * 2654435761ULL);
+        const uint8_t* p = key;
+        const uint8_t* end = key + (len & ~static_cast<size_t>(7u));
+        while (p < end) {
+            uint64_t w;
+            std::memcpy(&w, p, 8);
+            h ^= w;
+            h *= 0xbf58476d1ce4e5b9ULL;
+            h ^= h >> 31;
+            p += 8;
+        }
+        if (const size_t rem = len & 7u; rem > 0u) {
+            uint64_t w = 0;
+            for (size_t i = 0; i < rem; ++i) w |= static_cast<uint64_t>(p[i]) << (i * 8u);
+            h ^= w;
+            h *= 0x94d049bb133111ebULL;
+            h ^= h >> 27;
+        }
+        // Final avalanche
+        h ^= h >> 30;
+        h *= 0xbf58476d1ce4e5b9ULL;
+        h ^= h >> 27;
+        h *= 0x94d049bb133111ebULL;
+        h ^= h >> 31;
+        return h;
+    }
+
     #pragma pack(push, 1)
     struct BloomHeader {
-        uint32_t num_bits;       ///< total bit count (power of 2, >= 8)
-        uint8_t  num_hashes;     ///< k = number of hash functions
-        uint8_t  pad[11];        ///< reserved (0)
+        uint32_t num_bits; ///< total bit count; blocked: multiple of 512
+        uint8_t num_hashes; ///< k = number of hash probes per key
+        uint8_t type; ///< BLOOM_TYPE_STANDARD (0) or BLOOM_TYPE_BLOCKED (1)
+        uint8_t pad[10]; ///< reserved (0)
     };
     #pragma pack(pop)
 

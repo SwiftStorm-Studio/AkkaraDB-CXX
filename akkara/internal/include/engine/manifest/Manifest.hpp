@@ -145,8 +145,23 @@ namespace akkaradb::engine::manifest {
 
             /**
              * Records that an SST file has been deleted.
+             * @deprecated Use compaction_commit() for compaction-driven deletions.
              */
             void sst_delete(const std::string& file);
+
+            /**
+             * Atomically records all outputs produced and all inputs consumed by a
+             * compaction in a single CRC-protected manifest record.
+             *
+             * This replaces the non-atomic (CompactionEnd + SSTDelete × N) pattern.
+             * During replay, either the full record is applied (all outputs added,
+             * all inputs removed) or it is absent (CRC mismatch from partial write),
+             * in which case the pre-compaction state is preserved exactly.
+             *
+             * @param output_files  Filenames of new SST files written by the compaction.
+             * @param input_files   Filenames of SST files consumed by the compaction.
+             */
+            void compaction_commit(const std::vector<std::string>& output_files, const std::vector<std::string>& input_files);
 
             /**
              * Records a truncation marker (informational).

@@ -20,6 +20,7 @@
 #pragma once
 
 #include "core/CRC32C.hpp"
+#include "engine/Compression.hpp"
 #include <cstdint>
 #include <cstring>
 #include <span>
@@ -35,18 +36,21 @@ namespace akkaradb::engine::blob {
      * BlobFileHeader — 32-byte fixed header at the start of every .blob file.
      *
      * On-disk layout (32 bytes, all fields LE):
-     * [magic:u32][version:u16][flags:u16][blob_id:u64][total_size:u64][crc32c:u32][reserved:u8×4]
+     * [magic:u32][version:u16][flags:u16][blob_id:u64][total_size:u64][crc32c:u32][compressed_size:u32]
      *
-     *  - magic      : "AKBL" = 0x414B424C  — format detection / corruption guard
-     *  - version    : 0x0001
-     *  - flags      : reserved (0)
-     *  - blob_id    : globally-unique monotonic ID assigned by BlobManager
-     *  - total_size : byte length of the content that follows the header
-     *  - crc32c     : CRC32C of this header with the crc32c field zeroed
+     *  - magic           : "AKBL" = 0x414B424C  — format detection / corruption guard
+     *  - version         : 0x0001
+     *  - flags           : codec byte (0 = None, 1 = Zstd); same values as engine::Codec
+     *  - blob_id         : globally-unique monotonic ID assigned by BlobManager
+     *  - total_size      : uncompressed byte length of the blob content
+     *  - crc32c          : CRC32C of this header with the crc32c field zeroed
+     *  - compressed_size : on-disk payload size when compressed (0 = uncompressed)
      *
-     * Content immediately follows the header: total_size raw bytes.
+     * Content immediately follows the header: compressed_size bytes if non-zero,
+     * otherwise total_size raw bytes.
      * The content's integrity is checked by BlobManager via a separate CRC
      * stored in the AKHdr32 value inline reference [blob_id:u64][total_size:u64][checksum:u32].
+     * Checksum is always computed against the UNCOMPRESSED content.
      */
     #pragma pack(push, 1)
     struct BlobFileHeader {
@@ -56,21 +60,28 @@ namespace akkaradb::engine::blob {
 
         uint32_t magic;
         uint16_t version;
-        uint16_t flags;
+        uint16_t flags; ///< codec: 0 = None, 1 = Zstd (engine::Codec)
         uint64_t blob_id;
-        uint64_t total_size;
-        uint32_t crc32c;     ///< CRC32C of this header (crc32c field zeroed)
-        uint8_t  reserved[4];
+        uint64_t total_size; ///< uncompressed content size
+        uint32_t crc32c; ///< CRC32C of this header (crc32c field zeroed)
+        uint32_t compressed_size; ///< on-disk payload size when compressed; 0 = uncompressed
 
         // ── factory / helpers ────────────────────────────────────────────────
 
         /**
          * Builds a valid BlobFileHeader.
          * Computes and fills crc32c automatically.
+         *
+         * @param blob_id         Unique blob identifier.
+         * @param total_size      Uncompressed content size (always stored in this field).
+         * @param codec           Compression codec used for the payload.
+         * @param compressed_size On-disk payload size (0 = uncompressed / same as total_size).
          */
         [[nodiscard]] static BlobFileHeader build(
             uint64_t blob_id,
-            uint64_t total_size
+            uint64_t total_size,
+            akkaradb::engine::Codec codec = akkaradb::engine::Codec::None,
+            uint32_t compressed_size = 0
         ) noexcept;
 
         /**

@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <charconv>
 #include <format>
+#include <future>
 #include <queue>
 #include <stdexcept>
 #include <vector>
@@ -126,32 +127,21 @@ namespace akkaradb::wal {
         /**
          * ShardSegmentChain - Presents all segment files of a single shard as a
          * single logical stream of batches, in segment_id ascending order.
-         *
-         * When the current WalReader reaches clean EOF, it is closed and the
-         * next segment file is opened automatically.
-         *
-         * Errors from any segment are recorded and stop the chain for that shard.
          */
         class ShardSegmentChain {
             public:
                 explicit ShardSegmentChain(std::vector<std::filesystem::path> segments)
                     : segments_{std::move(segments)}, next_seg_idx_{0} { open_next_segment(); }
 
-                /**
-                 * Returns the next batch across all segments in order.
-                 * Returns nullopt on chain EOF or error.
-                 */
                 [[nodiscard]] std::optional<WalReader::BatchView> next_batch() {
                     while (current_reader_) {
                         if (auto batch = current_reader_->next_batch()) { return batch; }
-                        // Current segment ended - check for error
                         if (current_reader_->has_error()) {
                             error_type_ = current_reader_->error_type();
                             error_position_ = current_reader_->error_position();
                             current_reader_.reset();
                             return std::nullopt;
                         }
-                        // Clean EOF on this segment; advance to next
                         current_reader_.reset();
                         open_next_segment();
                     }
@@ -161,8 +151,6 @@ namespace akkaradb::wal {
                 [[nodiscard]] bool has_error() const noexcept { return error_type_ != WalReader::ErrorType::NONE; }
                 [[nodiscard]] WalReader::ErrorType error_type() const noexcept { return error_type_; }
                 [[nodiscard]] uint64_t error_position() const noexcept { return error_position_; }
-
-                // shard_id from the first successfully opened reader
                 [[nodiscard]] uint32_t shard_id() const noexcept { return shard_id_; }
 
             private:
@@ -184,9 +172,8 @@ namespace akkaradb::wal {
                             current_reader_.reset();
                             return;
                         }
-                        return; // successfully opened
+                        return;
                     }
-                    // No more segments - current_reader_ stays null (clean end)
                 }
 
                 std::vector<std::filesystem::path> segments_;
@@ -198,77 +185,114 @@ namespace akkaradb::wal {
                 uint64_t error_position_ = 0;
         };
 
-        // ── HeapEntry ────────────────────────────────────────────────────────
+        // ── Materialized WAL entry ────────────────────────────────────────────
 
         /**
-         * HeapEntry - one live batch from a shard chain, held in the merge-heap.
-         * Ordered by batch_seq ascending so the min-heap always yields
-         * the globally earliest unprocessed batch.
+         * MatRecord - Fully materialized WAL entry.
+         *
+         * Owns key/value bytes so the WalReader that produced them can be destroyed
+         * after the shard thread returns.  Batch ordering is preserved via
+         * (batch_seq, entry_order).
          */
-        struct HeapEntry {
-            uint64_t batch_seq;
-            uint32_t chain_idx; ///< Index into chains[] (tie-breaking)
-            WalReader::BatchView batch;
+        struct MatRecord {
+            uint64_t batch_seq = 0;
+            uint32_t entry_order = 0; ///< position within batch (0-based)
+            WalEntryType type = WalEntryType::Record;
 
-            // min-heap: smallest batch_seq at top
-            bool operator>(const HeapEntry& o) const noexcept {
-                if (batch_seq != o.batch_seq) return batch_seq > o.batch_seq;
-                return chain_idx > o.chain_idx; // deterministic tie-break
-            }
+            // Record fields
+            uint64_t seq = 0;
+            uint8_t flags = 0;
+            uint64_t fp64 = 0;
+            uint64_t mini_key = 0;
+            std::vector<uint8_t> key;
+            std::vector<uint8_t> value;
+
+            // Commit / Checkpoint fields (seq reused for Checkpoint)
+            uint64_t commit_ts = 0;
         };
 
-        using MinHeap = std::priority_queue<HeapEntry, std::vector<HeapEntry>, std::greater<HeapEntry>>;
-
-        // ── dispatch_batch ───────────────────────────────────────────────────
-
-        struct DispatchCounts {
-            uint64_t records;
-            uint64_t commits;
-            uint64_t checkpoints;
+        struct ShardMatResult {
+            std::vector<MatRecord> records;
+            uint64_t batches_seen = 0;
+            bool has_error = false;
+            uint32_t shard_id = UINT32_MAX;
+            WalReader::ErrorType error_type = WalReader::ErrorType::NONE;
+            uint64_t error_position = 0;
         };
 
-        [[nodiscard]] DispatchCounts dispatch_batch(
-            const WalReader::BatchView& batch,
-            const WalRecovery::RecordHandler& on_record,
-            const WalRecovery::CommitHandler& on_commit,
-            const WalRecovery::CheckpointHandler& on_checkpoint
-        ) {
-            DispatchCounts counts{0, 0, 0};
-            WalIterator it = batch.iterator();
+        /**
+         * Reads all batches from one shard's segment chain and materialises every
+         * entry into MatRecord structs (copies key/value bytes).
+         *
+         * Called from a background thread.  Each shard processes its segment files
+         * entirely independently, so there is no shared state during I/O.
+         */
+        ShardMatResult materialize_shard(std::vector<std::filesystem::path> segments) {
+            ShardSegmentChain chain(std::move(segments));
+            ShardMatResult result{};
+            result.shard_id = chain.shard_id();
 
-            while (it.next()) {
-                switch (it.entry_type()) {
-                    case WalEntryType::Record: {
-                        on_record(it.as_record());
-                        ++counts.records;
-                        break;
-                    }
-                    case WalEntryType::Commit: {
-                        const auto [seq, ts] = it.as_commit();
-                        on_commit(seq, ts);
-                        ++counts.commits;
-                        break;
-                    }
-                    case WalEntryType::Checkpoint: {
-                        if (on_checkpoint) {
-                            // Checkpoint entry reuses Commit layout: [seq:u64][ts:u64]
-                            const auto [seq, _ts] = it.as_commit();
-                            on_checkpoint(seq);
+            while (auto batch_opt = chain.next_batch()) {
+                const auto& batch = *batch_opt;
+                WalIterator it = batch.iterator();
+                uint32_t entry_order = 0;
+                ++result.batches_seen;
+
+                while (it.next()) {
+                    if (it.entry_type() == WalEntryType::Metadata) continue;
+
+                    MatRecord mr;
+                    mr.batch_seq = batch.batch_seq;
+                    mr.entry_order = entry_order++;
+                    mr.type = it.entry_type();
+
+                    switch (it.entry_type()) {
+                        case WalEntryType::Record: {
+                            const WalRecordOpRef& ref = it.as_record();
+                            mr.seq = ref.seq();
+                            mr.flags = ref.header().flags;
+                            mr.fp64 = ref.key_fp64();
+                            mr.mini_key = ref.mini_key();
+                            {
+                                const auto k = ref.key();
+                                mr.key.assign(k.begin(), k.end());
+                            }
+                            if (!ref.is_tombstone()) {
+                                const auto v = ref.value();
+                                mr.value.assign(v.begin(), v.end());
+                            }
+                            break;
                         }
-                        ++counts.checkpoints;
-                        break;
+                        case WalEntryType::Commit: {
+                            const auto [s, ts] = it.as_commit();
+                            mr.seq = s;
+                            mr.commit_ts = ts;
+                            break;
+                        }
+                        case WalEntryType::Checkpoint: {
+                            const auto [s, _ts] = it.as_commit();
+                            mr.seq = s;
+                            break;
+                        }
+                        default: continue;
                     }
-                    case WalEntryType::Metadata:
-                        // Reserved for future use; skip silently.
-                        break;
+
+                    result.records.push_back(std::move(mr));
                 }
             }
-            return counts;
+
+            if (chain.has_error()) {
+                result.has_error = true;
+                result.error_type = chain.error_type();
+                result.error_position = chain.error_position();
+            }
+
+            return result;
         }
     } // anonymous namespace
 
     // ============================================================================
-    // WalRecovery::replay
+    // WalRecovery::replay  (parallel shard I/O)
     // ============================================================================
 
     WalRecovery::Result WalRecovery::replay(
@@ -283,81 +307,111 @@ namespace akkaradb::wal {
         Result result{};
         result.success = true;
 
-        // ── 1. Enumerate and group segment files ─────────────────────────────
+        // ── 1. Enumerate and group segment files ──────────────────────────────
         const auto segment_files = enumerate_segment_files(wal_dir);
         if (segment_files.empty()) return result;
 
         const auto shard_groups = group_by_shard(segment_files);
+        const size_t num_shards = shard_groups.size();
 
-        // ── 2. Build ShardSegmentChains and seed the heap ────────────────────
-        const auto chain_count = static_cast<uint32_t>(shard_groups.size());
+        // ── 2. Spawn one async task per non-empty shard ───────────────────────
+        //
+        // Each shard reads its segment chain and materialises all entries into
+        // MatRecord structs (copying key/value bytes so the WalReader can be
+        // freed inside the thread).  Shards are fully independent → true I/O
+        // parallelism with no shared state during the read phase.
+        std::vector<std::future<ShardMatResult>> futures;
+        futures.reserve(num_shards);
 
-        std::vector<std::unique_ptr<ShardSegmentChain>> chains;
-        chains.reserve(chain_count);
-
-        MinHeap heap;
-
-        for (uint32_t i = 0; i < chain_count; ++i) {
+        for (size_t i = 0; i < num_shards; ++i) {
             if (shard_groups[i].empty()) {
-                chains.push_back(nullptr);
-                continue;
+                // Dummy future for empty shard slot
+                futures.push_back(std::async(std::launch::deferred, []() { return ShardMatResult{}; }));
             }
+            else { futures.push_back(std::async(std::launch::async, materialize_shard, shard_groups[i])); }
+        }
 
-            auto chain = std::make_unique<ShardSegmentChain>(shard_groups[i]);
+        // ── 3. Collect results ────────────────────────────────────────────────
+        std::vector<MatRecord> all_records;
+        for (size_t i = 0; i < num_shards; ++i) {
+            ShardMatResult mat = futures[i].get();
 
-            if (chain->has_error()) {
+            result.batches_replayed += mat.batches_seen;
+
+            if (mat.has_error) {
                 result.success = false;
                 result.shard_errors.push_back(
                     ShardError{
-                        .shard_id = chain->shard_id() == UINT32_MAX
-                                        ? i
-                                        : chain->shard_id(),
-                        .error_type = chain->error_type(),
-                        .error_position = chain->error_position(),
+                        .shard_id = mat.shard_id == UINT32_MAX ? static_cast<uint32_t>(i) : mat.shard_id,
+                        .error_type = mat.error_type,
+                        .error_position = mat.error_position,
                     }
                 );
-                chains.push_back(std::move(chain));
-                continue;
             }
 
-            // Prime the heap with the first batch from this chain
-            if (auto batch_opt = chain->next_batch()) { heap.push(HeapEntry{.batch_seq = batch_opt->batch_seq, .chain_idx = i, .batch = *batch_opt,}); }
-            else if (chain->has_error()) {
-                result.success = false;
-                result.shard_errors.push_back(
-                    ShardError{.shard_id = chain->shard_id(), .error_type = chain->error_type(), .error_position = chain->error_position(),}
-                );
-            }
-            // Empty chain (all segments empty): fine, just don't push.
-
-            chains.push_back(std::move(chain));
+            for (auto& mr : mat.records) { all_records.push_back(std::move(mr)); }
         }
 
-        // ── 3. Merge-drain the heap in batch_seq order ────────────────────────
-        while (!heap.empty()) {
-            HeapEntry top = const_cast<HeapEntry&>(heap.top());
-            heap.pop();
-
-            const DispatchCounts counts = dispatch_batch(top.batch, on_record, on_commit, on_checkpoint);
-            result.batches_replayed += 1;
-            result.records_replayed += counts.records;
-            result.commits_replayed += counts.commits;
-            result.checkpoints_replayed += counts.checkpoints;
-
-            // Advance this chain and re-push if more batches exist
-            ShardSegmentChain* chain = chains[top.chain_idx].get();
-            if (chain == nullptr) continue;
-
-            if (auto next_opt = chain->next_batch()) {
-                heap.push(HeapEntry{.batch_seq = next_opt->batch_seq, .chain_idx = top.chain_idx, .batch = *next_opt,});
+        // ── 4. Restore global write order ─────────────────────────────────────
+        //
+        // Sort by (batch_seq, entry_order) to reproduce the exact same dispatch
+        // order as the original sequential min-heap merge.
+        std::sort(
+            all_records.begin(),
+            all_records.end(),
+            [](const MatRecord& a, const MatRecord& b) noexcept {
+                if (a.batch_seq != b.batch_seq) return a.batch_seq < b.batch_seq;
+                return a.entry_order < b.entry_order;
             }
-            else if (chain->has_error()) {
-                result.success = false;
-                result.shard_errors.push_back(
-                    ShardError{.shard_id = chain->shard_id(), .error_type = chain->error_type(), .error_position = chain->error_position(),}
-                );
+        );
+
+        // ── 5. Dispatch in order ──────────────────────────────────────────────
+        for (const auto& mr : all_records) {
+            switch (mr.type) {
+                case WalEntryType::Record: {
+                    // Reconstruct an owned buffer that matches the serialised layout
+                    // expected by WalRecordOpRef: [WalEntryHeader:8B][AKHdr32:32B][key][val]
+                    const size_t buf_sz = WalEntryHeader::SIZE + sizeof(core::AKHdr32) + mr.key.size() + mr.value.size();
+                    std::vector<std::byte> entry_buf(buf_sz);
+                    core::BufferView bv(entry_buf.data(), buf_sz);
+
+                    if (mr.flags & core::AKHdr32::FLAG_TOMBSTONE) {
+                        (void)serialize_delete_direct(bv, std::span<const uint8_t>(mr.key.data(), mr.key.size()), mr.seq, mr.fp64, mr.mini_key);
+                    }
+                    else {
+                        (void)serialize_add_direct(
+                            bv,
+                            std::span<const uint8_t>(mr.key.data(), mr.key.size()),
+                            std::span<const uint8_t>(mr.value.data(), mr.value.size()),
+                            mr.seq,
+                            mr.fp64,
+                            mr.mini_key,
+                            mr.flags
+                        );
+                    }
+
+                    // WalRecordOpRef is a zero-copy view into entry_buf (alive for
+                    // the duration of on_record).
+                    WalRecordOpRef ref(core::BufferView(entry_buf.data(), buf_sz));
+                    on_record(ref);
+                    ++result.records_replayed;
+                    break;
+                }
+
+                case WalEntryType::Commit: {
+                    on_commit(mr.seq, mr.commit_ts);
+                    ++result.commits_replayed;
+                    break;
+                }
+
+                case WalEntryType::Checkpoint: {
+                    if (on_checkpoint) on_checkpoint(mr.seq);
+                    ++result.checkpoints_replayed;
+                    break;
+                }
+
+                default: break;
             }
-            // Clean EOF from this chain: just don't re-push.
         }
 
         return result;

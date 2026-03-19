@@ -1127,6 +1127,85 @@ static void test_wal_truncation() {
 }
 
 // ============================================================================
+// 18. SST: negative lookup throughput (bloom filter)
+// ============================================================================
+
+/**
+ * Measures how fast exists() rejects keys that are not in the database.
+ *
+ * Setup:
+ *   - N keys are written and flushed to SST (so bloom filters are built).
+ *   - Negative keys interleave with existing keys (same lexicographic range)
+ *     so every lookup passes the key_in_range() check and exercises the
+ *     bloom filter rather than being short-circuited by a range miss.
+ *
+ * Layout:
+ *   existing : "nlkey_XXXXXXXXXX"  where X = i * 2         (even indices)
+ *   negative : "nlkey_XXXXXXXXXX"  where X = i * 2 + 1     (odd  indices)
+ *
+ * A false-positive occurs when bloom_check() returns true for a negative key,
+ * causing a full disk scan. The count is reported as FP rate.
+ */
+static void bench_sst_negative_lookup() {
+    section("SST: negative lookup throughput  (1 M keys, bloom filter)");
+
+    auto dir = make_temp_dir("bench_sst_neg");
+    constexpr int N = 1'000'000;
+
+    // ── Pre-generate keys (outside timed section) ─────────────────────────
+    std::vector<std::string> exist_keys(N), neg_keys(N);
+    for (int i = 0; i < N; ++i) {
+        exist_keys[i] = std::format("nlkey_{:010d}", i * 2);
+        neg_keys[i] = std::format("nlkey_{:010d}", i * 2 + 1);
+    }
+
+    // ── Insert N keys, flush to SST, then benchmark in the same session ──────
+    // Note: WAL truncation is Phase 5 (pending). Reopening would replay the WAL
+    // and restore all 1 M keys into the MemTable, adding BPTree overhead to
+    // every exists() call. Instead we flush and benchmark in the same session:
+    // after force_flush() the MemTable is empty, so exists() hits only the SST
+    // bloom filter — which is what we want to measure.
+    {
+        AkkEngineOptions opts;
+        opts.data_dir = dir;
+        opts.wal.sync_mode = SyncMode::Off;
+        // Use a single shard so all keys land in one SST after flush
+        opts.memtable.shard_count = 1;
+
+        auto eng = AkkEngine::open(opts);
+        for (int i = 0; i < N; ++i) eng->put(as_span(exist_keys[i]), as_span("v"));
+        eng->force_flush();
+        // MemTable is now empty; SST holds all N keys.
+
+        // Warmup (10 K lookups, untimed) — warms up bloom filter in L3 cache
+        {
+            int dummy = 0;
+            constexpr int WARM = 10'000;
+            for (int i = 0; i < WARM; ++i) if (eng->exists(as_span(neg_keys[i]))) ++dummy;
+        }
+
+        // Timed: 1 M negative lookups
+        const auto t0 = Clock::now();
+        int false_pos = 0;
+        for (int i = 0; i < N; ++i) if (eng->exists(as_span(neg_keys[i]))) ++false_pos;
+        const double ops = static_cast<double>(N) / (elapsed_ms(t0) / 1000.0);
+
+        std::printf(
+            "  [sst] negative lookup  N=%7d   %9.0f ops/s   " "FP: %d / %d (%.3f%%)\n",
+            N,
+            ops,
+            false_pos,
+            N,
+            100.0 * static_cast<double>(false_pos) / static_cast<double>(N)
+        );
+
+        eng->close();
+    }
+
+    fs::remove_all(dir);
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -1156,6 +1235,8 @@ int main() {
     test_wal_truncation();
     // ── Throughput ───────────────────────────────────────────────────────────
     bench_throughput();
+    // ── SST negative lookup (bloom filter) ───────────────────────────────────
+    bench_sst_negative_lookup();
 
     // ── Summary ──────────────────────────────────────────────────────────────
     std::printf("\n==========================================\n");

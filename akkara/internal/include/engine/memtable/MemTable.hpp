@@ -218,6 +218,19 @@ namespace akkaradb::engine::memtable {
             [[nodiscard]] std::optional<bool> get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const;
 
             /**
+             * Existence check — no value copy, no blob I/O.
+             *
+             * Significantly faster than get()/get_into() when the key holds a large
+             * blob value: avoids the BlobManager::read() disk call entirely.
+             *
+             * Return convention:
+             *   nullopt → key not in MemTable; caller may check SST
+             *   false   → tombstone is authoritative; do NOT check SST
+             *   true    → live record found
+             */
+            [[nodiscard]] std::optional<bool> contains(std::span<const uint8_t> key) const;
+
+            /**
              * Returns a range iterator over [range.start, range.end).
              * Snapshot semantics: reflects state at the moment of the call.
              */

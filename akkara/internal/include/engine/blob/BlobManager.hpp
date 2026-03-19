@@ -20,6 +20,7 @@
 #pragma once
 
 #include "engine/blob/BlobFraming.hpp"
+#include "engine/Compression.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -75,10 +76,13 @@ namespace akkaradb::engine::blob {
          * @param blobs_dir       Directory where blob files are stored.
          *                        Created if it does not exist.
          * @param threshold_bytes Values >= this size are stored as blobs.
+         * @param codec           Compression codec for new blob files.
+         *                        Existing files retain their own codec; reads are self-describing.
          */
         [[nodiscard]] static std::unique_ptr<BlobManager> create(
             std::filesystem::path blobs_dir,
-            uint64_t              threshold_bytes = DEFAULT_THRESHOLD
+            uint64_t threshold_bytes = DEFAULT_THRESHOLD,
+            akkaradb::engine::Codec codec = akkaradb::engine::Codec::None
         );
 
         ~BlobManager();

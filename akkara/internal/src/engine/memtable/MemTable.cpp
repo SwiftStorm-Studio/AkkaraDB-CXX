@@ -149,6 +149,27 @@ namespace akkaradb::engine::memtable {
                 return std::nullopt;
             }
 
+            [[nodiscard]] std::optional<bool> contains(std::span<const uint8_t> key) const {
+                std::shared_lock lock{mutex_};
+
+                // Active map — no value copy
+                if (auto r = active_->contains(key)) return r;
+
+                // Immutables: newest to oldest — just check flag
+                for (auto rit = immutables_.rbegin(); rit != immutables_.rend(); ++rit) {
+                    const ImmVec& vec = *rit->second;
+                    auto it = std::lower_bound(
+                        vec.begin(),
+                        vec.end(),
+                        key,
+                        [](const core::MemRecord& r, std::span<const uint8_t> k) { return r.compare_key(k) < 0; }
+                    );
+                    if (it != vec.end() && it->compare_key(key) == 0) return !it->is_tombstone();
+                }
+
+                return std::nullopt;
+            }
+
             // ── Flush lifecycle ───────────────────────────────────────────────
 
             /// Seals the active map into a sorted ImmVec.
@@ -460,6 +481,11 @@ namespace akkaradb::engine::memtable {
                 return shards_[shard_for(fp64, shard_count_)]->get_into(key, out);
             }
 
+            [[nodiscard]] std::optional<bool> contains(std::span<const uint8_t> key) const {
+                const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
+                return shards_[shard_for(fp64, shard_count_)]->contains(key);
+            }
+
             [[nodiscard]] RangeIterator iterator(const KeyRange& range) const {
                 std::vector<std::shared_ptr<const ImmVec>> all_vecs;
                 for (const auto& shard : shards_) for (auto& v : shard->snapshot_sorted()) all_vecs.push_back(std::move(v));
@@ -538,6 +564,7 @@ namespace akkaradb::engine::memtable {
 
     std::optional<core::MemRecord> MemTable::get(std::span<const uint8_t> key) const { return impl_->get(key); }
     std::optional<bool> MemTable::get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const { return impl_->get_into(key, out); }
+    std::optional<bool> MemTable::contains(std::span<const uint8_t> key) const { return impl_->contains(key); }
     MemTable::RangeIterator MemTable::iterator(const KeyRange& range) const { return impl_->iterator(range); }
 
     uint64_t MemTable::next_seq() noexcept { return impl_->next_seq(); }

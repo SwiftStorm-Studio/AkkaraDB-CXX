@@ -125,6 +125,33 @@ namespace akkaradb::engine::sst {
             [[nodiscard]] std::optional<core::MemRecord>
                 get(std::span<const uint8_t> key) const;
 
+            /**
+             * Existence check — no value copy, no blob I/O.
+             *
+             * Same bloom → index → data-block path as get(), but reads only the
+             * key and flags from each candidate record.  Value bytes and blob
+             * content are never loaded, making this significantly faster for
+             * large or blob-stored values.
+             *
+             * @return
+             *   nullopt → not found in this file.
+             *   false   → tombstone found.
+             *   true    → live record found.
+             */
+            [[nodiscard]] std::optional<bool> contains(std::span<const uint8_t> key) const;
+
+            /**
+             * Fast existence check for callers that have already verified
+             * key_in_range(key) == true (or don't need it, e.g. L0 with bloom).
+             *
+             * Skips the internal key_in_range() call.  The bloom hash is computed
+             * internally using the hash function matching this file's bloom type
+             * (BLOOM_TYPE_BLOCKED_FAST → bloom_fast_hash64; others → SipHash).
+             *
+             * Called by SSTManager for all levels.
+             */
+            [[nodiscard]] std::optional<bool> contains_fast(std::span<const uint8_t> key) const;
+
             // ── Range scan ────────────────────────────────────────────────────
 
             /**
@@ -169,20 +196,52 @@ namespace akkaradb::engine::sst {
             std::vector<uint8_t>        first_key_;
             std::vector<uint8_t>        last_key_;
 
+            // ── Compression ───────────────────────────────────────────────────
+
+            /// true when the data section was Zstd-compressed on disk.
+            bool compressed_ = false;
+
+            /// Compressed bytes read from disk during open().
+            /// Cleared after the first call to ensure_decompressed().
+            mutable std::vector<uint8_t> compressed_bytes_;
+
+            /// Decompressed data section.  Populated lazily on first get()/scan()
+            /// call via ensure_decompressed().  Once populated it is never resized,
+            /// so raw pointers handed to Iterator::Impl remain stable for the
+            /// lifetime of this SSTReader.
+            mutable std::vector<uint8_t> decomp_data_;
+
             // ── Internals ─────────────────────────────────────────────────────
 
-            /// Returns true if key_fp64 might be present according to the Bloom filter.
-            [[nodiscard]] bool bloom_check(uint64_t key_fp64) const noexcept;
+            /// Returns true if key might be present according to the Bloom filter.
+            /// Dispatches on BloomHeader::type to select the appropriate hash function.
+            [[nodiscard]] bool bloom_check(std::span<const uint8_t> key) const noexcept;
 
             /// Binary search the sparse index for the largest entry whose key <= target.
             /// Returns the data_offset to seek to (from start of data section).
             [[nodiscard]] uint64_t index_seek(std::span<const uint8_t> key) const noexcept;
 
-            /// Scan up to INDEX_STRIDE records starting at abs_file_offset.
-            /// Returns the matching MemRecord, or nullopt if not found in range.
+            /// Ensures decomp_data_ is populated (decompresses compressed_bytes_ on
+            /// first call, then clears compressed_bytes_ to free memory).
+            /// No-op for uncompressed files.  Called from const accessors.
+            void ensure_decompressed() const;
+
+            /// Dispatches to scan_from_file() or scan_from_buf() based on compressed_.
             [[nodiscard]] std::optional<core::MemRecord>
                 scan_from(uint64_t data_section_offset,
                           std::span<const uint8_t> target_key) const;
+
+            /// File-based point scan (uncompressed SST).
+            [[nodiscard]] std::optional<core::MemRecord> scan_from_file(uint64_t data_section_offset, std::span<const uint8_t> target_key) const;
+
+            /// Buffer-based point scan (compressed SST — reads from decomp_data_).
+            [[nodiscard]] std::optional<core::MemRecord> scan_from_buf(uint64_t data_section_offset, std::span<const uint8_t> target_key) const;
+
+            /// File-based existence check (uncompressed SST): reads key+flags only.
+            [[nodiscard]] std::optional<bool> contains_from_file(uint64_t data_section_offset, std::span<const uint8_t> target_key) const;
+
+            /// Buffer-based existence check (compressed SST): reads key+flags only.
+            [[nodiscard]] std::optional<bool> contains_from_buf(uint64_t data_section_offset, std::span<const uint8_t> target_key) const;
     };
 
 } // namespace akkaradb::engine::sst

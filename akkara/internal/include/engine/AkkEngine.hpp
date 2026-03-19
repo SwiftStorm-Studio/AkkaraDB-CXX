@@ -22,6 +22,7 @@
 #include "engine/memtable/MemTable.hpp"
 #include "engine/vlog/VersionLog.hpp"
 #include "engine/wal/WalWriter.hpp"
+#include "engine/Compression.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -32,6 +33,9 @@
 namespace akkaradb::engine {
     // SyncMode lives in the wal namespace; re-export for user convenience.
     using wal::SyncMode;
+
+    // VLogSyncMode re-exported for user convenience.
+    using vlog::VLogSyncMode;
 
     // VersionEntry re-exported from vlog namespace for convenience.
     using VersionEntry = vlog::VersionEntry;
@@ -212,6 +216,20 @@ namespace akkaradb::engine {
          */
         bool version_log_enabled = false;
 
+        /**
+         * Fsync policy for version log writes.
+         *
+         *   Sync  — fdatasync() after every append().  Maximum durability.
+         *   Async — fflush() only (OS handles writeback).  Low overhead.
+         *           Safe: if the OS loses the latest vlog entries before a crash,
+         *           they are re-derived from WAL on the next open() call.
+         *   Off   — No stdio flush.  For non-critical / test scenarios.
+         *
+         * Only meaningful when version_log_enabled == true.
+         * Default: Async
+         */
+        VLogSyncMode version_log_sync_mode = VLogSyncMode::Async;
+
         // ── SST ──────────────────────────────────────────────────────────────
 
         /**
@@ -273,6 +291,66 @@ namespace akkaradb::engine {
          * Default: false
          */
         bool sst_promote_reads = false;
+
+        // ── Compression ───────────────────────────────────────────────────────
+
+        /**
+         * Compression codec for SST data sections (index and bloom filter are always
+         * stored uncompressed for fast open-time loading).
+         *
+         *   Codec::None — No compression (default). Maximum read speed, full backward
+         *                 compatibility with existing .aksst files.
+         *   Codec::Zstd — Zstandard compression. Typically 50-70% size reduction for
+         *                 KV workloads. Decompression happens once on SST open();
+         *                 subsequent reads are served from the in-memory buffer.
+         *
+         * Each file is self-describing (codec stored in SSTFileHeader::flags), so
+         * compressed and uncompressed files can coexist in the same database.
+         * Default: Codec::None
+         */
+        Codec sst_codec = Codec::None;
+
+        /**
+         * Compression codec for .blob files (large externalized values).
+         *
+         *   Codec::None — No compression (default).
+         *   Codec::Zstd — Zstandard compression applied to blob content before writing.
+         *                 The checksum stored in BlobRef is computed over the UNCOMPRESSED
+         *                 content, so it remains valid regardless of codec.
+         *
+         * Each blob file is self-describing (BlobFileHeader::flags stores the codec),
+         * so old uncompressed blobs and new compressed blobs can coexist.
+         * Only meaningful when blob_enabled == true.
+         * Default: Codec::None
+         */
+        Codec blob_codec = Codec::None;
+
+        // ── Write backpressure ────────────────────────────────────────────────
+
+        /**
+         * L0 write-stall threshold: put() blocks when the L0 SST file count
+         * reaches this value.  0 = auto (max_l0_sst_files * 2).
+         * Set to INT_MAX to disable stalling entirely.
+         * Default: 0 (auto)
+         */
+        int sst_l0_stall_files = 0;
+
+        // ── Version log retention ─────────────────────────────────────────────
+
+        /**
+         * When true, prune_before() is called on close() to trim the VersionLog.
+         * Keeps only the last version_log_keep_seqs sequence numbers of history.
+         * Only meaningful when version_log_enabled == true.
+         * Default: true
+         */
+        bool version_log_prune_on_close = true;
+
+        /**
+         * Number of sequence numbers of history to retain when pruning.
+         * Entries with seq < (last_seq - version_log_keep_seqs) are removed.
+         * Default: 1,000,000
+         */
+        uint64_t version_log_keep_seqs = 1'000'000;
 
         // ── API Server ────────────────────────────────────────────────────
 
@@ -338,6 +416,43 @@ namespace akkaradb::engine {
      */
     class AkkEngine {
         public:
+            // ── Range scan iterator ───────────────────────────────────────────
+
+            /**
+             * Forward iterator over a key range returned by AkkEngine::scan().
+             *
+             * Merges live MemTable records and SST records in lexicographic order.
+             * Tombstones are suppressed; only live (key, value) pairs are yielded.
+             * Blob-externalised values are resolved via BlobManager automatically.
+             *
+             * Usage:
+             *   auto it = eng->scan(start, end);
+             *   while (it.has_next()) {
+             *       auto [key, val] = *it.next();
+             *       // process...
+             *   }
+             */
+            class ScanIterator {
+                public:
+                    ~ScanIterator();
+                    ScanIterator(ScanIterator&&) noexcept;
+                    ScanIterator& operator=(ScanIterator&&) noexcept;
+                    ScanIterator(const ScanIterator&) = delete;
+                    ScanIterator& operator=(const ScanIterator&) = delete;
+
+                    /// Returns true if next() will return a non-null value.
+                    [[nodiscard]] bool has_next() const noexcept;
+
+                    /// Returns the next {key, value} pair, or nullopt when exhausted.
+                    [[nodiscard]] std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> next();
+
+                private:
+                    friend class AkkEngine;
+                    class Impl;
+                    explicit ScanIterator(std::unique_ptr<Impl> impl);
+                    std::unique_ptr<Impl> impl_;
+            };
+
             /**
              * Opens (or creates) an engine instance from the given options.
              *
@@ -384,6 +499,33 @@ namespace akkaradb::engine {
              * @return Value bytes, or std::nullopt if the key is not found or is deleted.
              */
             [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::span<const uint8_t> key) const;
+
+            /**
+             * Existence check — no value copy, no blob I/O.
+             *
+             * Significantly faster than get() when the stored value is large or
+             * externalized to a .blob file: BlobManager::read() is skipped entirely.
+             * For inline values the saving is the value memcpy.
+             *
+             * Search order: MemTable → SST (same as get()).
+             * A tombstone at any level returns false immediately.
+             *
+             * @return true  if the key exists as a live (non-tombstone) record.
+             *         false if absent or deleted.
+             */
+            [[nodiscard]] bool exists(std::span<const uint8_t> key) const;
+
+            /**
+             * Counts live records in [start_key, end_key).
+             *
+             * Performs the full MemTable + SST merge with tombstone suppression,
+             * but skips value allocation and blob I/O on every record.
+             *
+             * @param start_key Inclusive lower bound (empty = beginning of keyspace).
+             * @param end_key   Exclusive upper bound (empty = end of keyspace).
+             * @return          Number of live key-value pairs in the range.
+             */
+            [[nodiscard]] size_t count(std::span<const uint8_t> start_key = {}, std::span<const uint8_t> end_key = {}) const;
 
             /**
              * Zero-allocation point lookup for hot paths.
@@ -446,6 +588,21 @@ namespace akkaradb::engine {
              * Requires version_log_enabled == true.
              */
             void rollback_key(std::span<const uint8_t> key, uint64_t target_seq);
+
+            // ── Range scan ────────────────────────────────────────────────────
+
+            /**
+             * Returns a forward iterator over [start_key, end_key) in lexicographic
+             * order, merging live MemTable and SST records.
+             *
+             * Snapshot semantics: reflects the state at the moment of the call.
+             * Tombstones are hidden; only live key-value pairs are yielded.
+             * Blob values are resolved transparently.
+             *
+             * @param start_key  Inclusive lower bound (empty = beginning of keyspace).
+             * @param end_key    Exclusive upper bound (empty = end of keyspace).
+             */
+            [[nodiscard]] ScanIterator scan(std::span<const uint8_t> start_key = {}, std::span<const uint8_t> end_key = {}) const;
 
             // ── Durability ────────────────────────────────────────────────────
 

@@ -20,6 +20,8 @@
 #include "engine/blob/BlobManager.hpp"
 #include "core/CRC32C.hpp"
 
+#include <zstd.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -217,9 +219,14 @@ namespace akkaradb::engine::blob {
     struct BlobManager::Impl {
         std::filesystem::path   blobs_dir;
         uint64_t                threshold;
+        engine::Codec codec = engine::Codec::None;
 
         std::atomic<bool>       running { false };
         std::thread             gc_thr;
+
+        // Serialises concurrent writes of the SAME blob_id (reconnect / retry path).
+        // During normal operation every blob_id is unique, so this mutex is uncontended.
+        std::mutex write_mu;
 
         std::mutex              del_mtx;
         std::condition_variable del_cv;
@@ -253,12 +260,37 @@ namespace akkaradb::engine::blob {
         // ── write helpers ────────────────────────────────────────────────────
 
         void do_write(uint64_t id, std::span<const uint8_t> content) {
-            // Build only the 32-byte header; write header + content separately.
-            // This avoids duplicating the (potentially large) content in memory.
-            auto hdr = BlobFileHeader::build(id, content.size());
+            // Optionally compress the content with Zstd.
+            std::vector<uint8_t> compressed_buf;
+            const uint8_t* payload_data = content.data();
+            size_t payload_len = content.size();
+            uint32_t compressed_sz = 0;
+            engine::Codec actual_codec = engine::Codec::None;
+
+            if (codec == engine::Codec::Zstd && !content.empty()) {
+                const size_t bound = ZSTD_compressBound(content.size());
+                compressed_buf.resize(bound);
+                const size_t cz = ZSTD_compress(compressed_buf.data(), bound, content.data(), content.size(), ZSTD_CLEVEL_DEFAULT);
+                // Accept compressed output only when:
+                //   • no error
+                //   • actually smaller than the original (incompressible data can expand)
+                //   • fits in uint32_t (blobs > 4 GiB after compression would overflow)
+                if (!ZSTD_isError(cz) && cz < content.size() && cz <= UINT32_MAX) {
+                    compressed_buf.resize(cz);
+                    compressed_sz = static_cast<uint32_t>(cz);
+                    payload_data = compressed_buf.data();
+                    payload_len = cz;
+                    actual_codec = engine::Codec::Zstd;
+                }
+                // else: fall through to uncompressed write
+            }
+
+            // total_size always holds the UNCOMPRESSED content size so the reader
+            // can allocate the decompression buffer without reading the payload first.
+            auto hdr = BlobFileHeader::build(id, content.size(), actual_codec, compressed_sz);
             uint8_t hdr_buf[BlobFileHeader::SIZE];
             hdr.serialize(hdr_buf);
-            write_atomic_split(id_to_path(id), hdr_buf, BlobFileHeader::SIZE, content.data(), content.size());
+            write_atomic_split(id_to_path(id), hdr_buf, BlobFileHeader::SIZE, payload_data, payload_len);
         }
 
         // ── GC worker ────────────────────────────────────────────────────────
@@ -310,11 +342,11 @@ namespace akkaradb::engine::blob {
 
     BlobManager::~BlobManager() { close(); }
 
-    std::unique_ptr<BlobManager> BlobManager::create(
-            std::filesystem::path blobs_dir, uint64_t threshold_bytes) {
+    std::unique_ptr<BlobManager> BlobManager::create(std::filesystem::path blobs_dir, uint64_t threshold_bytes, engine::Codec codec) {
         auto impl         = std::make_unique<Impl>();
         impl->blobs_dir   = std::move(blobs_dir);
         impl->threshold   = threshold_bytes;
+        impl->codec = codec;
         return std::unique_ptr<BlobManager>(new BlobManager(std::move(impl)));
     }
 
@@ -342,9 +374,18 @@ namespace akkaradb::engine::blob {
     // ============================================================================
 
     void BlobManager::write(uint64_t blob_id, std::span<const uint8_t> content) {
-        // Idempotent: if the file already exists (e.g. Replica re-receive after
-        // reconnect), skip silently.
         auto p = impl_->id_to_path(blob_id);
+
+        // Fast path: file already exists — no work needed.
+        // Safe to check without a lock; the file can only transition
+        // non-existent → existent (never the reverse at this call site).
+        if (std::filesystem::exists(p)) return;
+
+        // Slow path: acquire lock then re-check to close the TOCTOU window.
+        // Two threads (e.g. replica reconnect) could both see exists=false above
+        // and race to write {id}.blob.tmp — the lock ensures only one proceeds.
+        // Normal operation (unique blob_ids per write) never contends here.
+        std::lock_guard lk(impl_->write_mu);
         if (std::filesystem::exists(p)) return;
 
         impl_->do_write(blob_id, content);
@@ -365,12 +406,25 @@ namespace akkaradb::engine::blob {
         if (!decode_blob_header(raw.data(), hdr))
             throw std::runtime_error("BlobManager: header corrupt: " + p.string());
 
-        if (raw.size() < BlobFileHeader::SIZE + hdr.total_size)
-            throw std::runtime_error("BlobManager: content truncated: " + p.string());
+        const uint8_t* payload = raw.data() + BlobFileHeader::SIZE;
+        const size_t payload_len = raw.size() - BlobFileHeader::SIZE;
 
-        return std::vector<uint8_t>(
-            raw.begin() + static_cast<ptrdiff_t>(BlobFileHeader::SIZE),
-            raw.begin() + static_cast<ptrdiff_t>(BlobFileHeader::SIZE + hdr.total_size));
+        // Compressed blob: hdr.flags == Zstd and compressed_size > 0
+        if (hdr.flags == static_cast<uint16_t>(engine::Codec::Zstd) && hdr.compressed_size > 0) {
+            if (payload_len < hdr.compressed_size) throw std::runtime_error("BlobManager: compressed payload truncated: " + p.string());
+
+            std::vector<uint8_t> decompressed(static_cast<size_t>(hdr.total_size));
+            const size_t result = ZSTD_decompress(decompressed.data(), decompressed.size(), payload, hdr.compressed_size);
+            if (ZSTD_isError(result))
+                throw std::runtime_error(std::string("BlobManager: Zstd decompress failed: ") + ZSTD_getErrorName(result));
+            if (result != hdr.total_size) throw std::runtime_error("BlobManager: decompressed size mismatch: " + p.string());
+            return decompressed;
+        }
+
+        // Uncompressed blob (flags == None, or legacy files with reserved=0)
+        if (payload_len < hdr.total_size) throw std::runtime_error("BlobManager: content truncated: " + p.string());
+
+        return std::vector<uint8_t>(payload, payload + hdr.total_size);
     }
 
     std::vector<uint8_t> BlobManager::read(uint64_t blob_id, uint32_t expected_checksum) const {

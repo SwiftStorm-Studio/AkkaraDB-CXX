@@ -40,12 +40,34 @@ namespace akkaradb::engine::vlog {
     inline constexpr uint8_t VLOG_FLAG_ROLLBACK = 0x04;
 
     // ============================================================================
+    // VLogSyncMode
+    // ============================================================================
+
+    /**
+     * Controls when written entries are fsynced to storage.
+     *
+     *   Sync  — fdatasync() after every write_entry() call.
+     *           Strongest durability; highest latency.
+     *   Async — fflush() only; OS page-cache writeback handles persistence.
+     *           Low latency; a crash within the OS flush window loses recent entries.
+     *           Safe at DB level: missing entries are re-derived from WAL on next open.
+     *   Off   — No flush at all; data lives in libc stdio buffer until close() / prune().
+     *           Use only for non-critical history or test scenarios.
+     */
+    enum class VLogSyncMode : uint8_t {
+        Sync = 0, Async = 1, Off = 2,
+    };
+
+    // ============================================================================
     // VersionLogOptions
     // ============================================================================
 
     struct VersionLogOptions {
         /// Full path to the version log file (e.g. data_dir / "history.akvlog").
         std::filesystem::path log_path;
+
+        /// Fsync policy for write_entry(). Default: Async (matches WAL default).
+        VLogSyncMode sync_mode = VLogSyncMode::Async;
     };
 
     // ============================================================================
@@ -158,6 +180,22 @@ namespace akkaradb::engine::vlog {
             [[nodiscard]]
             std::vector<std::pair<std::vector<uint8_t>, std::optional<VersionEntry>>>
                 collect_rollback_targets(uint64_t target_seq) const;
+
+            // ── Compaction / pruning ──────────────────────────────────────────
+
+            /**
+             * Removes all history entries whose seq is strictly less than
+             * seq_threshold.  Entries at or above the threshold are kept.
+             *
+             * Implementation: rewrites the live entries to a side-car temp file
+             * (.akvlog.tmp), then atomically renames it over the main file and
+             * rebuilds the in-memory index.  The operation holds the combined
+             * lock throughout, so concurrent reads block until prune completes.
+             *
+             * @param seq_threshold  Entries with seq < seq_threshold are discarded.
+             * @return               Number of entries removed across all keys.
+             */
+            size_t prune_before(uint64_t seq_threshold);
 
             // ── Lifecycle ─────────────────────────────────────────────────────
 

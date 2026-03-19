@@ -482,6 +482,62 @@ namespace akkaradb::engine::manifest {
         return true;
     }
 
+    std::vector<uint8_t> encode_compaction_commit(uint64_t ts_us, const std::vector<std::string>& output_files, const std::vector<std::string>& input_files) {
+        const auto output_count = static_cast<uint8_t>(output_files.size());
+        const auto input_count = static_cast<uint8_t>(input_files.size());
+
+        // Fixed: 12 bytes + [u16 len + bytes] per output + [u16 len + bytes] per input
+        size_t var_size = 0;
+        for (const auto& s : output_files) { var_size += 2 + s.size(); }
+        for (const auto& s : input_files) { var_size += 2 + s.size(); }
+
+        std::vector<uint8_t> p(12 + var_size);
+        uint8_t* b = p.data();
+        write_u64(b, 0, ts_us);
+        b[8] = output_count;
+        b[9] = input_count;
+        write_u16(b, 10, 0); // reserved
+
+        size_t off = 12;
+        for (const auto& s : output_files) {
+            write_u16(b, off, static_cast<uint16_t>(s.size()));
+            off += 2;
+            std::memcpy(b + off, s.data(), s.size());
+            off += s.size();
+        }
+        for (const auto& s : input_files) {
+            write_u16(b, off, static_cast<uint16_t>(s.size()));
+            off += 2;
+            std::memcpy(b + off, s.data(), s.size());
+            off += s.size();
+        }
+        return p;
+    }
+
+    bool decode_compaction_commit(const uint8_t* payload, uint16_t len, DecodedCompactionCommit& out) {
+        if (len < 12) { return false; }
+        out.ts_us = read_u64(payload, 0);
+        const uint8_t output_count = payload[8];
+        const uint8_t input_count = payload[9];
+
+        size_t cursor = 12;
+        out.output_files.clear();
+        out.output_files.reserve(output_count);
+        for (uint8_t i = 0; i < output_count; ++i) {
+            std::string s;
+            if (!read_length_prefixed(payload, len, cursor, s)) { return false; }
+            out.output_files.push_back(std::move(s));
+        }
+        out.input_files.clear();
+        out.input_files.reserve(input_count);
+        for (uint8_t i = 0; i < input_count; ++i) {
+            std::string s;
+            if (!read_length_prefixed(payload, len, cursor, s)) { return false; }
+            out.input_files.push_back(std::move(s));
+        }
+        return true;
+    }
+
     // ============================================================================
     // Cluster event encode / decode (v4)
     // ============================================================================

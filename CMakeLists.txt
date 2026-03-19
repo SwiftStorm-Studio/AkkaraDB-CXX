@@ -49,17 +49,41 @@ if (WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 endif ()
 
+# ==================== Dependencies ====================
+
+include(FetchContent)
+
+# ── Zstd compression ──────────────────────────────────────────────────────────
+FetchContent_Declare(
+        zstd
+        GIT_REPOSITORY https://github.com/facebook/zstd.git
+        GIT_TAG v1.5.6
+        SOURCE_SUBDIR build/cmake
+)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zstd)
+
 # ==================== Main Library ====================
 add_library(akkaradb)
 
 # Public headers (C++ API - User-facing)
 target_sources(akkaradb PUBLIC FILE_SET HEADERS
-
+        BASE_DIRS ${AKKARADB_INCLUDE_DIR}
+        FILES
+        # High-level ORM / entry-point headers
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/detail/Hash.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/Codec.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/PackedTable.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/AkkaraDB.hpp
 )
 
 # Public implementation (akkaradb/src)
 target_sources(akkaradb PRIVATE
-
+        ${AKKARADB_SRC_DIR}/AkkaraDB.cpp
 )
 
 # Internal headers (not exposed to users)
@@ -80,6 +104,7 @@ target_sources(akkaradb PRIVATE
 
         # Engine
         ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
+        ${INTERNAL_INCLUDE_DIR}/engine/Compression.hpp
         ${INTERNAL_INCLUDE_DIR}/engine/vlog/VersionLog.hpp
 
         # Engine - API Server
@@ -168,6 +193,9 @@ target_sources(akkaradb PRIVATE
         ${INTERNAL_SRC_DIR}/engine/sstable/SSTManager.cpp
 )
 
+# Zstd (static, all platforms)
+target_link_libraries(akkaradb PRIVATE libzstd_static)
+
 # Windows: link Winsock2 for ReplicationServer / ReplicationClient TCP sockets
 if(WIN32)
     target_link_libraries(akkaradb PRIVATE ws2_32)
@@ -177,9 +205,9 @@ endif()
 target_include_directories(akkaradb
         PUBLIC
         $<BUILD_INTERFACE:${AKKARADB_INCLUDE_DIR}>
+        $<BUILD_INTERFACE:${INTERNAL_INCLUDE_DIR}>   # AkkEngine.hpp is part of the public API
         $<INSTALL_INTERFACE:include>
-        PRIVATE
-        ${INTERNAL_INCLUDE_DIR}
+        $<INSTALL_INTERFACE:include/internal>
 )
 
 # Specify C++ linker

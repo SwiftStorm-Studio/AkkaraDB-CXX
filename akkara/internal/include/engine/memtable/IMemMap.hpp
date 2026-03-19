@@ -78,6 +78,19 @@ namespace akkaradb::engine::memtable {
             [[nodiscard]] virtual std::optional<bool>
                 find_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const = 0;
 
+            /**
+             * Existence check — no value copy, no blob I/O.
+             *
+             * Equivalent to find_into() but discards the value entirely.
+             * Use when you only need to know whether a live record exists.
+             *
+             * @return
+             *   nullopt → key not present; caller may continue to SST.
+             *   false   → tombstone; caller must NOT check SST.
+             *   true    → live record found.
+             */
+            [[nodiscard]] virtual std::optional<bool> contains(std::span<const uint8_t> key) const = 0;
+
             // ── Capacity ──────────────────────────────────────────────────────
 
             [[nodiscard]] virtual bool   empty() const noexcept = 0;

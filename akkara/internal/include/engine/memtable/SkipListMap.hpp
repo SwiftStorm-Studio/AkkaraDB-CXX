@@ -20,6 +20,7 @@
 #pragma once
 
 #include "engine/memtable/IMemMap.hpp"
+#include "core/buffer/MonotonicArena.hpp"
 
 #include <array>
 #include <random>
@@ -34,7 +35,11 @@ namespace akkaradb::engine::memtable {
      *
      *   put/find : O(log n) amortized
      *   scan     : O(n) via level-0 linked list
-     *   memory   : per-node heap allocation (no arena), freed on destruction
+     *   memory   : MonotonicArena node allocation (same pattern as BPTreeMap).
+     *              Node structs are arena-allocated (no per-node malloc/free).
+     *              MemRecord value bytes remain heap-owned (vector<uint8_t>).
+     *              Destructor walks L0 list, calls ~Node() to free value bytes,
+     *              then arena bulk-frees all slab blocks in O(1).
      *
      * Thread-safety: single-threaded; Shard's mutex provides exclusion.
      *
@@ -63,6 +68,8 @@ namespace akkaradb::engine::memtable {
 
             std::optional<bool> find_into(std::span<const uint8_t>  key,
                                           std::vector<uint8_t>& out) const override;
+
+            std::optional<bool> contains(std::span<const uint8_t> key) const override;
 
             bool   empty() const noexcept override { return size_ == 0; }
             size_t size()  const noexcept override { return size_; }
@@ -93,6 +100,7 @@ namespace akkaradb::engine::memtable {
 
             // ── Members ───────────────────────────────────────────────────────
 
+            core::MonotonicArena arena_; ///< Slab allocator for all Node structs
             Node*        head_;    ///< Sentinel node (empty key, seq=0)
             int          height_;  ///< Current max height across all non-sentinel nodes
             size_t       size_;

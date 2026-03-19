@@ -20,6 +20,7 @@
 #pragma once
 
 #include "engine/sstable/SSTFormat.hpp"
+#include "engine/Compression.hpp"
 #include "core/record/MemRecord.hpp"
 #include <cstdint>
 #include <filesystem>
@@ -56,6 +57,12 @@ namespace akkaradb::engine::sst {
                 /// Sparse index density: one entry every index_stride records
                 /// (plus always the first and last record).
                 size_t index_stride = INDEX_STRIDE;
+
+                /// Compression codec for the data section.
+                /// Codec::None  = uncompressed (default, backward compatible).
+                /// Codec::Zstd  = Zstandard; encoded in SSTFileHeader::flags (0x01).
+                /// Index and Bloom filter sections are always written uncompressed.
+                akkaradb::engine::Codec codec = akkaradb::engine::Codec::None;
             };
 
             // ── Result ────────────────────────────────────────────────────────

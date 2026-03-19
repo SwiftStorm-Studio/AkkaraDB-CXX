@@ -37,22 +37,24 @@ namespace akkaradb::engine::memtable {
     {
         // Create the head sentinel with an empty-byte key (length 0).
         // All user keys have length >= 1, so the sentinel always compares less.
-        head_ = new Node(
+        void* mem = arena_.allocate(sizeof(Node), alignof(Node));
+        head_ = new(mem) Node(
             core::MemRecord::tombstone(std::span<const uint8_t>{}, 0, 0),
             MAX_HEIGHT
         );
     }
 
     SkipListMap::~SkipListMap() {
-        // Walk the level-0 list and delete every data node.
-        // head_ itself is deleted last.
-        Node* cur = head_->next[0];
+        // Walk the level-0 list and explicitly call ~Node() on every node
+        // (including head_) so that each MemRecord's vector<uint8_t> is freed.
+        // The arena then bulk-frees all slab blocks without per-node overhead.
+        Node* cur = head_;
         while (cur) {
             Node* nxt = cur->next[0];
-            delete cur;
+            cur->~Node();
             cur = nxt;
         }
-        delete head_;
+        // arena_ destructor frees all slab blocks here.
     }
 
     // ============================================================================
@@ -134,8 +136,9 @@ namespace akkaradb::engine::memtable {
             height_ = h;
         }
 
-        // Allocate new node and splice into each level.
-        Node* node = new Node(std::move(record), h);
+        // Allocate new node from arena and splice into each level.
+        void* mem = arena_.allocate(sizeof(Node), alignof(Node));
+        Node* node = new(mem) Node(std::move(record), h);
         for (int i = 0; i < h; ++i) {
             node->next[i]    = update[i]->next[i];
             update[i]->next[i] = node;
@@ -172,6 +175,16 @@ namespace akkaradb::engine::memtable {
             out.assign(val.begin(), val.end());
             return true;
         }
+        return std::nullopt;
+    }
+
+    // ============================================================================
+    // contains
+    // ============================================================================
+
+    std::optional<bool> SkipListMap::contains(std::span<const uint8_t> key) const {
+        Node* candidate = lower_bound_node(key);
+        if (candidate && candidate->record.compare_key(key) == 0) return !candidate->record.is_tombstone();
         return std::nullopt;
     }
 
