@@ -19,6 +19,7 @@
 #pragma once
 
 #include "engine/AkkEngine.hpp"
+#include "core/net/TlsStream.hpp"
 #include <atomic>
 #include <memory>
 #include <string>
@@ -41,11 +42,11 @@ namespace akkaradb::server {
      *
      * One accept thread + one thread per connection.
      * Keep-alive supported (Connection: keep-alive).
+     * Optionally wraps connections with TLS when a non-empty TlsConfig is provided.
      */
     class HttpApiServer {
         public:
-            [[nodiscard]] static std::unique_ptr<HttpApiServer>
-            create(engine::AkkEngine& engine, uint16_t port);
+            [[nodiscard]] static std::unique_ptr<HttpApiServer> create(engine::AkkEngine& engine, uint16_t port, core::TlsConfig tls = {});
 
             ~HttpApiServer();
 
@@ -56,10 +57,10 @@ namespace akkaradb::server {
             void close();
 
         private:
-            explicit HttpApiServer(engine::AkkEngine& engine, uint16_t port);
+            explicit HttpApiServer(engine::AkkEngine& engine, uint16_t port, core::TlsConfig tls);
 
             void accept_loop();
-            void handle_connection(int fd);
+            void handle_connection(core::TlsStream& stream);
 
             // HTTP parsing helpers
             struct ParsedRequest {
@@ -70,21 +71,23 @@ namespace akkaradb::server {
                 bool                     keep_alive{true};
             };
 
-            bool          read_request(int fd, ParsedRequest& req);
-            bool          route(int fd, const ParsedRequest& req);
-            void          send_response(int fd, int status_code,
-                                        std::span<const uint8_t> body);
-            void          send_empty(int fd, int status_code);
+            bool read_request(core::TlsStream& stream, ParsedRequest& req);
+            bool route(core::TlsStream& stream, const ParsedRequest& req);
+            void send_response(core::TlsStream& stream, int status_code, std::span<const uint8_t> body);
+            void send_empty(core::TlsStream& stream, int status_code);
 
             static std::string          query_param(const std::string& query,
                                                     std::string_view   name);
             static std::vector<uint8_t> url_decode(std::string_view encoded);
 
             engine::AkkEngine& engine_;
-            uint16_t           port_;
-            std::atomic<bool>  running_{false};
-            int                listen_fd_{-1};
-            std::thread        accept_thr_;
+            uint16_t port_;
+            std::atomic<bool> running_{false};
+            int listen_fd_{-1};
+            std::thread accept_thr_;
+
+            core::TlsConfig tls_cfg_;
+            std::unique_ptr<core::TlsContext> tls_ctx_;
     };
 
 } // namespace akkaradb::server

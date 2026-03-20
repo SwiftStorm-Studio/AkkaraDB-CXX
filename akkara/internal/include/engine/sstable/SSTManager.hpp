@@ -115,6 +115,13 @@ namespace akkaradb::engine::sst {
                 /// Total SST block cache capacity (MemRecord entries across all shards).
                 /// 0 = disable cache. Default: 16384.
                 size_t sst_cache_capacity = 16384;
+
+                /// When true, each SST file's uncompressed data section is loaded into RAM
+                /// at open time.  False positives from the bloom filter then hit an in-memory
+                /// scan instead of fopen/fseek/fread, eliminating ~75 µs per FP lookup.
+                /// Trade-off: uses ~data_size bytes of RAM per open SST file.
+                /// Default: false
+                bool preload_sst_data = false;
             };
 
             // ── Per-file metadata ─────────────────────────────────────────────

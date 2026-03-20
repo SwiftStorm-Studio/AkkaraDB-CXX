@@ -47,38 +47,14 @@
    static void init_winsock() {}
 #endif
 
-// ── low-level send/recv helpers ───────────────────────────────────────────────
-
-static bool send_all(sock_t s, const uint8_t* data, size_t len) noexcept {
-    while (len > 0) {
-        const auto n = ::send(s, reinterpret_cast<const char*>(data),
-                              static_cast<int>(len), 0);
-        if (n <= 0) return false;
-        data += n; len -= static_cast<size_t>(n);
-    }
-    return true;
-}
-
-static bool recv_all(sock_t s, uint8_t* data, size_t len) noexcept {
-    while (len > 0) {
-        const auto n = ::recv(s, reinterpret_cast<char*>(data),
-                              static_cast<int>(len), 0);
-        if (n <= 0) return false;
-        data += n; len -= static_cast<size_t>(n);
-    }
-    return true;
-}
-
 namespace akkaradb::server {
 
     // ── factory / ctor ────────────────────────────────────────────────────────
 
-    TcpApiServer::TcpApiServer(engine::AkkEngine& engine, uint16_t port)
-        : engine_{engine}, port_{port} {}
+    TcpApiServer::TcpApiServer(engine::AkkEngine& engine, uint16_t port, core::TlsConfig tls) : engine_{engine}, port_{port}, tls_cfg_{std::move(tls)} {}
 
-    std::unique_ptr<TcpApiServer>
-    TcpApiServer::create(engine::AkkEngine& engine, uint16_t port) {
-        return std::unique_ptr<TcpApiServer>(new TcpApiServer{engine, port});
+    std::unique_ptr<TcpApiServer> TcpApiServer::create(engine::AkkEngine& engine, uint16_t port, core::TlsConfig tls) {
+        return std::unique_ptr < TcpApiServer > (new TcpApiServer{engine, port, std::move(tls)});
     }
 
     TcpApiServer::~TcpApiServer() { close(); }
@@ -87,6 +63,9 @@ namespace akkaradb::server {
 
     void TcpApiServer::start() {
         init_winsock();
+
+        // Initialise TLS context if enabled
+        tls_ctx_ = core::TlsContext::make_server(tls_cfg_);
 
         const sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (!sock_ok(fd)) throw std::runtime_error("TcpApiServer: socket() failed");
@@ -135,7 +114,14 @@ namespace akkaradb::server {
 
             // Spawn a detached connection-handler thread
             std::thread([this, client] {
-                handle_connection(static_cast<int>(client));
+                try {
+                    auto stream = core::TlsStream::server_wrap(client, tls_ctx_.get());
+                    handle_connection(*stream);
+                    stream->shutdown();
+                }
+                catch (...) {
+                    // TLS handshake failure or other error — just close the socket
+                }
                 close_sock(client);
             }).detach();
         }
@@ -143,37 +129,34 @@ namespace akkaradb::server {
 
     // ── connection handler ────────────────────────────────────────────────────
 
-    void TcpApiServer::handle_connection(int raw_fd) {
-        const sock_t fd = static_cast<sock_t>(raw_fd);
-
-        // Enable TCP_NODELAY: requests are small; no benefit from Nagle
-        int flag = 1;
-        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
-                     reinterpret_cast<const char*>(&flag), sizeof(flag));
+    void TcpApiServer::handle_connection(core::TlsStream& stream) {
+        // Enable TCP_NODELAY on the raw socket when we have access to fd via sock_t.
+        // (We don't have direct fd here; TCP_NODELAY is a best-effort optimisation
+        //  that can also be applied at accept_loop level if needed.)
 
         std::vector<uint8_t> key_buf, val_buf, resp_buf;
 
         while (running_.load(std::memory_order_relaxed)) {
             // ── Read request header ───────────────────────────────────────────
             ApiRequestHeader hdr{};
-            if (!recv_all(fd, reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr))) break;
+            if (!stream.recv_all(reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr))) break;
 
             if (std::memcmp(hdr.magic, REQUEST_MAGIC, 4) != 0 ||
                 hdr.version != PROTOCOL_VERSION) {
                 encode_error(hdr.request_id, resp_buf);
-                send_all(fd, resp_buf.data(), resp_buf.size());
+                stream.send_all(resp_buf.data(), resp_buf.size());
                 break;  // protocol error → drop connection
             }
 
             // ── Read key + val ────────────────────────────────────────────────
             key_buf.resize(hdr.key_len);
             val_buf.resize(hdr.val_len);
-            if (!recv_all(fd, key_buf.data(), key_buf.size())) break;
-            if (hdr.val_len && !recv_all(fd, val_buf.data(), val_buf.size())) break;
+            if (!stream.recv_all(key_buf.data(), key_buf.size())) break;
+            if (hdr.val_len && !stream.recv_all(val_buf.data(), val_buf.size())) break;
 
             // ── Verify CRC32C (key + val) ─────────────────────────────────────
             uint32_t received_crc = 0;
-            if (!recv_all(fd, reinterpret_cast<uint8_t*>(&received_crc), 4)) break;
+            if (!stream.recv_all(reinterpret_cast<uint8_t*>(&received_crc), 4)) break;
 
             const uint32_t expected_crc = [&] {
                 auto crc = core::CRC32C::compute(key_buf.data(), key_buf.size());
@@ -184,7 +167,7 @@ namespace akkaradb::server {
 
             if (received_crc != expected_crc) {
                 encode_error(hdr.request_id, resp_buf);
-                send_all(fd, resp_buf.data(), resp_buf.size());
+                stream.send_all(resp_buf.data(), resp_buf.size());
                 break;
             }
 
@@ -232,7 +215,7 @@ namespace akkaradb::server {
                     break;
             }
 
-            if (!send_all(fd, resp_buf.data(), resp_buf.size())) break;
+            if (!stream.send_all(resp_buf.data(), resp_buf.size())) break;
         }
     }
 

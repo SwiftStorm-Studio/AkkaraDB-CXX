@@ -25,7 +25,6 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
-#include <queue>
 #include <stdexcept>
 #include <thread>
 #include <unordered_set>
@@ -167,20 +166,6 @@ namespace akkaradb::engine::manifest {
             );
         }
 
-        // Writes a complete record (header + payload) into a flat byte buffer.
-        std::vector<uint8_t> make_record(ManifestRecordType type, const std::vector<uint8_t>& payload) {
-            const auto plen = static_cast<uint16_t>(payload.size());
-            const ManifestRecordHeader rhdr =
-                ManifestRecordHeader::build(type, payload.data(), plen);
-
-            std::vector<uint8_t> record(ManifestRecordHeader::SIZE + plen);
-            rhdr.serialize(record.data());
-            if (plen > 0) {
-                std::memcpy(record.data() + ManifestRecordHeader::SIZE, payload.data(), plen);
-            }
-            return record;
-        }
-
     } // anonymous namespace
 
     // ============================================================================
@@ -208,13 +193,8 @@ namespace akkaradb::engine::manifest {
                 current_path_ = make_manifest_path(rotation_counter_);
                 file_handle_  = FileHandle::open(current_path_);
 
-                const bool is_new_file =
-                    !std::filesystem::exists(current_path_) ||
-                    std::filesystem::file_size(current_path_) == 0;
-
-                current_file_size_ = is_new_file
-                    ? 0
-                    : std::filesystem::file_size(current_path_);
+                current_file_size_ = std::filesystem::file_size(current_path_);
+                const bool is_new_file = (current_file_size_ == 0);
 
                 if (is_new_file) {
                     write_file_header(rotation_counter_);
@@ -248,10 +228,13 @@ namespace akkaradb::engine::manifest {
             // ----------------------------------------------------------------
 
             void advance(uint64_t new_count) {
-                if (new_count < stripes_written_) {
-                    throw std::invalid_argument("Manifest: stripe counter must be monotonic");
+                {
+                    std::lock_guard lock{advance_mutex_};
+                    if (new_count < stripes_written_.load(std::memory_order_relaxed)) {
+                        throw std::invalid_argument("Manifest: stripe counter must be monotonic");
+                    }
+                    stripes_written_.store(new_count, std::memory_order_relaxed);
                 }
-                stripes_written_ = new_count;
                 append(ManifestRecordType::StripeCommit,
                        encode_stripe_commit(now_us(), new_count));
             }
@@ -263,11 +246,11 @@ namespace akkaradb::engine::manifest {
                 const std::optional<std::string>& first_key_hex,
                 const std::optional<std::string>& last_key_hex
             ) {
-                append(ManifestRecordType::SSTSeal,
-                       encode_sst_seal(now_us(), level, file, entries, first_key_hex, last_key_hex));
+                const uint64_t ts = now_us();
+                append(ManifestRecordType::SSTSeal, encode_sst_seal(ts, level, file, entries, first_key_hex, last_key_hex));
 
                 std::lock_guard lock{mutex_};
-                sst_seals_.push_back(SSTSealEvent{level, file, entries, first_key_hex, last_key_hex, now_us()});
+                sst_seals_.push_back(SSTSealEvent{level, file, entries, first_key_hex, last_key_hex, ts});
                 live_sst_.insert(file);
                 deleted_sst_.erase(file);
             }
@@ -283,6 +266,10 @@ namespace akkaradb::engine::manifest {
 
                 std::lock_guard lock{mutex_};
                 last_checkpoint_ = CheckpointEvent{name, stripe, last_seq, ts};
+
+                deleted_sst_.clear();
+
+                std::erase_if(sst_seals_, [this](const SSTSealEvent& e) { return live_sst_.find(e.file) == live_sst_.end(); });
             }
 
             void compaction_start(int level, const std::vector<std::string>& inputs) {
@@ -430,18 +417,26 @@ namespace akkaradb::engine::manifest {
             // ----------------------------------------------------------------
 
             void append(ManifestRecordType type, std::vector<uint8_t> payload) {
-                auto record = make_record(type, payload);
+                const auto plen = static_cast<uint16_t>(payload.size());
+                const ManifestRecordHeader rhdr = ManifestRecordHeader::build(type, payload.data(), plen);
+                payload.resize(ManifestRecordHeader::SIZE + plen);
+                std::memmove(payload.data() + ManifestRecordHeader::SIZE, payload.data(), plen);
+                rhdr.serialize(payload.data());
 
                 if (fast_mode_) {
-                    std::lock_guard lock{queue_mutex_};
-                    queue_.push(std::move(record));
-                    queue_cv_.notify_one();
+                    bool was_empty;
+                    {
+                        std::lock_guard lock{queue_mutex_};
+                        was_empty = queue_.empty();
+                        queue_.push_back(std::move(payload));
+                    }
+                    if (was_empty) queue_cv_.notify_one();
                 } else {
                     std::lock_guard lock{rotation_mutex_};
                     check_rotation();
-                    file_handle_.write(record.data(), record.size());
+                    file_handle_.write(payload.data(), payload.size());
                     file_handle_.fsync_data();
-                    current_file_size_ += record.size();
+                    current_file_size_ += payload.size();
                 }
             }
 
@@ -450,25 +445,21 @@ namespace akkaradb::engine::manifest {
             // ----------------------------------------------------------------
 
             void run_flusher() {
-                constexpr auto MAX_WAIT  = std::chrono::microseconds(500);
-                constexpr size_t MAX_BATCH = 32;
+                constexpr auto MAX_WAIT = std::chrono::microseconds(500);
+
+                std::vector<std::vector<uint8_t>> batch;
+                batch.reserve(64);
 
                 while (true) {
-                    std::unique_lock lock{queue_mutex_};
-                    queue_cv_.wait_for(lock, MAX_WAIT,
-                                       [this] { return !queue_.empty() || !running_; });
-
-                    if (!running_ && queue_.empty()) { break; }
-
-                    std::vector<std::vector<uint8_t>> batch;
-                    batch.reserve(MAX_BATCH);
-                    while (!queue_.empty() && batch.size() < MAX_BATCH) {
-                        batch.push_back(std::move(queue_.front()));
-                        queue_.pop();
-                    }
-                    lock.unlock();
-
                     {
+                        std::unique_lock lock{queue_mutex_};
+                        queue_cv_.wait_for(lock, MAX_WAIT, [this] { return !queue_.empty() || !running_; });
+
+                        if (!running_ && queue_.empty()) { break; }
+                        std::swap(batch, queue_);
+                    }
+
+                    if (!batch.empty()) {
                         std::lock_guard rotation_lock{rotation_mutex_};
                         for (const auto& record : batch) {
                             check_rotation();
@@ -476,6 +467,7 @@ namespace akkaradb::engine::manifest {
                             current_file_size_ += record.size();
                         }
                         file_handle_.fsync_data();
+                        batch.clear();
                     }
 
                     auto now = std::chrono::steady_clock::now();
@@ -659,6 +651,7 @@ namespace akkaradb::engine::manifest {
 
             // Durable state
             std::atomic<uint64_t>            stripes_written_;
+            std::mutex advance_mutex_;
             mutable std::mutex               mutex_;
             std::vector<SSTSealEvent>        sst_seals_;
             std::unordered_set<std::string>  live_sst_;
@@ -669,7 +662,7 @@ namespace akkaradb::engine::manifest {
             std::thread              flusher_thread_;
             std::mutex               queue_mutex_;
             std::condition_variable  queue_cv_;
-            std::queue<std::vector<uint8_t>> queue_;
+            std::vector<std::vector<uint8_t>> queue_;
             std::chrono::steady_clock::time_point last_strong_sync_;
 
             // Rotation

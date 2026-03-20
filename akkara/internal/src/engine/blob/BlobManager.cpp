@@ -26,7 +26,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
-#include <deque>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -65,8 +64,6 @@ namespace akkaradb::engine::blob {
         // Used to write BlobFileHeader (hdr) followed by blob content without
         // allocating an intermediate vector that would double memory usage.
         void write_atomic_split(const std::filesystem::path& path, const uint8_t* hdr, size_t hdr_len, const uint8_t* content, size_t content_len) {
-            std::filesystem::create_directories(path.parent_path());
-
             std::filesystem::path tmp = path;
             tmp += ".tmp";
 
@@ -219,7 +216,7 @@ namespace akkaradb::engine::blob {
     struct BlobManager::Impl {
         std::filesystem::path   blobs_dir;
         uint64_t                threshold;
-        engine::Codec codec = engine::Codec::None;
+        Codec codec = Codec::None;
 
         std::atomic<bool>       running { false };
         std::thread             gc_thr;
@@ -230,7 +227,7 @@ namespace akkaradb::engine::blob {
 
         std::mutex              del_mtx;
         std::condition_variable del_cv;
-        std::deque<uint64_t>    del_queue; // blob_ids to delete
+        std::vector<uint64_t> del_queue; // blob_ids to delete
 
         // ── path helpers ─────────────────────────────────────────────────────
 
@@ -259,7 +256,7 @@ namespace akkaradb::engine::blob {
 
         // ── write helpers ────────────────────────────────────────────────────
 
-        void do_write(uint64_t id, std::span<const uint8_t> content) {
+        void do_write(uint64_t id, std::span<const uint8_t> content, const std::filesystem::path& path) {
             // Optionally compress the content with Zstd.
             std::vector<uint8_t> compressed_buf;
             const uint8_t* payload_data = content.data();
@@ -290,33 +287,35 @@ namespace akkaradb::engine::blob {
             auto hdr = BlobFileHeader::build(id, content.size(), actual_codec, compressed_sz);
             uint8_t hdr_buf[BlobFileHeader::SIZE];
             hdr.serialize(hdr_buf);
-            write_atomic_split(id_to_path(id), hdr_buf, BlobFileHeader::SIZE, payload_data, payload_len);
+            write_atomic_split(path, hdr_buf, BlobFileHeader::SIZE, payload_data, payload_len);
         }
 
         // ── GC worker ────────────────────────────────────────────────────────
 
         void gc_loop() {
+            std::vector<uint64_t> local_batch;
             while (running.load(std::memory_order_relaxed)) {
-                uint64_t id = 0;
                 {
                     std::unique_lock lk(del_mtx);
                     del_cv.wait_for(lk, std::chrono::milliseconds(200), [&]{
-                        return !del_queue.empty()
-                            || !running.load(std::memory_order_relaxed);
-                    });
+                        return !del_queue.empty() || !running.load(std::memory_order_acquire);
+                                    }
+                    );
                     if (del_queue.empty()) continue;
-                    id = del_queue.front();
-                    del_queue.pop_front();
+                    // Drain entire queue in one swap — lock released before file I/O.
+                    local_batch.swap(del_queue);
                 }
 
-                auto src = id_to_path(id);
-                auto dst = src;
-                dst += ".del";
-
-                if (rename_file(src, dst)) {
-                    delete_file(dst);
+                // Process the batch outside the lock so schedule_delete() is never
+                // blocked by disk rename/unlink latency.
+                for (uint64_t id : local_batch) {
+                    auto src = id_to_path(id);
+                    auto dst = src;
+                    dst += ".del";
+                    if (rename_file(src, dst)) { delete_file(dst); }
+                    // If rename fails (file already gone), ignore silently
                 }
-                // If rename fails (file already gone), ignore silently
+                local_batch.clear();
             }
         }
     };
@@ -342,8 +341,8 @@ namespace akkaradb::engine::blob {
 
     BlobManager::~BlobManager() { close(); }
 
-    std::unique_ptr<BlobManager> BlobManager::create(std::filesystem::path blobs_dir, uint64_t threshold_bytes, engine::Codec codec) {
-        auto impl         = std::make_unique<Impl>();
+    std::unique_ptr<BlobManager> BlobManager::create(std::filesystem::path blobs_dir, uint64_t threshold_bytes, Codec codec) {
+        auto impl = std::make_unique<Impl>();
         impl->blobs_dir   = std::move(blobs_dir);
         impl->threshold   = threshold_bytes;
         impl->codec = codec;
@@ -351,20 +350,26 @@ namespace akkaradb::engine::blob {
     }
 
     void BlobManager::start() {
-        // Ensure directory exists
         std::filesystem::create_directories(impl_->blobs_dir);
 
-        // Cleanup leftover .blob.del files from previous crash
+        // Pre-create all 256 subdirectories (00..ff) so write_atomic_split()
+        // never needs create_directories on the hot write path.
+        char sub[3];
+        for (int i = 0; i < 256; ++i) {
+            std::snprintf(sub, sizeof(sub), "%02x", i);
+            std::filesystem::create_directories(impl_->blobs_dir / sub);
+        }
+
         impl_->startup_cleanup();
 
         // Start GC worker
-        impl_->running.store(true, std::memory_order_relaxed);
-        impl_->gc_thr = std::thread([this]{ impl_->gc_loop(); });
+        impl_->running.store(true, std::memory_order_release);
+        impl_->gc_thr = std::thread([this] { impl_->gc_loop(); });
     }
 
     void BlobManager::close() {
         if (!impl_) return;
-        impl_->running.store(false, std::memory_order_relaxed);
+        impl_->running.store(false, std::memory_order_release);
         impl_->del_cv.notify_all();
         if (impl_->gc_thr.joinable()) impl_->gc_thr.join();
     }
@@ -388,7 +393,7 @@ namespace akkaradb::engine::blob {
         std::lock_guard lk(impl_->write_mu);
         if (std::filesystem::exists(p)) return;
 
-        impl_->do_write(blob_id, content);
+        impl_->do_write(blob_id, content, p);
     }
 
     // ============================================================================
@@ -424,7 +429,11 @@ namespace akkaradb::engine::blob {
         // Uncompressed blob (flags == None, or legacy files with reserved=0)
         if (payload_len < hdr.total_size) throw std::runtime_error("BlobManager: content truncated: " + p.string());
 
-        return std::vector<uint8_t>(payload, payload + hdr.total_size);
+        // Reuse the already-allocated `raw` buffer — shift payload down and trim.
+        // Avoids a second allocation + copy of potentially large uncompressed data.
+        std::memmove(raw.data(), raw.data() + BlobFileHeader::SIZE, hdr.total_size);
+        raw.resize(hdr.total_size);
+        return raw;
     }
 
     std::vector<uint8_t> BlobManager::read(uint64_t blob_id, uint32_t expected_checksum) const {
@@ -461,9 +470,12 @@ namespace akkaradb::engine::blob {
     // ============================================================================
 
     void BlobManager::scan_orphans(std::function<bool(uint64_t)> is_referenced) {
+        // Collect all orphan IDs first, then enqueue with a single lock acquisition.
+        // Avoids repeated lock/unlock + notify_one per file during large scans.
+        std::vector<uint64_t> orphans;
         std::error_code ec;
         for (auto& entry : std::filesystem::recursive_directory_iterator(
-                               impl_->blobs_dir, ec)) {
+                 impl_->blobs_dir, ec)) {
             if (ec) break;
             if (entry.path().extension() != ".blob") continue;
 
@@ -471,8 +483,15 @@ namespace akkaradb::engine::blob {
             if (id == 0) continue;
 
             if (!is_referenced(id)) {
-                schedule_delete(id);
+                orphans.push_back(id);
             }
+        }
+
+        if (!orphans.empty()) {
+            std::lock_guard lk(impl_->del_mtx);
+            impl_->del_queue.insert(impl_->del_queue.end(),
+                                    orphans.begin(), orphans.end());
+            impl_->del_cv.notify_one();
         }
     }
 

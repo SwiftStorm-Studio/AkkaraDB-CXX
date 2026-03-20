@@ -69,38 +69,7 @@ namespace {
 #endif
     }
 
-    // Sends exactly `len` bytes; returns false on error.
-    static bool send_all(sock_t s, const uint8_t* data, size_t len) noexcept {
-        while (len > 0) {
-            int chunk = (len > static_cast<size_t>(INT_MAX))
-                            ? INT_MAX
-                            : static_cast<int>(len);
-            auto n = ::send(s, reinterpret_cast<const char*>(data), chunk, 0);
-            if (n <= 0) return false;
-            data += n;
-            len  -= static_cast<size_t>(n);
-        }
-        return true;
-    }
-
-    // Receives exactly `len` bytes; returns false on error / EOF.
-    static bool recv_all(sock_t s, uint8_t* data, size_t len) noexcept {
-        while (len > 0) {
-            int chunk = (len > static_cast<size_t>(INT_MAX))
-                            ? INT_MAX
-                            : static_cast<int>(len);
-            auto n = ::recv(s, reinterpret_cast<char*>(data), chunk, 0);
-            if (n <= 0) return false;
-            data += n;
-            len  -= static_cast<size_t>(n);
-        }
-        return true;
-    }
-
     // LE helpers (same as ReplFraming anonymous namespace, duplicated here to avoid exposing them)
-    static inline uint16_t get_u16(const uint8_t* b) noexcept {
-        return static_cast<uint16_t>(b[0]) | (static_cast<uint16_t>(b[1]) << 8);
-    }
     static inline uint64_t get_u64(const uint8_t* b) noexcept {
         uint64_t v = 0;
         for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(b[i]) << (8 * i);
@@ -124,6 +93,9 @@ namespace akkaradb::engine::cluster {
     /// Per-replica connection state.
     struct ReplicaState {
         sock_t              sock    { BAD_SOCK };
+        // TlsStream wrapping the socket (created after TLS handshake in accept_loop)
+        std::unique_ptr<core::TlsStream> stream;
+
         uint64_t            node_id { 0 };
         std::atomic<uint64_t> last_acked_seq { 0 };
         std::atomic<bool>   dead    { false };
@@ -154,6 +126,10 @@ namespace akkaradb::engine::cluster {
         std::function<uint64_t()> get_current_seq;
         bool                      sync_mode;
 
+        // TLS configuration — shared context created in start()
+        core::TlsConfig tls_cfg;
+        std::unique_ptr<core::TlsContext> tls_ctx;
+
         sock_t            listen_sock { BAD_SOCK };
         std::atomic<bool> running     { false };
         std::thread       accept_thr;
@@ -177,7 +153,6 @@ namespace akkaradb::engine::cluster {
 
         bool setup_listen() noexcept;
         void accept_loop();
-        bool do_handshake(sock_t s, uint64_t& out_node_id, uint64_t& out_last_seq) noexcept;
 
         void send_loop(std::shared_ptr<ReplicaState> rs);
         void recv_loop(std::shared_ptr<ReplicaState> rs);
@@ -219,32 +194,6 @@ namespace akkaradb::engine::cluster {
         return true;
     }
 
-    // ── do_handshake ─────────────────────────────────────────────────────────
-
-    bool ReplicationServer::Impl::do_handshake(
-            sock_t s, uint64_t& out_node_id, uint64_t& out_last_seq) noexcept {
-        // 1. Read ReplClientHello
-        uint8_t hello_buf[ReplClientHello::SIZE];
-        if (!recv_all(s, hello_buf, ReplClientHello::SIZE)) return false;
-
-        auto hello = ReplClientHello::deserialize(hello_buf);
-        if (!hello.verify_magic()) return false;
-
-        out_node_id  = hello.node_id;
-        out_last_seq = hello.last_seq;
-
-        // 2. Send ReplServerHello
-        ReplServerHello srv{};
-        srv.magic       = ReplServerHello::MAGIC;
-        srv.node_id     = self_node_id;
-        srv.current_seq = get_current_seq();
-        srv.flags       = 0;
-
-        uint8_t srv_buf[ReplServerHello::SIZE];
-        srv.serialize(srv_buf);
-        return send_all(s, srv_buf, ReplServerHello::SIZE);
-    }
-
     // ── accept_loop ──────────────────────────────────────────────────────────
 
     void ReplicationServer::Impl::accept_loop() {
@@ -254,14 +203,49 @@ namespace akkaradb::engine::cluster {
             sock_t client = ::accept(listen_sock, nullptr, nullptr);
             if (!sock_ok(client)) break; // listen socket was closed
 
-            uint64_t node_id = 0, last_seq = 0;
-            if (!do_handshake(client, node_id, last_seq)) {
+            // 1. TLS handshake (wraps client socket; no-op when tls_ctx is null)
+            std::unique_ptr<core::TlsStream> stream;
+            try { stream = core::TlsStream::server_wrap(client, tls_ctx.get()); }
+            catch (...) {
                 close_sock(client);
                 continue;
             }
 
+            // 2. Protocol handshake via TlsStream (transparent for both plain and TLS)
+            uint64_t node_id = 0, last_seq = 0;
+            {
+                uint8_t hello_buf[ReplClientHello::SIZE];
+                if (!stream->recv_all(hello_buf, ReplClientHello::SIZE)) {
+                    stream->shutdown();
+                    close_sock(client);
+                    continue;
+                }
+                auto hello = ReplClientHello::deserialize(hello_buf);
+                if (!hello.verify_magic()) {
+                    stream->shutdown();
+                    close_sock(client);
+                    continue;
+                }
+                node_id = hello.node_id;
+                last_seq = hello.last_seq;
+
+                ReplServerHello srv{};
+                srv.magic = ReplServerHello::MAGIC;
+                srv.node_id = self_node_id;
+                srv.current_seq = get_current_seq();
+                srv.flags = 0;
+                uint8_t srv_buf[ReplServerHello::SIZE];
+                srv.serialize(srv_buf);
+                if (!stream->send_all(srv_buf, ReplServerHello::SIZE)) {
+                    stream->shutdown();
+                    close_sock(client);
+                    continue;
+                }
+            }
+
             auto rs       = std::make_shared<ReplicaState>();
             rs->sock      = client;
+            rs->stream = std::move(stream);
             rs->node_id   = node_id;
             rs->last_acked_seq.store(last_seq, std::memory_order_relaxed);
 
@@ -312,8 +296,9 @@ namespace akkaradb::engine::cluster {
                 rs->send_queue.pop_front();
             }
 
-            if (!send_all(rs->sock, wire.data(), wire.size())) {
+            if (!rs->stream->send_all(wire.data(), wire.size())) {
                 rs->dead.store(true, std::memory_order_release);
+                rs->stream->shutdown();
                 close_sock(rs->sock);
                 rs->sock = BAD_SOCK;
                 break;
@@ -332,7 +317,7 @@ namespace akkaradb::engine::cluster {
         while (!rs->dead.load(std::memory_order_relaxed)) {
             // ReplAck is 9 bytes: [msg_type:u8=0x03][seq:u64]
             uint8_t buf[ReplAck::SIZE];
-            if (!recv_all(rs->sock, buf, ReplAck::SIZE)) break;
+            if (!rs->stream->recv_all(buf, ReplAck::SIZE)) break;
 
             if (buf[0] != static_cast<uint8_t>(ReplMsgType::Ack)) break; // unexpected
 
@@ -345,6 +330,7 @@ namespace akkaradb::engine::cluster {
 
         // Signal send_loop to exit
         rs->dead.store(true, std::memory_order_release);
+        if (rs->stream) rs->stream->shutdown();
         if (sock_ok(rs->sock)) {
             close_sock(rs->sock);
             rs->sock = BAD_SOCK;
@@ -402,16 +388,22 @@ namespace akkaradb::engine::cluster {
             uint16_t                  repl_port,
             uint64_t                  self_node_id,
             std::function<uint64_t()> get_current_seq,
-            bool                      sync_mode) {
+            bool sync_mode,
+            core::TlsConfig tls
+    ) {
         auto impl            = std::make_unique<Impl>();
         impl->repl_port      = repl_port;
         impl->self_node_id   = self_node_id;
         impl->get_current_seq= std::move(get_current_seq);
         impl->sync_mode      = sync_mode;
+        impl->tls_cfg = std::move(tls);
         return std::unique_ptr<ReplicationServer>(new ReplicationServer(std::move(impl)));
     }
 
     void ReplicationServer::start() {
+        // Initialise TLS context if enabled
+        impl_->tls_ctx = core::TlsContext::make_server(impl_->tls_cfg);
+
         if (!impl_->setup_listen()) return;
         impl_->running.store(true, std::memory_order_relaxed);
         impl_->accept_thr = std::thread([this]{ impl_->accept_loop(); });
@@ -492,6 +484,7 @@ namespace akkaradb::engine::cluster {
         }
         for (auto& rs : to_join) {
             rs->dead.store(true, std::memory_order_release);
+            if (rs->stream) rs->stream->shutdown();
             if (sock_ok(rs->sock)) {
                 close_sock(rs->sock);
                 rs->sock = BAD_SOCK;

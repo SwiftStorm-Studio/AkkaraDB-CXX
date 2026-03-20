@@ -49,52 +49,14 @@
    static void init_winsock_http() {}
 #endif
 
-// ── low-level helpers ─────────────────────────────────────────────────────────
-
-static bool send_all_http(sock_t s, const char* data, size_t len) noexcept {
-    while (len > 0) {
-        const auto n = ::send(s, data, static_cast<int>(len), 0);
-        if (n <= 0) return false;
-        data += n; len -= static_cast<size_t>(n);
-    }
-    return true;
-}
-
-static bool recv_all_http(sock_t s, uint8_t* data, size_t len) noexcept {
-    while (len > 0) {
-        const auto n = ::recv(s, reinterpret_cast<char*>(data),
-                              static_cast<int>(len), 0);
-        if (n <= 0) return false;
-        data += n; len -= static_cast<size_t>(n);
-    }
-    return true;
-}
-
-// Read one line (up to \r\n), stripping CRLF.  Returns false on error / EOF.
-static bool recv_line(sock_t s, std::string& line, size_t max = 8192) {
-    line.clear();
-    char c;
-    while (line.size() < max) {
-        if (::recv(s, &c, 1, 0) <= 0) return false;
-        if (c == '\n') {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            return true;
-        }
-        line += c;
-    }
-    return false; // line too long
-}
-
 namespace akkaradb::server {
 
     // ── factory / ctor ────────────────────────────────────────────────────────
 
-    HttpApiServer::HttpApiServer(engine::AkkEngine& engine, uint16_t port)
-        : engine_{engine}, port_{port} {}
+    HttpApiServer::HttpApiServer(engine::AkkEngine& engine, uint16_t port, core::TlsConfig tls) : engine_{engine}, port_{port}, tls_cfg_{std::move(tls)} {}
 
-    std::unique_ptr<HttpApiServer>
-    HttpApiServer::create(engine::AkkEngine& engine, uint16_t port) {
-        return std::unique_ptr<HttpApiServer>(new HttpApiServer{engine, port});
+    std::unique_ptr<HttpApiServer> HttpApiServer::create(engine::AkkEngine& engine, uint16_t port, core::TlsConfig tls) {
+        return std::unique_ptr < HttpApiServer > (new HttpApiServer{engine, port, std::move(tls)});
     }
 
     HttpApiServer::~HttpApiServer() { close(); }
@@ -103,6 +65,9 @@ namespace akkaradb::server {
 
     void HttpApiServer::start() {
         init_winsock_http();
+
+        // Initialise TLS context if enabled
+        tls_ctx_ = core::TlsContext::make_server(tls_cfg_);
 
         const sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (!sock_ok(fd)) throw std::runtime_error("HttpApiServer: socket() failed");
@@ -149,7 +114,14 @@ namespace akkaradb::server {
             if (!sock_ok(client)) break;
 
             std::thread([this, client] {
-                handle_connection(static_cast<int>(client));
+                try {
+                    auto stream = core::TlsStream::server_wrap(client, tls_ctx_.get());
+                    handle_connection(*stream);
+                    stream->shutdown();
+                }
+                catch (...) {
+                    // TLS handshake failure or other error — just close the socket
+                }
                 close_sock(client);
             }).detach();
         }
@@ -157,12 +129,26 @@ namespace akkaradb::server {
 
     // ── HTTP request parsing ──────────────────────────────────────────────────
 
-    bool HttpApiServer::read_request(int raw_fd, ParsedRequest& req) {
-        const sock_t fd = static_cast<sock_t>(raw_fd);
+    bool HttpApiServer::read_request(core::TlsStream& stream, ParsedRequest& req) {
+        // Read one line (up to \r\n) using TlsStream::recv_all byte-by-byte
+        auto recv_line = [&](std::string& line, size_t max = 8192) -> bool {
+            line.clear();
+            char c;
+            while (line.size() < max) {
+                if (!stream.recv_all(reinterpret_cast<uint8_t*>(&c), 1)) return false;
+                if (c == '\n') {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    return true;
+                }
+                line += c;
+            }
+            return false; // line too long
+        };
+
         std::string line;
 
         // Request line: "METHOD /path?query HTTP/1.1"
-        if (!recv_line(fd, line) || line.empty()) return false;
+        if (!recv_line(line) || line.empty()) return false;
 
         const auto sp1 = line.find(' ');
         const auto sp2 = line.find(' ', sp1 + 1);
@@ -177,7 +163,7 @@ namespace akkaradb::server {
         // Headers
         size_t content_length = 0;
         req.keep_alive = true;
-        while (recv_line(fd, line)) {
+        while (recv_line(line)) {
             if (line.empty()) break;  // end of headers
             // Case-insensitive header matching
             std::string lower = line;
@@ -196,7 +182,7 @@ namespace akkaradb::server {
         // Body
         if (content_length > 0) {
             req.body.resize(content_length);
-            if (!recv_all_http(fd, req.body.data(), content_length)) return false;
+            if (!stream.recv_all(req.body.data(), content_length)) return false;
         }
         return true;
     }
@@ -240,9 +226,7 @@ namespace akkaradb::server {
 
     // ── Response helpers ──────────────────────────────────────────────────────
 
-    void HttpApiServer::send_response(int raw_fd, int status_code,
-                                      std::span<const uint8_t> body) {
-        const sock_t fd = static_cast<sock_t>(raw_fd);
+    void HttpApiServer::send_response(core::TlsStream& stream, int status_code, std::span<const uint8_t> body) {
         const std::string_view reason =
             status_code == 200 ? "OK" :
             status_code == 204 ? "No Content" :
@@ -256,21 +240,18 @@ namespace akkaradb::server {
             "\r\n",
             status_code, reason, body.size());
 
-        send_all_http(fd, header.data(), header.size());
-        if (!body.empty())
-            send_all_http(fd, reinterpret_cast<const char*>(body.data()), body.size());
+        stream.send_all(reinterpret_cast<const uint8_t*>(header.data()), header.size());
+        if (!body.empty()) stream.send_all(body.data(), body.size());
     }
 
-    void HttpApiServer::send_empty(int fd, int status_code) {
-        send_response(fd, status_code, {});
-    }
+    void HttpApiServer::send_empty(core::TlsStream& stream, int status_code) { send_response(stream, status_code, {}); }
 
     // ── Router ────────────────────────────────────────────────────────────────
 
-    bool HttpApiServer::route(int fd, const ParsedRequest& req) {
+    bool HttpApiServer::route(core::TlsStream& stream, const ParsedRequest& req) {
         const std::string raw_key = query_param(req.query, "key");
         if (raw_key.empty() && req.path != "/v1/ping") {
-            send_empty(fd, 400);
+            send_empty(stream, 400);
             return req.keep_alive;
         }
         const std::vector<uint8_t> key = url_decode(raw_key);
@@ -278,54 +259,37 @@ namespace akkaradb::server {
 
         if (req.path == "/v1/put" && req.method == "POST") {
             engine_.put(key_span, std::span<const uint8_t>{req.body});
-            send_empty(fd, 204);
-
+            send_empty(stream, 204);
         } else if (req.path == "/v1/get" && req.method == "GET") {
             std::vector<uint8_t> val;
-            if (engine_.get_into(key_span, val)) {
-                send_response(fd, 200, val);
-            } else {
-                send_empty(fd, 404);
-            }
+            if (engine_.get_into(key_span, val)) { send_response(stream, 200, val); } else { send_empty(stream, 404); }
 
         } else if (req.path == "/v1/remove" && req.method == "DELETE") {
             engine_.remove(key_span);
-            send_empty(fd, 204);
-
+            send_empty(stream, 204);
         } else if (req.path == "/v1/get_at" && req.method == "GET") {
             const std::string seq_str = query_param(req.query, "seq");
             uint64_t seq = 0;
             std::from_chars(seq_str.data(), seq_str.data() + seq_str.size(), seq);
             const auto v = engine_.get_at(key_span, seq);
-            if (v) {
-                send_response(fd, 200, *v);
-            } else {
-                send_empty(fd, 404);
-            }
+            if (v) { send_response(stream, 200, *v); } else { send_empty(stream, 404); }
 
         } else if (req.path == "/v1/ping" && req.method == "GET") {
             const std::string_view pong = "pong";
-            send_response(fd, 200,
-                          {reinterpret_cast<const uint8_t*>(pong.data()), pong.size()});
+            send_response(stream, 200, {reinterpret_cast<const uint8_t*>(pong.data()), pong.size()});
 
-        } else {
-            send_empty(fd, 404);
-        }
+        } else { send_empty(stream, 404); }
 
         return req.keep_alive;
     }
 
     // ── connection handler ────────────────────────────────────────────────────
 
-    void HttpApiServer::handle_connection(int fd) {
-        int flag = 1;
-        ::setsockopt(static_cast<sock_t>(fd), IPPROTO_TCP, TCP_NODELAY,
-                     reinterpret_cast<const char*>(&flag), sizeof(flag));
-
+    void HttpApiServer::handle_connection(core::TlsStream& stream) {
         while (running_.load(std::memory_order_relaxed)) {
             ParsedRequest req;
-            if (!read_request(fd, req)) break;
-            if (!route(fd, req))        break;  // Connection: close
+            if (!read_request(stream, req)) break;
+            if (!route(stream, req)) break; // Connection: close
         }
     }
 

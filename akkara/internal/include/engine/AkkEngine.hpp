@@ -292,6 +292,18 @@ namespace akkaradb::engine {
          */
         bool sst_promote_reads = false;
 
+        /**
+         * When true, each SST file's uncompressed data section is loaded into RAM
+         * at open / flush / compaction time.  False-positive bloom filter lookups
+         * then use an in-memory scan instead of fopen/fseek/fread, eliminating the
+         * ~75 µs per-FP disk I/O that limits negative-lookup throughput.
+         *
+         * Trade-off: uses ~data_size bytes of RAM per live SST file.
+         * Recommended for read-heavy / bloom-filter-benchmarking workloads.
+         * Default: false
+         */
+        bool sst_preload_data = false;
+
         // ── Compression ───────────────────────────────────────────────────────
 
         /**

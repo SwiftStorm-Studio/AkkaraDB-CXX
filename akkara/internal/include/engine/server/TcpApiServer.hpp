@@ -19,6 +19,7 @@
 #pragma once
 
 #include "engine/AkkEngine.hpp"
+#include "core/net/TlsStream.hpp"
 #include <atomic>
 #include <memory>
 #include <thread>
@@ -31,13 +32,13 @@ namespace akkaradb::server {
      * Wire format: see ApiFraming.hpp (ApiRequestHeader / ApiResponseHeader).
      * One accept thread + one thread per accepted connection.
      * Supports request pipelining via request_id echo.
+     * Optionally wraps connections with TLS when a non-empty TlsConfig is provided.
      *
      * Thread-safety: start/close from one thread; connections handled concurrently.
      */
     class TcpApiServer {
         public:
-            [[nodiscard]] static std::unique_ptr<TcpApiServer>
-            create(engine::AkkEngine& engine, uint16_t port);
+            [[nodiscard]] static std::unique_ptr<TcpApiServer> create(engine::AkkEngine& engine, uint16_t port, core::TlsConfig tls = {});
 
             ~TcpApiServer();
 
@@ -48,16 +49,19 @@ namespace akkaradb::server {
             void close();
 
         private:
-            explicit TcpApiServer(engine::AkkEngine& engine, uint16_t port);
+            explicit TcpApiServer(engine::AkkEngine& engine, uint16_t port, core::TlsConfig tls);
 
             void accept_loop();
-            void handle_connection(int fd);  // sock_t aliased to int/SOCKET
+            void handle_connection(core::TlsStream& stream);
 
             engine::AkkEngine& engine_;
-            uint16_t           port_;
-            std::atomic<bool>  running_{false};
-            int                listen_fd_{-1};  // platform sock_t; -1 = not open
-            std::thread        accept_thr_;
+            uint16_t port_;
+            std::atomic<bool> running_{false};
+            int listen_fd_{-1}; // platform sock_t; -1 = not open
+            std::thread accept_thr_;
+
+            core::TlsConfig tls_cfg_;
+            std::unique_ptr<core::TlsContext> tls_ctx_;
     };
 
 } // namespace akkaradb::server

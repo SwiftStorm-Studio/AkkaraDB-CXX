@@ -20,6 +20,7 @@
 #pragma once
 
 #include "engine/wal/WalOp.hpp"
+#include "core/net/TlsStream.hpp"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -80,7 +81,8 @@ namespace akkaradb::engine::cluster {
             std::string     primary_host,
             uint16_t        primary_repl_port,
             uint64_t        self_node_id,
-            GetLastSeqFn    get_last_seq
+            GetLastSeqFn get_last_seq,
+            core::TlsConfig tls = {}
         );
 
         ~ReplicationClient();

@@ -65,7 +65,35 @@ set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+# Suppress two warnings produced by zstd v1.5.6's CMakeLists.txt:
+#   1. cmake_minimum_required(VERSION 2.8.12) — CMake 4.x deprecation
+#      (MessageType::DEPRECATION, suppressed by CMAKE_WARN_DEPRECATED OFF)
+#   2. "BUILD_SHARED_LIBS is ON, but ZSTD_BUILD_SHARED is OFF…"
+#      (message(WARNING ...) in lib/CMakeLists.txt:164, triggered because our
+#      project sets BUILD_SHARED_LIBS=ON while we force zstd to be static.
+#      Temporarily setting BUILD_SHARED_LIBS=OFF avoids the mismatch check.)
+# Both are restored immediately after FetchContent_MakeAvailable returns.
+set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(zstd)
+set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+set(CMAKE_WARN_DEPRECATED ON CACHE BOOL "" FORCE)
+
+# ── mbedTLS (optional TLS support) ─────────────────────────────────────────────
+option(AKKARADB_ENABLE_TLS "Enable TLS support via mbedTLS 3.x" OFF)
+if(AKKARADB_ENABLE_TLS)
+    FetchContent_Declare(
+            mbedtls
+            GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
+            GIT_TAG v3.6.2
+    )
+    set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(mbedtls)
+    set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+endif()
 
 # ==================== Main Library ====================
 add_library(akkaradb)
@@ -101,6 +129,9 @@ target_sources(akkaradb PRIVATE
 
         # Core - CRC
         ${INTERNAL_INCLUDE_DIR}/core/CRC32C.hpp
+
+        # Core - Net / TLS
+        ${INTERNAL_INCLUDE_DIR}/core/net/TlsStream.hpp
 
         # Engine
         ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
@@ -149,6 +180,9 @@ target_sources(akkaradb PRIVATE
         # Core - CRC
         ${INTERNAL_SRC_DIR}/core/CRC32C.cpp
 
+        # Core - Net / TLS
+        ${INTERNAL_SRC_DIR}/core/net/TlsStream.cpp
+
         # Engine
         ${INTERNAL_SRC_DIR}/engine/AkkEngine.cpp
 
@@ -195,6 +229,12 @@ target_sources(akkaradb PRIVATE
 
 # Zstd (static, all platforms)
 target_link_libraries(akkaradb PRIVATE libzstd_static)
+
+# mbedTLS (optional TLS support)
+if(AKKARADB_ENABLE_TLS)
+    target_link_libraries(akkaradb PRIVATE mbedtls mbedcrypto mbedx509)
+    target_compile_definitions(akkaradb PRIVATE AKKARADB_TLS_ENABLED)
+endif()
 
 # Windows: link Winsock2 for ReplicationServer / ReplicationClient TCP sockets
 if(WIN32)

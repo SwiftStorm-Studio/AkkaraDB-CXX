@@ -490,6 +490,7 @@ namespace akkaradb::engine {
             sst_opts.level_size_multiplier = options.sst_level_size_multiplier;
             sst_opts.target_file_size_bytes = options.sst_target_file_size;
             sst_opts.bloom_bits_per_key = options.sst_bloom_bits_per_key;
+            sst_opts.preload_sst_data = options.sst_preload_data;
             sst_opts.index_stride = sst::INDEX_STRIDE;
             sst_opts.codec = options.sst_codec;
             sst_opts.l0_stall_files = options.sst_l0_stall_files;

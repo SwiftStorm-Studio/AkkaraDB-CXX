@@ -96,13 +96,15 @@ namespace akkaradb::engine::sst {
             /**
              * Opens an SST file for reading.
              *
-             * @param path  Path to the .aksst file.
+             * @param path         Path to the .aksst file.
+             * @param preload_data When true, the uncompressed data section is loaded into
+             *                     memory at open time (decomp_data_).  All subsequent
+             *                     get/contains/scan calls use the in-memory buffer, eliminating
+             *                     per-FP fopen/fseek/fclose overhead.  No-op for Zstd files.
              * @return      Unique_ptr<SSTReader>, or nullptr on failure
              *              (bad magic, version mismatch, CRC error, I/O failure).
              */
-            [[nodiscard]] static std::unique_ptr<SSTReader> open(
-                const std::filesystem::path& path
-            );
+            [[nodiscard]] static std::unique_ptr<SSTReader> open(const std::filesystem::path& path, bool preload_data = false);
 
             ~SSTReader();
             SSTReader(const SSTReader&)            = delete;
@@ -151,6 +153,19 @@ namespace akkaradb::engine::sst {
              * Called by SSTManager for all levels.
              */
             [[nodiscard]] std::optional<bool> contains_fast(std::span<const uint8_t> key) const;
+
+            /**
+             * Fast existence check with a precomputed bloom hash.
+             *
+             * Identical to contains_fast(key) but accepts a hash that was already
+             * computed by the caller (e.g. in SSTManager before iterating L0 files).
+             * Avoids recomputing bloom_fast_hash64 for every file in the level loop.
+             *
+             * @param precomputed_bloom_hash  Result of bloom_fast_hash64(key) — must match
+             *                                the hash function used when the file was written
+             *                                (BLOOM_TYPE_BLOCKED_FAST).
+             */
+            [[nodiscard]] std::optional<bool> contains_fast(std::span<const uint8_t> key, uint64_t precomputed_bloom_hash) const;
 
             // ── Range scan ────────────────────────────────────────────────────
 
@@ -216,6 +231,12 @@ namespace akkaradb::engine::sst {
             /// Returns true if key might be present according to the Bloom filter.
             /// Dispatches on BloomHeader::type to select the appropriate hash function.
             [[nodiscard]] bool bloom_check(std::span<const uint8_t> key) const noexcept;
+
+            /// Bloom filter check with a precomputed hash value.
+            /// Uses the provided fp64 directly (skips bloom_fast_hash64 / SipHash call).
+            /// Callers must ensure fp64 was produced by the same hash function that was
+            /// used when the bloom filter was written (BLOOM_TYPE_BLOCKED_FAST → bloom_fast_hash64).
+            [[nodiscard]] bool bloom_check_fp(uint64_t fp64) const noexcept;
 
             /// Binary search the sparse index for the largest entry whose key <= target.
             /// Returns the data_offset to seek to (from start of data section).

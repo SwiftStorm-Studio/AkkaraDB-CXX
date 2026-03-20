@@ -78,7 +78,7 @@ namespace akkaradb::engine::memtable {
 
     class Shard {
         public:
-            Shard() : approx_bytes_{0}, next_imm_id_{0}, threshold_bytes_{0} {}
+            Shard() : next_imm_id_{0}, threshold_bytes_{0} {}
 
             void init(size_t threshold, MemTable::Backend backend) {
                 threshold_bytes_ = threshold;
@@ -94,10 +94,10 @@ namespace akkaradb::engine::memtable {
 
                 const size_t new_size = record.approx_size();
                 auto old = active_->put(std::move(record));
-                if (old) approx_bytes_ -= old->approx_size();
-                approx_bytes_ += new_size;
+                if (old) approx_bytes_.fetch_sub(old->approx_size(), std::memory_order_relaxed);
+                approx_bytes_.fetch_add(new_size, std::memory_order_relaxed);
 
-                return threshold_bytes_ > 0 && approx_bytes_ > threshold_bytes_;
+                return threshold_bytes_ > 0 && approx_bytes_.load(std::memory_order_relaxed) > threshold_bytes_;
             }
 
             // ── Read ──────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ namespace akkaradb::engine::memtable {
                 active_->collect_sorted(*vec); // IMemMap guarantees sorted order
 
                 active_ = active_->make_empty(); // reset to fresh empty map
-                approx_bytes_ = 0;
+                approx_bytes_.store(0, std::memory_order_relaxed);
 
                 immutables_.emplace_back(id, vec);
                 return {id, vec};
@@ -217,17 +217,14 @@ namespace akkaradb::engine::memtable {
 
             // ── Metrics ───────────────────────────────────────────────────────
 
-            [[nodiscard]] size_t approx_bytes() const noexcept {
-                std::shared_lock lock{mutex_};
-                return approx_bytes_;
-            }
+            [[nodiscard]] size_t approx_bytes() const noexcept { return approx_bytes_.load(std::memory_order_relaxed); }
 
         private:
             mutable std::shared_mutex mutex_;
             std::unique_ptr<IMemMap> active_;
             MemTable::Backend backend_ = MemTable::Backend::BPTree;
             std::deque<std::pair<uint64_t, std::shared_ptr<const ImmVec>>> immutables_;
-            size_t approx_bytes_;
+            std::atomic<size_t> approx_bytes_{0};
             uint64_t next_imm_id_;
             size_t threshold_bytes_;
     };

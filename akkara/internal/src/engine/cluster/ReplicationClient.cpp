@@ -67,26 +67,6 @@ namespace {
 #endif
     }
 
-    static bool send_all(sock_t s, const uint8_t* data, size_t len) noexcept {
-        while (len > 0) {
-            int chunk = (len > static_cast<size_t>(INT_MAX)) ? INT_MAX : static_cast<int>(len);
-            auto n = ::send(s, reinterpret_cast<const char*>(data), chunk, 0);
-            if (n <= 0) return false;
-            data += n; len -= static_cast<size_t>(n);
-        }
-        return true;
-    }
-
-    static bool recv_all(sock_t s, uint8_t* data, size_t len) noexcept {
-        while (len > 0) {
-            int chunk = (len > static_cast<size_t>(INT_MAX)) ? INT_MAX : static_cast<int>(len);
-            auto n = ::recv(s, reinterpret_cast<char*>(data), chunk, 0);
-            if (n <= 0) return false;
-            data += n; len -= static_cast<size_t>(n);
-        }
-        return true;
-    }
-
     /// Attempts to open a TCP connection; returns BAD_SOCK on failure.
     static sock_t tcp_connect(const std::string& host, uint16_t port) noexcept {
         net_init();
@@ -133,6 +113,10 @@ namespace akkaradb::engine::cluster {
         ReplicationClient::BlobCallback      blob_cb;
         ReplicationClient::ApplyCallback     apply_cb;
 
+        // TLS configuration — shared context created in start()
+        core::TlsConfig tls_cfg;
+        std::unique_ptr<core::TlsContext> tls_ctx;
+
         std::atomic<bool>   running    { false };
         std::atomic<bool>   is_connected { false };
         sock_t              sock       { BAD_SOCK };
@@ -142,16 +126,16 @@ namespace akkaradb::engine::cluster {
 
         // ── helpers ──────────────────────────────────────────────────────────
 
-        bool do_handshake(sock_t s) noexcept;
+        bool do_handshake(core::TlsStream& stream) noexcept;
         void recv_loop();
-        bool handle_entry (sock_t s);
-        bool handle_blob  (sock_t s);
-        bool send_ack     (sock_t s, uint64_t seq) noexcept;
+        bool handle_entry(core::TlsStream& stream);
+        bool handle_blob(core::TlsStream& stream);
+        bool send_ack(core::TlsStream& stream, uint64_t seq) noexcept;
     };
 
     // ── do_handshake ─────────────────────────────────────────────────────────
 
-    bool ReplicationClient::Impl::do_handshake(sock_t s) noexcept {
+    bool ReplicationClient::Impl::do_handshake(core::TlsStream& stream) noexcept {
         // 1. Send ReplClientHello
         ReplClientHello hello{};
         hello.magic    = ReplClientHello::MAGIC;
@@ -161,11 +145,11 @@ namespace akkaradb::engine::cluster {
 
         uint8_t buf[ReplClientHello::SIZE];
         hello.serialize(buf);
-        if (!send_all(s, buf, ReplClientHello::SIZE)) return false;
+        if (!stream.send_all(buf, ReplClientHello::SIZE)) return false;
 
         // 2. Read ReplServerHello
         uint8_t srv_buf[ReplServerHello::SIZE];
-        if (!recv_all(s, srv_buf, ReplServerHello::SIZE)) return false;
+        if (!stream.recv_all(srv_buf, ReplServerHello::SIZE)) return false;
 
         auto srv = ReplServerHello::deserialize(srv_buf);
         return srv.verify_magic();
@@ -175,18 +159,18 @@ namespace akkaradb::engine::cluster {
 
     // ── send_ack ─────────────────────────────────────────────────────────────
 
-    bool ReplicationClient::Impl::send_ack(sock_t s, uint64_t seq) noexcept {
+    bool ReplicationClient::Impl::send_ack(core::TlsStream& stream, uint64_t seq) noexcept {
         auto wire = encode_repl_ack(seq);
-        return send_all(s, wire.data(), wire.size());
+        return stream.send_all(wire.data(), wire.size());
     }
 
     // ── handle_entry ─────────────────────────────────────────────────────────
 
-    bool ReplicationClient::Impl::handle_entry(sock_t s) {
+    bool ReplicationClient::Impl::handle_entry(core::TlsStream& stream) {
         // Already consumed msg_type byte; read the rest of the header.
         // Total header = 20 bytes; we read 19 remaining bytes (1 already read as msg_type).
         uint8_t hdr_rest[ReplEntryHeader::SIZE - 1];
-        if (!recv_all(s, hdr_rest, sizeof(hdr_rest))) return false;
+        if (!stream.recv_all(hdr_rest, sizeof(hdr_rest))) return false;
 
         // Reconstruct full header buffer
         uint8_t full_hdr[ReplEntryHeader::SIZE];
@@ -198,8 +182,8 @@ namespace akkaradb::engine::cluster {
         // Read key + val
         std::vector<uint8_t> key(hdr.key_len);
         std::vector<uint8_t> val(hdr.val_len);
-        if (hdr.key_len > 0 && !recv_all(s, key.data(), hdr.key_len)) return false;
-        if (hdr.val_len > 0 && !recv_all(s, val.data(), hdr.val_len)) return false;
+        if (hdr.key_len > 0 && !stream.recv_all(key.data(), hdr.key_len)) return false;
+        if (hdr.val_len > 0 && !stream.recv_all(val.data(), hdr.val_len)) return false;
 
         // Verify CRC32C
         std::vector<uint8_t> combined(key.size() + val.size());
@@ -219,15 +203,15 @@ namespace akkaradb::engine::cluster {
         }
 
         // ACK
-        return send_ack(s, hdr.seq);
+        return send_ack(stream, hdr.seq);
     }
 
     // ── handle_blob ──────────────────────────────────────────────────────────
 
-    bool ReplicationClient::Impl::handle_blob(sock_t s) {
+    bool ReplicationClient::Impl::handle_blob(core::TlsStream& stream) {
         // Already consumed msg_type byte; read remaining header bytes.
         uint8_t hdr_rest[ReplBlobPutHeader::SIZE - 1];
-        if (!recv_all(s, hdr_rest, sizeof(hdr_rest))) return false;
+        if (!stream.recv_all(hdr_rest, sizeof(hdr_rest))) return false;
 
         uint8_t full_hdr[ReplBlobPutHeader::SIZE];
         full_hdr[0] = static_cast<uint8_t>(ReplMsgType::BlobPut);
@@ -240,7 +224,7 @@ namespace akkaradb::engine::cluster {
         if (hdr.content_len > MAX_BLOB) return false;
 
         std::vector<uint8_t> content(static_cast<size_t>(hdr.content_len));
-        if (hdr.content_len > 0 && !recv_all(s, content.data(), content.size())) return false;
+        if (hdr.content_len > 0 && !stream.recv_all(content.data(), content.size())) return false;
 
         // Verify CRC32C
         uint32_t expected = core::CRC32C::compute(content.data(), content.size());
@@ -267,8 +251,18 @@ namespace akkaradb::engine::cluster {
                 continue;
             }
 
+            // ── TLS wrap ─────────────────────────────────────────────────────
+            std::unique_ptr<core::TlsStream> stream;
+            try { stream = core::TlsStream::client_wrap(s, primary_host.c_str(), tls_ctx.get()); }
+            catch (...) {
+                close_sock(s);
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+
             // ── handshake ────────────────────────────────────────────────────
-            if (!do_handshake(s)) {
+            if (!do_handshake(*stream)) {
+                stream->shutdown();
                 close_sock(s);
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 continue;
@@ -284,14 +278,15 @@ namespace akkaradb::engine::cluster {
             bool ok = true;
             while (ok && running.load(std::memory_order_relaxed)) {
                 uint8_t type_byte = 0;
-                if (!recv_all(s, &type_byte, 1)) { ok = false; break; }
+                if (!stream->recv_all(&type_byte, 1)) {
+                    ok = false;
+                    break;
+                }
 
                 switch (static_cast<ReplMsgType>(type_byte)) {
-                    case ReplMsgType::Entry:
-                        ok = handle_entry(s);
+                    case ReplMsgType::Entry: ok = handle_entry(*stream);
                         break;
-                    case ReplMsgType::BlobPut:
-                        ok = handle_blob(s);
+                    case ReplMsgType::BlobPut: ok = handle_blob(*stream);
                         break;
                     default:
                         ok = false; // Unknown message type
@@ -301,6 +296,7 @@ namespace akkaradb::engine::cluster {
 
             // ── disconnect ───────────────────────────────────────────────────
             is_connected.store(false, std::memory_order_release);
+            stream->shutdown();
             {
                 std::lock_guard lk(sock_mtx);
                 close_sock(s);
@@ -326,12 +322,15 @@ namespace akkaradb::engine::cluster {
             std::string     primary_host,
             uint16_t        primary_repl_port,
             uint64_t        self_node_id,
-            GetLastSeqFn    get_last_seq) {
+            GetLastSeqFn get_last_seq,
+            core::TlsConfig tls
+    ) {
         auto impl              = std::make_unique<Impl>();
         impl->primary_host     = std::move(primary_host);
         impl->primary_port     = primary_repl_port;
         impl->self_node_id     = self_node_id;
         impl->get_last_seq     = std::move(get_last_seq);
+        impl->tls_cfg = std::move(tls);
         return std::unique_ptr<ReplicationClient>(new ReplicationClient(std::move(impl)));
     }
 
@@ -344,6 +343,9 @@ namespace akkaradb::engine::cluster {
     }
 
     void ReplicationClient::start() {
+        // Initialise TLS context if enabled
+        impl_->tls_ctx = core::TlsContext::make_client(impl_->tls_cfg);
+
         impl_->running.store(true, std::memory_order_relaxed);
         impl_->recv_thr = std::thread([this]{ impl_->recv_loop(); });
     }

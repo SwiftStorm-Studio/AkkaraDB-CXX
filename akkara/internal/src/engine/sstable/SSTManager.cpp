@@ -327,7 +327,7 @@ namespace akkaradb::engine::sst {
             if (id > max_id) max_id = id;
 
             const auto path = opts_.sst_dir / filename;
-            auto reader = SSTReader::open(path);
+            auto reader = SSTReader::open(path, opts_.preload_sst_data);
             if (!reader) {
                 std::fprintf(stderr,
                              "[SSTManager] recover: cannot open %s — skipping\n",
@@ -437,7 +437,7 @@ namespace akkaradb::engine::sst {
             manifest_->sst_seal(0, filename, res.entry_count, fk_hex, lk_hex);
         }
 
-        auto reader = SSTReader::open(path);
+        auto reader = SSTReader::open(path, opts_.preload_sst_data);
         if (!reader) {
             throw std::runtime_error(
                 std::format("[SSTManager] flush: cannot re-open SST after write: {}",
@@ -547,12 +547,18 @@ namespace akkaradb::engine::sst {
         const auto& levels = *snap;
         const int nlevels = static_cast<int>(levels.size());
 
+        // Compute the bloom hash once here, then pass to every file's contains_fast().
+        // Avoids recomputing bloom_fast_hash64 for each L0 file (multiple when L0 grows)
+        // and for each L1+ candidate.  For BLOOM_TYPE_BLOCKED_FAST files this eliminates
+        // (N_files - 1) redundant hash computations per exists() call.
+        const uint64_t bloom_h = bloom_fast_hash64(key.data(), key.size());
+
         // ── L0: newest-first (files may overlap — check all until a hit) ──────
         // key_in_range intentionally omitted: bloom provides fast rejection
         // (~5 ns with BLOOM_TYPE_BLOCKED_FAST), saving the extra range cmp.
         for (const auto& meta : levels[0]) {
             if (!meta.reader) continue;
-            auto r = meta.reader->contains_fast(key);
+            auto r = meta.reader->contains_fast(key, bloom_h);
             if (r.has_value()) return r;
         }
 
@@ -573,7 +579,7 @@ namespace akkaradb::engine::sst {
             if (it == level.end() || !it->reader) continue;
             if (!it->reader->key_in_range(key)) continue;
 
-            auto r = it->reader->contains_fast(key);
+            auto r = it->reader->contains_fast(key, bloom_h);
             if (r.has_value()) return r;
         }
 
@@ -751,7 +757,7 @@ namespace akkaradb::engine::sst {
             // The caller (run_compaction) will issue a single atomic
             // compaction_commit() that adds all outputs and removes all inputs.
 
-            auto reader = SSTReader::open(path);
+            auto reader = SSTReader::open(path, opts_.preload_sst_data);
             if (!reader) { throw std::runtime_error(std::format("[SSTManager] compact: cannot re-open output file: {}", path.string())); }
 
             uint64_t fsize = 0;

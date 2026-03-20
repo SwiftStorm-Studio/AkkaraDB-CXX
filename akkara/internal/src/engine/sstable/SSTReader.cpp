@@ -241,7 +241,7 @@ namespace akkaradb::engine::sst {
     // SSTReader::open
     // ============================================================================
 
-    std::unique_ptr<SSTReader> SSTReader::open(const std::filesystem::path& path) {
+    std::unique_ptr<SSTReader> SSTReader::open(const std::filesystem::path& path, bool preload_data) {
         FILE* f = sst_open_rb(path);
         if (!f) return nullptr;
 
@@ -370,6 +370,36 @@ namespace akkaradb::engine::sst {
             reader->last_key_  = reader->parsed_index_.back().key;
         }
 
+        // ── Optional: preload uncompressed data section into RAM ──────────────
+        //
+        // When preload_data=true and the file is NOT Zstd-compressed, we eagerly
+        // read the entire data section (header_.data_size bytes) into decomp_data_
+        // and set compressed_=true so all dispatch logic (contains_fast, scan, get)
+        // uses the in-memory buffer path instead of per-call fopen/fseek/fclose.
+        //
+        // ensure_decompressed() early-exits when !decomp_data_.empty(), so it will
+        // never attempt a bogus ZSTD_decompress on the pre-loaded uncompressed bytes.
+        //
+        // For Zstd files, compressed_bytes_ is already in RAM (read above) and
+        // decompression is deferred to first access — preload_data has no extra effect.
+        if (preload_data && !reader->compressed_ && reader->header_.data_size > 0) {
+            FILE* pf = sst_open_rb(path);
+            if (pf) {
+                if (sst_fseek(pf, static_cast<int64_t>(DATA_OFFSET), SEEK_SET) == 0) {
+                    reader->decomp_data_.resize(static_cast<size_t>(reader->header_.data_size));
+                    if (fread_exact(pf, reader->decomp_data_.data(), reader->decomp_data_.size())) {
+                        // Mark as "use buffer" by reusing the compressed_ dispatch flag.
+                        // decomp_data_ is already populated so ensure_decompressed() no-ops.
+                        reader->compressed_ = true;
+                    }
+                    else {
+                        reader->decomp_data_.clear(); // I/O error: fall back to file path
+                    }
+                }
+                fclose(pf);
+            }
+        }
+
         return reader;
     }
 
@@ -446,6 +476,46 @@ namespace akkaradb::engine::sst {
         const uint64_t fp = core::AKHdr32::compute_key_fp64(key.data(), key.size());
         const uint32_t h1 = static_cast<uint32_t>(fp);
         const uint32_t h2 = (static_cast<uint32_t>(fp >> 32)) | 1u;
+        const uint32_t nb = bh->num_bits;
+        for (uint8_t i = 0; i < bh->num_hashes; ++i) {
+            const uint32_t pos = (h1 + static_cast<uint32_t>(i) * h2) % nb;
+            if (!(bits[pos >> 3u] & (1u << (pos & 7u)))) return false;
+        }
+        return true;
+    }
+
+    // ============================================================================
+    // SSTReader::bloom_check_fp  (precomputed hash variant)
+    // ============================================================================
+
+    bool SSTReader::bloom_check_fp(uint64_t fp64) const noexcept {
+        if (bloom_data_.size() < sizeof(BloomHeader)) return true;
+
+        const BloomHeader* bh = reinterpret_cast<const BloomHeader*>(bloom_data_.data());
+        if (bh->num_bits == 0 || bh->num_hashes == 0) return true;
+
+        const uint8_t* bits = bloom_data_.data() + sizeof(BloomHeader);
+        const size_t bits_bytes = bloom_data_.size() - sizeof(BloomHeader);
+
+        // ── Blocked bloom: both BLOCKED and BLOCKED_FAST use the same probe logic ──
+        if (bh->type == BLOOM_TYPE_BLOCKED_FAST || bh->type == BLOOM_TYPE_BLOCKED) {
+            const uint32_t num_blocks = bh->num_bits / 512u;
+            if (num_blocks == 0 || bits_bytes < static_cast<size_t>(num_blocks) * 64u) return true;
+            const uint32_t h1 = static_cast<uint32_t>(fp64);
+            const uint32_t h2 = static_cast<uint32_t>(fp64 >> 32);
+            const uint8_t* block = bits + (h2 & (num_blocks - 1u)) * 64u;
+            const uint32_t delta = (h1 >> 17u) | 1u;
+            for (uint8_t i = 0; i < bh->num_hashes; ++i) {
+                const uint32_t bit = (h1 + static_cast<uint32_t>(i) * delta) & 511u;
+                if (!(block[bit >> 3u] & (1u << (bit & 7u)))) return false;
+            }
+            return true;
+        }
+
+        // ── Standard double-hashing (BLOOM_TYPE_STANDARD) ────────────────────
+        if (bits_bytes < (bh->num_bits + 7u) / 8u) return true;
+        const uint32_t h1 = static_cast<uint32_t>(fp64);
+        const uint32_t h2 = (static_cast<uint32_t>(fp64 >> 32)) | 1u;
         const uint32_t nb = bh->num_bits;
         for (uint8_t i = 0; i < bh->num_hashes; ++i) {
             const uint32_t pos = (h1 + static_cast<uint32_t>(i) * h2) % nb;
@@ -656,6 +726,14 @@ namespace akkaradb::engine::sst {
         // Precondition: caller has already checked key_in_range when required.
         // Bloom hash is chosen internally based on this file's BloomHeader::type.
         if (!bloom_check(key)) return std::nullopt;
+        const uint64_t data_off = index_seek(key);
+        if (compressed_) return contains_from_buf(data_off, key);
+        return contains_from_file(data_off, key);
+    }
+
+    // ── Precomputed hash overload: caller supplies bloom_fast_hash64(key) ─────
+    std::optional<bool> SSTReader::contains_fast(std::span<const uint8_t> key, uint64_t precomputed_bloom_hash) const {
+        if (!bloom_check_fp(precomputed_bloom_hash)) return std::nullopt;
         const uint64_t data_off = index_seek(key);
         if (compressed_) return contains_from_buf(data_off, key);
         return contains_from_file(data_off, key);
