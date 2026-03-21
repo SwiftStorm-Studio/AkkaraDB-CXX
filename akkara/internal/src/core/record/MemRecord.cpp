@@ -31,7 +31,8 @@ namespace akkaradb::core {
     MemRecord MemRecord::create(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
         const AKHdr32 header{
             .k_len = static_cast<uint16_t>(key.size()),
-            .v_len = static_cast<uint32_t>(value.size()),
+            .v_len = static_cast<uint16_t>(value.size()),
+            .reserved1 = 0,
             .seq = seq,
             .flags = flags,
             .pad0 = 0,
@@ -63,30 +64,65 @@ namespace akkaradb::core {
     MemRecord MemRecord::from_view(const RecordView& view) { return create(view.key(), view.value(), view.seq(), view.flags()); }
 
     // ── Key comparison ────────────────────────────────────────────────────────
+    //
+    // Fast path: header_.mini_key caches the first 8 raw key bytes (LE-packed).
+    // On a little-endian machine, &header_.mini_key lays out as
+    // [key[0], key[1], ..., key[7]], so memcmp on it is lexicographically
+    // correct without any byte-swap.  This avoids loading data_.active_ptr_
+    // (a separate pointer dereference, and a potential cache miss for heap
+    // allocated data) when the prefix comparison can decide the result.
 
-    int MemRecord::compare_key(const MemRecord& other) const noexcept { return compare_key(other.key()); }
+    int MemRecord::compare_key(const MemRecord& other) const noexcept {
+        // Both mini_keys live in the header — same cache line as k_len, seq, flags.
+        // Compare min(k_len, other.k_len, 8) bytes without touching data_.
+        const size_t prefix = std::min<size_t>(std::min<size_t>(header_.k_len, other.header_.k_len), 8u);
+        if (prefix > 0) { if (const int c = std::memcmp(&header_.mini_key, &other.header_.mini_key, prefix); c != 0) return c < 0 ? -1 : 1; }
+
+        const size_t min_len = std::min<size_t>(header_.k_len, other.header_.k_len);
+        if (min_len > 8) {
+            // First 8 bytes matched — compare the rest from data_
+            if (const int c = std::memcmp(data_.data() + 8, other.data_.data() + 8, min_len - 8); c != 0) return c < 0 ? -1 : 1;
+        }
+
+        if (header_.k_len < other.header_.k_len) return -1;
+        if (header_.k_len > other.header_.k_len) return 1;
+        return 0;
+    }
 
     int MemRecord::compare_key(std::span<const uint8_t> other_key) const noexcept {
-        const size_t min_len = std::min(static_cast<size_t>(header_.k_len), other_key.size());
+        const size_t min_len = std::min<size_t>(header_.k_len, other_key.size());
 
-        if (min_len > 0 && !data_.empty() && other_key.data()) {
-            if (const int cmp = std::memcmp(data_.data(), other_key.data(), min_len); cmp != 0) {
-                return cmp < 0
-                           ? -1
-                           : 1;
-            }
-        }
+        // Use cached mini_key for the first ≤8 bytes (no data_ pointer dereference on miss)
+        const size_t prefix = std::min<size_t>(min_len, 8u);
+        if (prefix > 0) { if (const int c = std::memcmp(&header_.mini_key, other_key.data(), prefix); c != 0) return c < 0 ? -1 : 1; }
+
+        if (min_len > 8) { if (const int c = std::memcmp(data_.data() + 8, other_key.data() + 8, min_len - 8); c != 0) return c < 0 ? -1 : 1; }
 
         if (header_.k_len < other_key.size()) return -1;
         if (header_.k_len > other_key.size()) return 1;
         return 0;
     }
 
-    bool MemRecord::key_equals(const MemRecord& other) const noexcept { return key_equals(other.key()); }
+    bool MemRecord::key_equals(const MemRecord& other) const noexcept {
+        if (header_.k_len != other.header_.k_len) return false;
+        if (header_.k_len == 0) return true;
+
+        // Fast: uint64_t equality on both mini_keys (no pointer indirection)
+        if (header_.mini_key != other.header_.mini_key) return false;
+        if (header_.k_len <= 8) return true;
+
+        return std::memcmp(data_.data() + 8, other.data_.data() + 8, header_.k_len - 8) == 0;
+    }
 
     bool MemRecord::key_equals(std::span<const uint8_t> other_key) const noexcept {
-        if (header_.k_len != other_key.size()) return false;
+        if (header_.k_len != static_cast<uint16_t>(other_key.size())) return false;
         if (header_.k_len == 0) return true;
-        return std::memcmp(data_.data(), other_key.data(), header_.k_len) == 0;
+
+        // Fast: compare first ≤8 bytes via mini_key (cached in header)
+        const size_t prefix = std::min<size_t>(header_.k_len, 8u);
+        if (std::memcmp(&header_.mini_key, other_key.data(), prefix) != 0) return false;
+        if (header_.k_len <= 8) return true;
+
+        return std::memcmp(data_.data() + 8, other_key.data() + 8, header_.k_len - 8) == 0;
     }
 } // namespace akkaradb::core

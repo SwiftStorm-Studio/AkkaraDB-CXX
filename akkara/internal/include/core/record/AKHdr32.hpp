@@ -19,6 +19,7 @@
 // internal/include/core/record/AKHdr32.hpp
 #pragma once
 
+#include <cassert>
 #include <cstdint>
 #include <array>
 
@@ -31,13 +32,14 @@ namespace akkaradb::core {
      * as the header for every record stored in blocks.
      *
      * Binary layout (Little-Endian, 32 bytes total):
-     * [0..1]   k_len (u16)      - Key length (0..65535)
-     * [2..5]   v_len (u32)      - Value length
-     * [6..13]  seq (u64)        - Global sequence number (monotonic)
-     * [14]     flags (u8)       - Flags (0x01 = TOMBSTONE)
-     * [15]     pad0 (u8)        - Reserved (must be 0)
-     * [16..23] key_fp64 (u64)   - SipHash-2-4 fingerprint of key
-     * [24..31] mini_key (u64)   - First 8 bytes of key (LE-packed)
+     * [0..1]   k_len     (u16)  - Key length (0..65535)
+     * [2..3]   v_len     (u16)  - Value length (0..65535); inline ≤ blob_threshold, BlobRef = 20 B
+     * [4..5]   reserved1 (u16)  - Reserved (0); formerly high 2 bytes of a u32 v_len field
+     * [6..13]  seq       (u64)  - Global sequence number (monotonic)
+     * [14]     flags     (u8)   - Flags (0x01 = TOMBSTONE, 0x02 = BLOB)
+     * [15]     pad0      (u8)   - Reserved (must be 0)
+     * [16..23] key_fp64  (u64)  - SipHash-2-4 fingerprint of key
+     * [24..31] mini_key  (u64)  - First 8 bytes of key (LE-packed)
      *
      * Design principles:
      * - Fixed size: Always exactly 32 bytes (enforced by #pragma pack(1))
@@ -61,7 +63,8 @@ namespace akkaradb::core {
         // ==================== Fields ====================
 
         uint16_t k_len; ///< Key length (0..65535)
-        uint32_t v_len; ///< Value length
+        uint16_t v_len; ///< Value length (0..65535); inline values ≤ blob_threshold, BlobRef = 20 B
+        uint16_t reserved1; ///< Reserved (must be 0); formerly the high 2 bytes of a u32 v_len
         uint64_t seq; ///< Global sequence number
         uint8_t flags; ///< Flags (see FLAG_* constants)
         uint8_t pad0; ///< Reserved (must be 0)

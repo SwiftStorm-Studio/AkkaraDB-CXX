@@ -124,9 +124,11 @@ namespace akkaradb::core {
     }
 
     AKHdr32 AKHdr32::create(const uint8_t* key, size_t key_len, size_t value_len, uint64_t seq, uint8_t flags) noexcept {
+        assert(value_len <= 0xFFFFu && "AKHdr32::create: value_len exceeds u16 range (max 65535); values >= blob_threshold must be externalized as blobs");
         return AKHdr32{
             .k_len = static_cast<uint16_t>(key_len),
-            .v_len = static_cast<uint32_t>(value_len),
+            .v_len = static_cast<uint16_t>(value_len),
+            .reserved1 = 0,
             .seq = seq,
             .flags = flags,
             .pad0 = 0,

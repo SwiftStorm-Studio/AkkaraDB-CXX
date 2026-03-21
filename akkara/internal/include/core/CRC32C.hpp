@@ -26,8 +26,9 @@ namespace akkaradb::core {
     /**
      * CRC32C (Castagnoli) computation utility.
      *
-     * Consolidated implementation used across the codebase.
-     * Uses software polynomial 0x82F63B78 (Castagnoli).
+     * Hardware-accelerated via SSE4.2 _mm_crc32_u64 when available
+     * (defined when __SSE4_2__ or MSVC /arch:AVX+).
+     * Falls back to a software polynomial loop (0x82F63B78) otherwise.
      *
      * Thread-safety: Fully thread-safe (stateless).
      */

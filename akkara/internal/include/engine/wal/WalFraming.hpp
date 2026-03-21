@@ -70,7 +70,7 @@ namespace akkaradb::wal {
     #pragma pack(push, 1)
     struct WalSegmentHeader {
         static constexpr uint32_t MAGIC = 0x414B5741; // "AKWA"
-        static constexpr uint16_t VERSION = 0x0004; // SPECv4
+        static constexpr uint16_t VERSION = 0x0001;
 
         uint32_t magic; ///< Format magic
         uint16_t version; ///< Format version

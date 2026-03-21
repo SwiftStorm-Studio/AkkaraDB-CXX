@@ -29,7 +29,6 @@ namespace akkaradb::engine::sst {
 
     /// Magic bytes at start of every .aksst file: "AKSS"
     inline constexpr uint32_t SST_MAGIC   = 0x414B5353u;
-    /// v1: adds per-record CRC32C trailer (4 bytes after each [AKHdr32][key][value])
     inline constexpr uint16_t SST_VERSION = 0x0001u;
 
     // ── Tuning constants ─────────────────────────────────────────────────────
