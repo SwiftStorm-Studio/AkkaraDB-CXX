@@ -640,41 +640,44 @@ namespace akkaradb::engine::sst {
         const size_t total = decomp_data_.size();
         const uint8_t* buf = decomp_data_.data();
 
-        auto buf_read = [&](void* dst, size_t n) -> bool {
-            if (pos + n > total) return false;
-            std::memcpy(dst, buf + pos, n);
-            pos += n;
-            return true;
-        };
-
         std::optional<core::MemRecord> result;
 
         while (pos < total) {
+            // Read header
+            if (pos + sizeof(core::AKHdr32) > total) break;
             core::AKHdr32 hdr{};
-            if (!buf_read(&hdr, sizeof(hdr))) break;
+            std::memcpy(&hdr, buf + pos, sizeof(hdr));
+            pos += sizeof(hdr);
 
-            std::vector<uint8_t> key(hdr.k_len);
-            if (!buf_read(key.data(), hdr.k_len)) break;
+            // Zero-copy key comparison: use a direct pointer into decomp_data_
+            // (same technique as contains_from_buf — no heap allocation per record)
+            if (pos + hdr.k_len > total) break;
+            const uint8_t* key_ptr = buf + pos;
+            pos += hdr.k_len;
 
-            const int c = cmp_keys(key.data(), key.size(), target_key.data(), target_key.size());
+            const int c = cmp_keys(key_ptr, hdr.k_len, target_key.data(), target_key.size());
             if (c == 0) {
-                std::vector<uint8_t> val(hdr.v_len);
-                if (!buf_read(val.data(), hdr.v_len)) break;
+                // Key matched — read value and CRC via direct pointer (no vector alloc)
+                if (pos + hdr.v_len + RECORD_CRC_SIZE > total) break;
+                const uint8_t* val_ptr = buf + pos;
+                pos += hdr.v_len;
 
                 uint32_t stored_crc = 0;
-                if (!buf_read(&stored_crc, sizeof(stored_crc))) break;
+                std::memcpy(&stored_crc, buf + pos, sizeof(stored_crc));
+                pos += sizeof(stored_crc);
+
                 {
                     uint32_t expected = core::CRC32C::compute(&hdr, sizeof(hdr));
-                    expected = core::CRC32C::append(key.data(), key.size(), expected);
-                    expected = core::CRC32C::append(val.data(), val.size(), expected);
+                    expected = core::CRC32C::append(key_ptr, hdr.k_len, expected);
+                    expected = core::CRC32C::append(val_ptr, hdr.v_len, expected);
                     if (stored_crc != expected) break;
                 }
                 result = core::MemRecord::create(
-                    std::span<const uint8_t>(key.data(), key.size()),
-                    std::span<const uint8_t>(val.data(), val.size()),
+                    std::span<const uint8_t>(key_ptr, hdr.k_len),
+                    std::span<const uint8_t>(val_ptr, hdr.v_len),
                     hdr.seq,
                     hdr.flags,
-                    hdr.key_fp64
+                    hdr.key_fp64 // precomputed — skips SipHash in create()
                 );
                 break;
             }
@@ -826,6 +829,117 @@ namespace akkaradb::engine::sst {
         }
 
         return result;
+    }
+
+    // ============================================================================
+    // SSTReader::get_into_buf  (compressed — key+flags scan + value copy into out)
+    // ============================================================================
+    //
+    // Like contains_from_buf, but on a live-record hit also copies the value bytes
+    // into `out`.  Returns true=live (out filled), false=tombstone, nullopt=not found.
+    // No MemRecord construction, no CRC verification — same register-sized return as
+    // contains_from_buf, which avoids hidden-pointer ABI overhead up the call chain.
+
+    std::optional<bool> SSTReader::get_into_buf(uint64_t data_section_offset, std::span<const uint8_t> target_key, std::vector<uint8_t>& out) const {
+        ensure_decompressed();
+        if (decomp_data_.empty()) return std::nullopt;
+        if (data_section_offset >= decomp_data_.size()) return std::nullopt;
+
+        size_t pos = static_cast<size_t>(data_section_offset);
+        const size_t total = decomp_data_.size();
+        const uint8_t* buf = decomp_data_.data();
+
+        std::optional<bool> result;
+
+        while (pos < total) {
+            if (pos + sizeof(core::AKHdr32) > total) break;
+            core::AKHdr32 hdr{};
+            std::memcpy(&hdr, buf + pos, sizeof(hdr));
+            pos += sizeof(hdr);
+
+            if (pos + hdr.k_len > total) break;
+            const uint8_t* key_ptr = buf + pos;
+            pos += hdr.k_len;
+
+            const int c = cmp_keys(key_ptr, hdr.k_len, target_key.data(), target_key.size());
+            if (c == 0) {
+                if (hdr.flags & core::AKHdr32::FLAG_TOMBSTONE) { result = false; }
+                else {
+                    // Live record — copy value bytes directly into out.
+                    if (pos + hdr.v_len > total) break;
+                    out.assign(buf + pos, buf + pos + hdr.v_len);
+                    result = true;
+                }
+                break;
+            }
+            else if (c > 0) { break; }
+            // skip value + CRC
+            const size_t skip = static_cast<size_t>(hdr.v_len) + RECORD_CRC_SIZE;
+            if (pos + skip > total) break;
+            pos += skip;
+        }
+
+        return result;
+    }
+
+    // ============================================================================
+    // SSTReader::get_into_file  (uncompressed — key+flags scan + value copy into out)
+    // ============================================================================
+
+    std::optional<bool> SSTReader::get_into_file(uint64_t data_section_offset, std::span<const uint8_t> target_key, std::vector<uint8_t>& out) const {
+        FILE* f = sst_open_rb(path_);
+        if (!f) return std::nullopt;
+
+        const int64_t abs_pos = static_cast<int64_t>(DATA_OFFSET + data_section_offset);
+        if (sst_fseek(f, abs_pos, SEEK_SET) != 0) {
+            fclose(f);
+            return std::nullopt;
+        }
+
+        const uint64_t data_end = DATA_OFFSET + header_.data_size;
+        std::optional<bool> result;
+
+        while (true) {
+            const int64_t cur = sst_ftell(f);
+            if (cur < 0 || static_cast<uint64_t>(cur) + sizeof(core::AKHdr32) > data_end) break;
+
+            core::AKHdr32 hdr{};
+            if (!fread_exact(f, &hdr, sizeof(hdr))) break;
+
+            std::vector<uint8_t> key(hdr.k_len);
+            if (!fread_exact(f, key.data(), hdr.k_len)) break;
+
+            const int c = cmp_keys(key.data(), hdr.k_len, target_key.data(), target_key.size());
+            if (c == 0) {
+                if (hdr.flags & core::AKHdr32::FLAG_TOMBSTONE) { result = false; }
+                else {
+                    out.resize(hdr.v_len);
+                    if (hdr.v_len > 0 && !fread_exact(f, out.data(), hdr.v_len)) {
+                        out.clear();
+                        break;
+                    }
+                    result = true;
+                }
+                break;
+            }
+            else if (c > 0) { break; }
+            // skip value + CRC
+            if (sst_fseek(f, static_cast<int64_t>(hdr.v_len) + static_cast<int64_t>(RECORD_CRC_SIZE), SEEK_CUR) != 0) break;
+        }
+
+        fclose(f);
+        return result;
+    }
+
+    // ============================================================================
+    // SSTReader::get_into_fast  (bloom → index → get_into_buf/file)
+    // ============================================================================
+
+    std::optional<bool> SSTReader::get_into_fast(std::span<const uint8_t> key, uint64_t precomputed_bloom_hash, std::vector<uint8_t>& out) const {
+        if (!bloom_check_fp(precomputed_bloom_hash)) return std::nullopt;
+        const uint64_t data_off = index_seek(key);
+        if (compressed_) return get_into_buf(data_off, key, out);
+        return get_into_file(data_off, key, out);
     }
 
     // ============================================================================

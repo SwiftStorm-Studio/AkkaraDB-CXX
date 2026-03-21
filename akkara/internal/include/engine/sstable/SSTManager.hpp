@@ -213,6 +213,20 @@ namespace akkaradb::engine::sst {
              */
             [[nodiscard]] std::optional<bool> contains(std::span<const uint8_t> key) const;
 
+            /**
+             * Value fetch — same lock-free atomic-snapshot path as contains() but
+             * also writes value bytes into `out` for live records.
+             *
+             * Avoids the intermediate MemRecord construction that get() requires.
+             * For non-blob values this is the fastest SST read path.
+             *
+             * @return
+             *   nullopt → not found in any SST file.
+             *   false   → tombstone found (key is definitively deleted).
+             *   true    → live record found, `out` contains the value bytes.
+             */
+            [[nodiscard]] std::optional<bool> get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const;
+
             // ── Stats ─────────────────────────────────────────────────────────
 
             /// Number of files at a given level.

@@ -2,11 +2,13 @@
  * AkkaraDB — Engine correctness tests + throughput benchmark
  *
  * Covers:
- *   1. Memory-only mode  (wal_enabled=false)
- *   2. WAL persistence   (wal_enabled=true, Sync)
- *   3. BLOB path         (value >= 16 KiB threshold)
- *   4. SyncMode::Off     (WAL enabled, OS page cache only — no fdatasync)
- *   5. Throughput        (write + read, in-memory)
+ *   1.  Memory-only mode  (wal_enabled=false)
+ *   2.  WAL persistence   (wal_enabled=true, Sync)
+ *   3.  BLOB path         (value >= 16 KiB threshold)
+ *   4.  SyncMode::Off     (WAL enabled, OS page cache only — no fdatasync)
+ *   5.  Throughput        (write + read, in-memory, 5 size cases)
+ *   6.  WAL async         (write + read, 5 M ops)
+ *   7.  SST lookup        (negative bloom + positive exists/get, 1 M keys / 5 M probes)
  *
  * No external test framework — failures abort via CHECK().
  */
@@ -88,6 +90,18 @@ static fs::path make_temp_dir(std::string_view name) {
 static void section(const char* title) {
     std::printf("\n── %s ──\n", title);
 }
+
+// ── Step progress (printed before each top-level test/bench in main) ──────────
+//   "→ [n/N] name"  — flushed immediately so it appears before the slow work.
+//   Does not touch g_pass/g_fail and is never inside a timed section.
+
+static int g_step_n = 0;
+
+static void step(int total, const char* name) {
+    std::printf("→ [%d/%d] %s\n", ++g_step_n, total, name);
+    std::fflush(stdout);
+}
+
 
 // ── Timing helper ─────────────────────────────────────────────────────────────
 
@@ -453,26 +467,26 @@ static void test_idempotent_close() {
 /**
  * Generate a benchmark key of exactly `key_size` bytes.
  *
- * Layout: 'k' × (key_size - 6)  +  zero-padded 6-digit index
- * Example (key_size=11, i=42): "kkkkk000042"
- * Uniqueness guaranteed for N ≤ 999,999 (6 digits).
+ * Layout: 'k' × (key_size - 7)  +  zero-padded 7-digit index
+ * Example (key_size=11, i=42): "kkkk0000042"
+ * Uniqueness guaranteed for N ≤ 9,999,999 (7 digits).
  */
 static std::string make_bench_key(int i, int key_size) {
-    const int pad = std::max(0, key_size - 6);
-    return std::string(pad, 'k') + std::format("{:06d}", i);
+    const int pad = std::max(0, key_size - 7);
+    return std::string(pad, 'k') + std::format("{:07d}", i);
 }
 
 /**
  * Generate a benchmark value of exactly `val_size` bytes.
  *
- * Layout: 'v' × (val_size - 6)  +  zero-padded 6-digit index  (if val_size ≥ 6)
+ * Layout: 'v' × (val_size - 7)  +  zero-padded 7-digit index  (if val_size ≥ 7)
  * Values are intentionally non-identical to avoid trivial branch prediction.
  */
 static std::string make_bench_val(int i, int val_size) {
     std::string v(val_size, 'v');
-    if (val_size >= 6) {
-        auto num = std::format("{:06d}", i);
-        std::copy(num.begin(), num.end(), v.end() - 6);
+    if (val_size >= 7) {
+        auto num = std::format("{:07d}", i);
+        std::copy(num.begin(), num.end(), v.end() - 7);
     }
     return v;
 }
@@ -481,6 +495,7 @@ struct SizeCase {
     const char* label;
     int key_size; ///< Key bytes
     int val_size; ///< Value bytes
+    int n; ///< Iteration count (varies by value size to bound peak memory)
 };
 
 /**
@@ -495,7 +510,9 @@ struct SizeCase {
  *   - CPU I-cache / branch predictors: engine hot paths are warmed before timing.
  *   - TLB: pages touched in warmup fill TLB entries ahead of the timed run.
  */
-static void bench_mem_case(const SizeCase& sc, int N) {
+static void bench_mem_case(const SizeCase& sc) {
+    const int N = sc.n;
+
     // ── Pre-generate keys and values (outside timed section) ──────────────────
     std::vector<std::string> keys(N), vals(N);
     for (int i = 0; i < N; ++i) {
@@ -507,6 +524,8 @@ static void bench_mem_case(const SizeCase& sc, int N) {
     {
         AkkEngineOptions wo;
         wo.wal_enabled = false;
+        // Prevent mid-benchmark SST flush: N records × 64 B/record must stay < threshold.
+        wo.memtable.threshold_bytes_per_shard = 512ULL << 20; // 512 MiB
         auto eng = AkkEngine::open(wo);
         for (int i = 0; i < N; ++i) eng->put(as_span(keys[i]), as_span(vals[i]));
         eng->close(); // releases arena/SmallBuffer memory back to CRT heap free-lists
@@ -515,6 +534,7 @@ static void bench_mem_case(const SizeCase& sc, int N) {
     // ── Timed measurement ─────────────────────────────────────────────────────
     AkkEngineOptions opts;
     opts.wal_enabled = false;
+    opts.memtable.threshold_bytes_per_shard = 512ULL << 20; // 512 MiB — same as warmup
     auto eng = AkkEngine::open(opts);
 
     // Write
@@ -535,13 +555,19 @@ static void bench_mem_case(const SizeCase& sc, int N) {
 
     const int total = sc.key_size + sc.val_size;
     const bool inl = total <= 22; // SmallBuffer::INLINE_CAP
-    std::printf("  [mem] %-20s  total=%4dB (%s)   write %8.0f   read %8.0f ops/s\n", sc.label, total, inl ? "inline" : "heap  ", w_ops, r_ops);
+    std::printf(
+        "  [mem] %-20s  total=%4dB (%s)  %5.1fM   write %8.0f   read %8.0f ops/s\n",
+        sc.label,
+        total,
+        inl ? "inline" : "heap  ",
+        sc.n / 1e6,
+        w_ops,
+        r_ops
+    );
 }
 
 static void bench_throughput() {
     section("Throughput benchmark  (std::format excluded — keys/vals pre-generated)");
-
-    constexpr int N = 100'000;
 
     // ── 5 key/value size cases (mem-only) ────────────────────────────────────
     //
@@ -549,30 +575,38 @@ static void bench_throughput() {
     //   total ≤ 22  →  zero heap alloc per record (inline path)
     //   total > 22  →  one new uint8_t[total] per record (heap path)
     //
+    // n is tuned so peak pre-generated memory stays ≤ ~1.5 GiB per case:
+    //   k= 8, v=  8: 5M × (32B key + 32B val) strings ≈ 320 MiB  (MSVC SSO)
+    //   k=11, v= 11: same                              ≈ 320 MiB
+    //   k=16, v= 64: 5M × (48B + 96B)                 ≈ 720 MiB  (heap alloc)
+    //   k=32, v=256: 2M × (64B + 288B)                ≈ 704 MiB
+    //   k=32, v=1k : 1M × (64B + 1056B)               ≈ 1120 MiB
+    //
     static constexpr SizeCase CASES[] = {
-        {"k= 8  v=  8", 8, 8},
+        {"k= 8  v=  8", 8, 8, 5'000'000},
         // total= 16  inline  ← headroom
-        {"k=11  v= 11", 11, 11},
-        // total= 22  inline  ← original benchmark (max)
-        {"k=16  v= 64", 16, 64},
+        {"k=11  v= 11", 11, 11, 5'000'000},
+        // total= 22  inline  ← max inline
+        {"k=16  v= 64", 16, 64, 5'000'000},
         // total= 80  heap    ← first heap tier
-        {"k=32  v=256", 32, 256},
+        {"k=32  v=256", 32, 256, 2'000'000},
         // total=288  heap    ← medium
-        {"k=32  v=1k ", 32, 1024},
+        {"k=32  v=1k ", 32, 1024, 1'000'000},
         // total=1056 heap    ← large
     };
 
-    std::printf("  %-20s  %-18s   %13s  %13s\n", "case", "data", "write", "read");
-    std::printf("  %-20s  %-18s   %13s  %13s\n", "────────────────────", "──────────────────", "─────────────", "─────────────");
-    for (const auto& sc : CASES) bench_mem_case(sc, N);
+    std::printf("  %-20s  %-18s  %5s   %13s  %13s\n", "case", "data", "N", "write", "read");
+    std::printf("  %-20s  %-18s  %5s   %13s  %13s\n", "────────────────────", "──────────────────", "─────", "─────────────", "─────────────");
+    for (const auto& sc : CASES) bench_mem_case(sc);
 
-    // ── WAL Async (k=11, v=11 — inline, same as original benchmark) ──────────
+    // ── WAL Async (k=11, v=11 — inline) ─────────────────────────────────────
     std::printf("\n");
     {
+        constexpr int N_WAL = 5'000'000;
         auto dir = make_temp_dir("bench_wal");
 
-        std::vector<std::string> keys(N), vals(N);
-        for (int i = 0; i < N; ++i) {
+        std::vector<std::string> keys(N_WAL), vals(N_WAL);
+        for (int i = 0; i < N_WAL; ++i) {
             keys[i] = make_bench_key(i, 11);
             vals[i] = make_bench_val(i, 11);
         }
@@ -584,12 +618,13 @@ static void bench_throughput() {
         opts.wal.shard_count = 1; // single-threaded: 1 shard minimises fdatasync interrupt overhead
         opts.wal.group_n = 1024;
         opts.wal.group_micros = 500;
+        opts.memtable.threshold_bytes_per_shard = 512ULL << 20; // prevent mid-bench flush
         auto eng = AkkEngine::open(opts);
 
         auto t0 = Clock::now();
-        for (int i = 0; i < N; ++i) eng->put(as_span(keys[i]), as_span(vals[i]));
+        for (int i = 0; i < N_WAL; ++i) eng->put(as_span(keys[i]), as_span(vals[i]));
         double ms = elapsed_ms(t0);
-        std::printf("  [wal] k=11  v= 11       total= 22B (inline)   write %8.0f ops/s  (async)\n", N / (ms / 1000.0));
+        std::printf("  [wal] k=11  v= 11       total= 22B (inline)  5.0M   write %8.0f ops/s  (async)\n", N_WAL / (ms / 1000.0));
 
         // Read — get_into() reuses a single buffer (same as mem benchmark) so
         // per-call vector allocation does not distort the comparison.
@@ -597,11 +632,11 @@ static void bench_throughput() {
         int found = 0;
         std::vector<uint8_t> rbuf;
         rbuf.reserve(11); // val_size = 11
-        for (int i = 0; i < N; ++i) if (eng->get_into(as_span(keys[i]), rbuf)) ++found;
+        for (int i = 0; i < N_WAL; ++i) if (eng->get_into(as_span(keys[i]), rbuf)) ++found;
         ms = elapsed_ms(t0);
         std::printf(
-            "  [wal] k=11  v= 11       total= 22B (inline)   read  %8.0f ops/s  (found %d)\n",
-            N / (ms / 1000.0),
+            "  [wal] k=11  v= 11       total= 22B (inline)  5.0M   read  %8.0f ops/s  (found %d)\n",
+            N_WAL / (ms / 1000.0),
             found
         );
 
@@ -1159,68 +1194,93 @@ static void test_wal_truncation() {
  * A false-positive occurs when bloom_check() returns true for a negative key,
  * causing a full disk scan. The count is reported as FP rate.
  */
-static void bench_sst_negative_lookup() {
-    section("SST: negative lookup throughput  (1 M keys, bloom filter)");
+/**
+ * SST lookup benchmark — negative (bloom filter rejection) and positive
+ * (bloom pass → index seek → record scan → optional value copy).
+ *
+ * Setup: 1 M keys inserted into a single SST (sst_preload_data=true so the
+ * data section lives in RAM).  Timed loops cycle 5 M times through the pool of
+ * 1 M negative / positive keys.  All three benchmarks reuse the same SST so
+ * only the access pattern differs.
+ *
+ * wrong_answers must be 0 for every case — any non-zero value is a bug.
+ */
+static void bench_sst_lookup() {
+    section("SST: lookup throughput  (1 M keys in SST, 5 M probes each)");
 
-    auto dir = make_temp_dir("bench_sst_neg");
-    constexpr int N = 1'000'000;
+    auto dir = make_temp_dir("bench_sst_lookup");
+    // N_KEYS: unique keys loaded into the SST.  Kept at 1 M so all keys fit in
+    // a single L0 SST file (1 M × 64 B ≈ 64 MiB; threshold raised to 128 MiB).
+    // N_PROBE: measurement iterations; cycles through the N_KEYS pool.
+    constexpr int N_KEYS = 1'000'000;
+    constexpr int N_PROBE = 5'000'000;
 
-    // ── Pre-generate keys (outside timed section) ─────────────────────────
-    std::vector<std::string> exist_keys(N), neg_keys(N);
-    for (int i = 0; i < N; ++i) {
-        exist_keys[i] = std::format("nlkey_{:010d}", i * 2);
-        neg_keys[i] = std::format("nlkey_{:010d}", i * 2 + 1);
+    // ── Pre-generate keys (outside timed sections) ────────────────────────────
+    std::vector<std::string> exist_keys(N_KEYS), neg_keys(N_KEYS);
+    for (int i = 0; i < N_KEYS; ++i) {
+        exist_keys[i] = std::format("nlkey_{:010d}", i * 2); // even → in SST
+        neg_keys[i] = std::format("nlkey_{:010d}", i * 2 + 1); // odd  → absent
     }
 
-    // ── Insert N keys, flush to SST, then benchmark in the same session ──────
-    // Note: WAL truncation is Phase 5 (pending). Reopening would replay the WAL
-    // and restore all 1 M keys into the MemTable, adding BPTree overhead to
-    // every exists() call. Instead we flush and benchmark in the same session:
-    // after force_flush() the MemTable is empty, so exists() hits only the SST
-    // bloom filter — which is what we want to measure.
+    // ── Insert + flush to SST ─────────────────────────────────────────────────
+    // We benchmark in the same session rather than reopening:
+    //   reopening replays the WAL → restores keys to MemTable → exists() would
+    //   hit MemTable first instead of the SST bloom filter.
+    AkkEngineOptions opts;
+    opts.data_dir = dir;
+    opts.wal.sync_mode = SyncMode::Off;
+    opts.memtable.shard_count = 1; // single shard → single L0 SST
+    opts.memtable.threshold_bytes_per_shard = 128ULL << 20; // prevent auto-flush
+    opts.sst_preload_data = true; // keep decompressed data in RAM
+    opts.blob_enabled = false; // values are 1 B — no blobs; enables get_into() fast path
+
+    auto eng = AkkEngine::open(opts);
+    for (int i = 0; i < N_KEYS; ++i) eng->put(as_span(exist_keys[i]), as_span("v"));
+
+    eng->force_flush();
+    // MemTable is now empty; SST holds all N_KEYS keys.
+
+    // ── Warmup (untimed) ──────────────────────────────────────────────────────
+    // Warm the bloom filter block and a representative slice of the index + data
+    // pages into L3 cache.  Use the LAST 10 K entries of each pool so the timed
+    // loop starts at index 0 without cache-warm bias on the first accesses.
     {
-        AkkEngineOptions opts;
-        opts.data_dir = dir;
-        opts.wal.sync_mode = SyncMode::Off;
-        // Use a single shard so all keys land in one SST after flush
-        opts.memtable.shard_count = 1;
-        // Preload the SST data section into RAM so bloom FP lookups use an in-memory
-        // scan instead of fopen/fseek/fread (~75 µs per FP → ~0.5 µs).
-        // This is the key fix for reaching 5 M ops/s on the bloom filter benchmark.
-        opts.sst_preload_data = true;
-
-        auto eng = AkkEngine::open(opts);
-        for (int i = 0; i < N; ++i) eng->put(as_span(exist_keys[i]), as_span("v"));
-        eng->force_flush();
-        // MemTable is now empty; SST holds all N keys.
-
-        // Warmup (10 K lookups, untimed) — warms bloom filter data into L3 cache.
-        // Uses the LAST 10 K negative keys so the timed measurement starts cold
-        // at index 0 and avoids cache-warm bias on the first measured accesses.
-        {
-            int dummy = 0;
-            constexpr int WARM = 10'000;
-            for (int i = N - WARM; i < N; ++i) if (eng->exists(as_span(neg_keys[i]))) ++dummy;
-        }
-
-        // Timed: 1 M negative lookups.
-        // exists() performs a full lookup after any bloom pass, so it must
-        // return false for every absent key. wrong_answers > 0 is a bug.
-        const auto t0 = Clock::now();
-        int wrong_answers = 0;
-        for (int i = 0; i < N; ++i) if (eng->exists(as_span(neg_keys[i]))) ++wrong_answers;
-        const double ops = static_cast<double>(N) / (elapsed_ms(t0) / 1000.0);
-
-        std::printf(
-            "  [sst] negative lookup  N=%7d   %9.0f ops/s   wrong_answers: %d (must be 0)\n",
-            N,
-            ops,
-            wrong_answers
-        );
-
-        eng->close();
+        int dummy = 0;
+        constexpr int WARM = 10'000;
+        for (int i = N_KEYS - WARM; i < N_KEYS; ++i) if (eng->exists(as_span(neg_keys[i]))) ++dummy;
+        for (int i = N_KEYS - WARM; i < N_KEYS; ++i) if (!eng->exists(as_span(exist_keys[i]))) ++dummy;
     }
 
+    // ── Negative lookup (bloom filter rejects all — no disk/index access) ─────
+    {
+        const auto t0 = Clock::now();
+        int wrong = 0;
+        for (int i = 0; i < N_PROBE; ++i) if (eng->exists(as_span(neg_keys[i % N_KEYS]))) ++wrong;
+        const double ops = static_cast<double>(N_PROBE) / (elapsed_ms(t0) / 1000.0);
+        std::printf("  [sst] negative (exists) keys=%7d  probes=%7d   %9.0f ops/s   wrong_answers: %d (must be 0)\n", N_KEYS, N_PROBE, ops, wrong);
+    }
+
+    // ── Positive lookup: exists() (bloom pass → index seek → scan, no copy) ───
+    {
+        const auto t0 = Clock::now();
+        int wrong = 0;
+        for (int i = 0; i < N_PROBE; ++i) if (!eng->exists(as_span(exist_keys[i % N_KEYS]))) ++wrong;
+        const double ops = static_cast<double>(N_PROBE) / (elapsed_ms(t0) / 1000.0);
+        std::printf("  [sst] positive (exists) keys=%7d  probes=%7d   %9.0f ops/s   wrong_answers: %d (must be 0)\n", N_KEYS, N_PROBE, ops, wrong);
+    }
+
+    // ── Positive lookup: get() (same as exists + CRC verify + value copy) ─────
+    {
+        const auto t0 = Clock::now();
+        int wrong = 0;
+        std::vector<uint8_t> rbuf;
+        rbuf.reserve(1); // value is 1 byte ("v")
+        for (int i = 0; i < N_PROBE; ++i) if (!eng->get_into(as_span(exist_keys[i % N_KEYS]), rbuf)) ++wrong;
+        const double ops = static_cast<double>(N_PROBE) / (elapsed_ms(t0) / 1000.0);
+        std::printf("  [sst] positive (get)    keys=%7d  probes=%7d   %9.0f ops/s   wrong_answers: %d (must be 0)\n", N_KEYS, N_PROBE, ops, wrong);
+    }
+
+    eng->close();
     fs::remove_all(dir);
 }
 
@@ -1232,30 +1292,51 @@ int main() {
     std::printf("AkkaraDB Engine — correctness + benchmark\n");
     std::printf("==========================================\n");
 
+    constexpr int STEPS = 19;
+
     // ── Correctness tests ────────────────────────────────────────────────────
+    step(STEPS, "test_memory_basic");
     test_memory_basic();
+    step(STEPS, "test_memory_many_keys");
     test_memory_many_keys();
+    step(STEPS, "test_sync_off");
     test_sync_off();
+    step(STEPS, "test_wal_recovery");
     test_wal_recovery();
+    step(STEPS, "test_wal_async");
     test_wal_async();
+    step(STEPS, "test_blob_roundtrip");
     test_blob_roundtrip();
+    step(STEPS, "test_blob_no_false_positive");
     test_blob_no_false_positive();
+    step(STEPS, "test_idempotent_close");
     test_idempotent_close();
     // ── VersionLog tests ─────────────────────────────────────────────────────
+    step(STEPS, "test_vlog_basic");
     test_vlog_basic();
+    step(STEPS, "test_vlog_rollback_key");
     test_vlog_rollback_key();
+    step(STEPS, "test_vlog_rollback_to");
     test_vlog_rollback_to();
+    step(STEPS, "test_vlog_persist");
     test_vlog_persist();
-    // ── SST tests (Phase 5) ───────────────────────────────────────────────────
+    // ── SST tests ────────────────────────────────────────────────────────────
+    step(STEPS, "test_sst_basic");
     test_sst_basic();
+    step(STEPS, "test_sst_tombstone");
     test_sst_tombstone();
+    step(STEPS, "test_sst_compaction");
     test_sst_compaction();
+    step(STEPS, "test_sst_overwrite");
     test_sst_overwrite();
+    step(STEPS, "test_wal_truncation");
     test_wal_truncation();
     // ── Throughput ───────────────────────────────────────────────────────────
+    step(STEPS, "bench_throughput");
     bench_throughput();
-    // ── SST negative lookup (bloom filter) ───────────────────────────────────
-    bench_sst_negative_lookup();
+    // ── SST lookup (negative bloom + positive exists/get) ────────────────────
+    step(STEPS, "bench_sst_lookup");
+    bench_sst_lookup();
 
     // ── Summary ──────────────────────────────────────────────────────────────
     std::printf("\n==========================================\n");

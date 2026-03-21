@@ -57,7 +57,8 @@ namespace akkaradb::wal {
 
         const core::AKHdr32 hdr{
             .k_len = static_cast<uint16_t>(key.size()),
-            .v_len = static_cast<uint32_t>(value.size()),
+            .v_len = static_cast<uint16_t>(value.size()),
+            .reserved1 = 0,
             .seq = seq,
             .flags = flags,
             .pad0 = 0,

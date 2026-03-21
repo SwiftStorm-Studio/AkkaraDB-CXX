@@ -476,35 +476,84 @@ namespace akkaradb::engine::sst {
 
     std::optional<core::MemRecord>
     SSTManager::get(std::span<const uint8_t> key) const {
-        // ── Block cache lookup ────────────────────────────────────────────────
-        const size_t sidx = cache_shard_idx(key);
-        auto& shard = cache_shards_[sidx];
-        const std::string key_str(reinterpret_cast<const char*>(key.data()), key.size());
-        {
-            std::lock_guard lk(shard.mu);
-            if (auto cached = shard.cache_lookup(key_str)) return cached;
+        // ── Block cache lookup (skipped entirely when disabled) ──────────────
+        //
+        // All cache work — hash, string construction, mutex, map lookup — is
+        // gated on opts_.sst_cache_capacity > 0.  This matters because:
+        //
+        //   • cache_shard_idx() calls std::hash<string_view> (~10 ns)
+        //   • std::string key_str for a 16-byte key exceeds MSVC SSO (≤ 15 chars),
+        //     triggering a heap allocation on every call (~150-200 ns on Windows)
+        //   • The cache mutex adds two lock/unlock pairs on a hit path
+        //
+        // When capacity == 0 all of the above become wasted work.  Skipping them
+        // makes the disabled-cache get() path comparable to contains().
+        if (opts_.sst_cache_capacity > 0) {
+            const size_t sidx = cache_shard_idx(key);
+            auto& shard = cache_shards_[sidx];
+            const std::string key_str(reinterpret_cast<const char*>(key.data()), key.size());
+            {
+                std::lock_guard lk(shard.mu);
+                if (auto cached = shard.cache_lookup(key_str)) return cached;
+            }
+
+            std::shared_lock lock(sst_mu_);
+
+            for (const auto& meta : levels_[0]) {
+                if (!meta.reader) continue;
+                auto rec = meta.reader->get(key);
+                if (rec.has_value()) {
+                    lock.unlock();
+                    std::lock_guard lk(shard.mu);
+                    shard.cache_put(key_str, *rec);
+                    return rec;
+                }
+            }
+
+            for (int lvl = 1; lvl < opts_.max_levels; ++lvl) {
+                const auto& level = levels_[static_cast<size_t>(lvl)];
+                if (level.empty()) continue;
+                auto it = std::lower_bound(
+                    level.begin(),
+                    level.end(),
+                    key,
+                    [](const SSTMeta& m, std::span<const uint8_t> k) {
+                        return std::lexicographical_compare(m.last_key.begin(), m.last_key.end(), k.begin(), k.end());
+                    }
+                );
+                if (it == level.end() || !it->reader) continue;
+                if (!it->reader->key_in_range(key)) continue;
+                auto rec = it->reader->get(key);
+                if (rec.has_value()) {
+                    lock.unlock();
+                    std::lock_guard lk(shard.mu);
+                    shard.cache_put(key_str, *rec);
+                    return rec;
+                }
+            }
+
+            return std::nullopt;
         }
 
-        std::shared_lock lock(sst_mu_);
+        // ── Cache-disabled fast path (lock-free via atomic snapshot) ─────────
+        // Mirrors SSTManager::contains(): atomic snapshot load instead of
+        // shared_lock, so the SST read doesn't block concurrent compaction.
+        const auto snap = levels_snap_.load(std::memory_order_acquire);
+        if (!snap || snap->empty()) return std::nullopt;
+        const auto& levels = *snap;
+        const int nlevels = static_cast<int>(levels.size());
 
         // ── L0: newest-first linear scan (files may overlap) ─────────────────
-        for (const auto& meta : levels_[0]) {
+        for (const auto& meta : levels[0]) {
             if (!meta.reader) continue;
-            auto rec = meta.reader->get(key);
-            if (rec.has_value()) {
-                lock.unlock();
-                std::lock_guard lk(shard.mu);
-                shard.cache_put(key_str, *rec);
-                return rec;
-            }
+            if (auto rec = meta.reader->get(key)) return rec;
         }
 
         // ── L1+: binary search (non-overlapping, first_key sorted) ───────────
-        for (int lvl = 1; lvl < opts_.max_levels; ++lvl) {
-            const auto& level = levels_[static_cast<size_t>(lvl)];
+        for (int lvl = 1; lvl < nlevels; ++lvl) {
+            const auto& level = levels[static_cast<size_t>(lvl)];
             if (level.empty()) continue;
 
-            // Find the first file whose last_key >= key (could contain our key).
             auto it = std::lower_bound(
                 level.begin(),
                 level.end(),
@@ -514,19 +563,9 @@ namespace akkaradb::engine::sst {
                 }
             );
 
-            if (it == level.end()) continue;
-            if (!it->reader) continue;
-
-            // Confirm key is within [first_key, last_key] before doing I/O.
+            if (it == level.end() || !it->reader) continue;
             if (!it->reader->key_in_range(key)) continue;
-
-            auto rec = it->reader->get(key);
-            if (rec.has_value()) {
-                lock.unlock();
-                std::lock_guard lk(shard.mu);
-                shard.cache_put(key_str, *rec);
-                return rec;
-            }
+            if (auto rec = it->reader->get(key)) return rec;
         }
 
         return std::nullopt;
@@ -580,6 +619,54 @@ namespace akkaradb::engine::sst {
             if (!it->reader->key_in_range(key)) continue;
 
             auto r = it->reader->contains_fast(key, bloom_h);
+            if (r.has_value()) return r;
+        }
+
+        return std::nullopt;
+    }
+
+    // ============================================================================
+    // SSTManager::get_into  (lock-free value fetch — mirrors contains())
+    // ============================================================================
+    //
+    // Uses the same atomic snapshot + precomputed bloom hash approach as contains(),
+    // but calls get_into_fast() which copies the value bytes into `out` on a hit.
+    // No intermediate MemRecord, no hidden-pointer ABI overhead from optional<MemRecord>
+    // return values, no block-cache string allocation.  For non-blob values this is
+    // the fastest SST read-with-value path.
+
+    std::optional<bool> SSTManager::get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const {
+        const auto snap = levels_snap_.load(std::memory_order_acquire);
+        if (!snap || snap->empty()) return std::nullopt;
+        const auto& levels = *snap;
+        const int nlevels = static_cast<int>(levels.size());
+
+        const uint64_t bloom_h = bloom_fast_hash64(key.data(), key.size());
+
+        // L0: newest-first (files may overlap — check all until a definitive answer).
+        for (const auto& meta : levels[0]) {
+            if (!meta.reader) continue;
+            auto r = meta.reader->get_into_fast(key, bloom_h, out);
+            if (r.has_value()) return r;
+        }
+
+        // L1+: non-overlapping, binary search per level.
+        for (int lvl = 1; lvl < nlevels; ++lvl) {
+            const auto& level = levels[static_cast<size_t>(lvl)];
+            if (level.empty()) continue;
+
+            auto it = std::lower_bound(
+                level.begin(),
+                level.end(),
+                key,
+                [](const SSTMeta& m, std::span<const uint8_t> k) {
+                    return std::lexicographical_compare(m.last_key.begin(), m.last_key.end(), k.begin(), k.end());
+                }
+            );
+            if (it == level.end() || !it->reader) continue;
+            if (!it->reader->key_in_range(key)) continue;
+
+            auto r = it->reader->get_into_fast(key, bloom_h, out);
             if (r.has_value()) return r;
         }
 

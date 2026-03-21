@@ -167,6 +167,17 @@ namespace akkaradb::engine::sst {
              */
             [[nodiscard]] std::optional<bool> contains_fast(std::span<const uint8_t> key, uint64_t precomputed_bloom_hash) const;
 
+            /**
+             * Value fetch — bloom → index → data scan, writes value into `out`.
+             *
+             * Same path as contains_fast(key, bloom_h) but also copies the value
+             * bytes of a matched live record into `out`.  Returns:
+             *   true    → found, `out` contains the value bytes.
+             *   false   → tombstone (out unchanged).
+             *   nullopt → bloom reject / not found in this file.
+             */
+            [[nodiscard]] std::optional<bool> get_into_fast(std::span<const uint8_t> key, uint64_t precomputed_bloom_hash, std::vector<uint8_t>& out) const;
+
             // ── Range scan ────────────────────────────────────────────────────
 
             /**
@@ -263,6 +274,15 @@ namespace akkaradb::engine::sst {
 
             /// Buffer-based existence check (compressed SST): reads key+flags only.
             [[nodiscard]] std::optional<bool> contains_from_buf(uint64_t data_section_offset, std::span<const uint8_t> target_key) const;
+
+            /// Buffer-based value fetch (compressed SST): like contains_from_buf but
+            /// also writes value bytes into `out` on a live-record hit.
+            /// Returns true=live found (out filled), false=tombstone, nullopt=not found.
+            [[nodiscard]] std::optional<bool> get_into_buf(uint64_t data_section_offset, std::span<const uint8_t> target_key, std::vector<uint8_t>& out) const;
+
+            /// File-based value fetch (uncompressed SST): like contains_from_file but
+            /// also writes value bytes into `out` on a live-record hit.
+            [[nodiscard]] std::optional<bool> get_into_file(uint64_t data_section_offset, std::span<const uint8_t> target_key, std::vector<uint8_t>& out) const;
     };
 
 } // namespace akkaradb::engine::sst

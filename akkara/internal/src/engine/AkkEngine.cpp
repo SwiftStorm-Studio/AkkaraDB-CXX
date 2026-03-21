@@ -747,19 +747,29 @@ namespace akkaradb::engine {
         // exist in MemTable or SST.  Skip the flags check entirely and copy value
         // bytes directly into out — no intermediate MemRecord allocation.
         if (!impl_->blob_manager_) {
-            const auto mt = impl_->memtable_->get_into(key, out);
-            if (mt.has_value()) return *mt; // true=found, false=tombstone
+            // Skip the MemTable lookup (which computes SipHash + acquires a shard lock)
+            // when the MemTable is known to be empty — mirrors the approx_size() guard
+            // in exists().  approx_size() is a relaxed atomic load; the worst case is a
+            // spurious MemTable check when a concurrent put races with the load.
+            if (impl_->memtable_->approx_size() > 0) {
+                const auto mt = impl_->memtable_->get_into(key, out);
+                if (mt.has_value()) return *mt; // true=found, false=tombstone
+            }
 
-            // MemTable miss: try SST (MemTable nullopt → not found, not tombstone)
+            // MemTable miss (or empty): try SST via the lock-free get_into() path.
+            // SSTManager::get_into() mirrors contains(): atomic snapshot + precomputed
+            // bloom hash, writes value bytes directly into `out` — no intermediate
+            // MemRecord, no hidden-pointer ABI overhead, no block-cache string alloc.
             if (impl_->sst_manager_) {
-                const auto sst_rec = impl_->sst_manager_->get(key);
-                if (sst_rec) {
-                    if (sst_rec->is_tombstone()) return false;
-                    const auto val = sst_rec->value();
-                    out.assign(val.begin(), val.end());
+                const auto r = impl_->sst_manager_->get_into(key, out);
+                if (r.has_value()) {
+                    if (!*r) return false; // tombstone
 
-                    // SST read-through promotion (no WAL, no blob expansion needed)
-                    if (impl_->opts_.sst_promote_reads) { impl_->memtable_->put(key, val, sst_rec->seq(), sst_rec->flags()); }
+                    // Read-through promotion needs seq/flags — fall back to get().
+                    if (impl_->opts_.sst_promote_reads) {
+                        const auto sst_rec = impl_->sst_manager_->get(key);
+                        if (sst_rec) impl_->memtable_->put(key, sst_rec->value(), sst_rec->seq(), sst_rec->flags());
+                    }
 
                     return true;
                 }
