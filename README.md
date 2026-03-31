@@ -8,18 +8,18 @@
 
 ## Features
 
-| Category         | Capability                                                           |
-|------------------|----------------------------------------------------------------------|
-| **Storage**      | LSM-tree (MemTable + WAL + SST), Bloom filters, leveled compaction   |
-| **Durability**   | CRC32C on every record; crash-safe atomic writes (tmp+rename)        |
-| **Large values** | Automatic blob externalization for values ≥ 16 KiB                   |
-| **Compression**  | Per-file Zstandard (Zstd), self-describing, mixed-codec safe         |
-| **Concurrency**  | Multi-shard MemTable; all engine operations fully thread-safe        |
-| **History**      | Optional per-key version log; point-in-time reads; rollback          |
-| **API servers**  | HTTP REST + binary TCP, both with optional TLS (mbedTLS 3.x)         |
-| **Clustering**   | Standalone / Mirror / Stripe replication modes                       |
-| **ORM layer**    | `PackedTable<T,ID>`: typed tables with query builder, lazy iterators |
-| **Portability**  | Windows (MSVC) and Linux (GCC/Clang)                                 |
+| Category         | Capability                                                                                                  |
+|------------------|-------------------------------------------------------------------------------------------------------------|
+| **Storage**      | LSM-tree (MemTable + WAL + SST), Bloom filters, leveled compaction                                          |
+| **Durability**   | CRC32C on every record; crash-safe atomic writes (tmp+rename)                                               |
+| **Large values** | Automatic blob externalization for values ≥ 16 KiB                                                          |
+| **Compression**  | Per-file Zstandard (Zstd), self-describing, mixed-codec safe                                                |
+| **Concurrency**  | Multi-shard MemTable; all engine operations fully thread-safe                                               |
+| **History**      | Optional per-key version log; point-in-time reads; rollback                                                 |
+| **API servers**  | HTTP REST + binary TCP, both with optional TLS (mbedTLS 3.x)                                                |
+| **Clustering**   | Standalone / Mirror / Stripe replication modes                                                              |
+| **ORM layer**    | `PackedTable<&T::field>`: typed tables, zero-config BinPack serialization, secondary indexes, query builder |
+| **Portability**  | Windows (MSVC) and Linux (GCC/Clang)                                                                        |
 
 ---
 
@@ -65,24 +65,26 @@ db->close();
 
 ```cpp
 #include <akkaradb/AkkaraDB.hpp>
-#include <akkaradb/PackedTable.hpp>
-#include <akkaradb/Codec.hpp>
 
-struct User { std::string name; uint32_t age; };
-
-// Specialize EntityCodec<User>
-template<> struct akkaradb::EntityCodec<User> {
-    static void serialize(const User& u, std::vector<uint8_t>& out) { /* ... */ }
-    static User deserialize(std::span<const uint8_t> bytes) { /* ... */ }
+// No serializer needed — BinPack handles it automatically
+struct User {
+    uint64_t    id;
+    std::string name;
+    int32_t     age;
 };
 
 auto db    = AkkaraDB::open("/path/to/data", StartupMode::FAST);
-auto users = db->table<User, uint64_t>("users");
 
-users.put(1ULL, User{"Alice", 30});
-users.put(2ULL, User{"Bob",   25});
+// Primary key is &User::id — entity and key types inferred automatically
+auto users = db->table<&User::id>("users")
+                 .index<&User::name>()   // optional secondary indexes
+                 .index<&User::age>();
 
-auto alice = users.get(1ULL);  // std::optional<User>
+users.put({1, "Alice", 30});
+users.put({2, "Bob",   25});
+
+auto alice = users.get(1ULL);                          // std::optional<User>
+auto u     = users.find_by<&User::name>("Alice");      // secondary index lookup
 users.upsert(1ULL, [](User& u) { u.age++; });
 
 // Range scan
@@ -195,10 +197,11 @@ eng.rollback_key(key, checkpoint_seq);
 
 ## Dependencies
 
-| Library   | Version | License    | Notes                                 |
-|-----------|---------|------------|---------------------------------------|
-| Zstandard | 1.5.6   | BSD        | Always included (static)              |
-| mbedTLS   | 3.6.2   | Apache-2.0 | Optional (`-DAKKARADB_ENABLE_TLS=ON`) |
+| Library   | Version      | License    | Notes                                                |
+|-----------|--------------|------------|------------------------------------------------------|
+| Zstandard | 1.5.6        | BSD        | Always included (static)                             |
+| Boost.PFR | boost-1.84.0 | BSL-1.0    | Header-only; aggregate struct reflection for BinPack |
+| mbedTLS   | 3.6.2        | Apache-2.0 | Optional (`-DAKKARADB_ENABLE_TLS=ON`)                |
 
 All dependencies are fetched automatically via CMake `FetchContent`.
 

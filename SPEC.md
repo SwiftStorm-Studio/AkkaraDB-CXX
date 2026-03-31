@@ -57,7 +57,7 @@ leveled SST compaction.
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                      Public API                         │
-│        AkkaraDB   PackedTable<T,ID>   AkkEngine         │
+│      AkkaraDB   PackedTable<&T::field>   AkkEngine        │
 └───────────────────────────┬─────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────┐
@@ -190,20 +190,36 @@ The `FLAG_BLOB` flag in `AKHdr32.flags` signals that the value bytes are a `Blob
 
 ### 3.4 PackedTable Key Layout
 
+**Primary key entry** (entity value):
+
 ```
 ┌──────────────────────┬──────────────────────────────┐
-│   NS Prefix (8 B)    │     Encoded ID bytes          │
-│  FNV-1a-64(name)     │  IdCodec<ID>::encode(id)      │
+│   NS Prefix (8 B)    │     Encoded PK bytes          │
+│  FNV-1a-64(name)     │  BinPack::encode(entity.pk)   │
 └──────────────────────┴──────────────────────────────┘
+→ value: BinPack::encode(entity)   (all fields, declaration order)
 ```
 
-**Namespace prefix** is deterministic: same name → same 8 bytes across all processes and restarts.
+**Secondary index entry** (PK reference):
+```
+┌──────────────────────┬──────────────────────────────┐
+│  Index Prefix (8 B)  │  Encoded field value bytes    │
+│  FNV-1a-64(name +    │  BinPack::encode(entity.field)│
+│  ":index:" + offset) │                               │
+└──────────────────────┴──────────────────────────────┘
+→ value: BinPack::encode(pk)
+```
 
-**IdCodec ordering rules:**
+**Namespace prefix** is deterministic: same table name → same 8 bytes across all processes and restarts.
+
+**Index prefix** is derived from `FNV-1a-64("<table_name>:index:<field_byte_offset>")`.
+The field byte offset is stable for the same binary and struct layout.
+
+**PK encoding ordering rules** (BinPack wire format):
 
 - Unsigned integers: big-endian bytes (naturally ordered)
-- Signed integers: MSB flipped (`INT64_MIN` → `0x00…`, `INT64_MAX` → `0xFF…`)
-- `std::string`: raw bytes (lexicographic)
+- Signed integers: stored as-is in big-endian (use unsigned types for ordered scans)
+- `std::string`: raw UTF-8 bytes (lexicographic)
 
 ---
 
@@ -917,8 +933,13 @@ auto db = AkkaraDB::open(opts);
 // Access underlying engine directly
 AkkEngine& eng = db->engine();
 
-// Create a typed table
-auto users = db->table<User, uint64_t>("users");
+// Create a typed table (PK field inferred from member pointer)
+auto users = db->table<&User::id>("users");
+
+// With secondary indexes
+auto users = db->table<&User::id>("users")
+                 .index<&User::email>()
+                 .index<&User::age>();
 ```
 
 ### 15.2 AkkEngine (Core KV API)
@@ -949,18 +970,26 @@ eng.force_sync();  // flush WAL + VersionLog to disk
 eng.close();
 ```
 
-### 15.3 PackedTable<T, ID>
+### 15.3 PackedTable<PrimaryKeyPtr>
 
 ```cpp
-// Open (uses EntityCodec<T> + IdCodec<ID> specializations)
-auto users = PackedTable<User, uint64_t>::open(eng, "users");
+// Open — entity type and key type inferred from member pointer
+auto users = db->table<&User::id>("users");
+
+// With secondary indexes (fluent, rvalue chain)
+auto users = db->table<&User::id>("users")
+                 .index<&User::email>()
+                 .index<&User::age>();
 
 // CRUD
-users.put(42ULL, user);
-auto u  = users.get(42ULL);          // optional<User>
+users.put(user);                       // id extracted automatically
+auto u  = users.get(42ULL);            // optional<User>
 users.remove(42ULL);
 bool ok = users.exists(42ULL);
 users.upsert(42ULL, [](User& u) { u.age++; });
+
+// Secondary index lookup (index must be registered at construction)
+auto u = users.find_by<&User::email>("alice@example.com");  // optional<User>
 
 // Count
 size_t n = users.count();
@@ -984,30 +1013,46 @@ auto results = users
 for (const auto& [id, user] : users.query(...)) { ... }
 
 // Terminal operators
-auto first = users.query(...).first();    // optional<pair<ID,T>>
+auto first = users.query(...).first();    // optional<Entry{id, value}>
 bool any   = users.query(...).any();
 size_t cnt = users.query(...).count();
 ```
 
 **Thread-safety**: `PackedTable` is **not thread-safe**. `AkkEngine` (accessed via `engine()`) is.
 
-### 15.4 EntityCodec<T> — Specialization Contract
+### 15.4 BinPack — Serialization Layer
+
+Serialization is zero-config. All fields of an aggregate struct are serialized in
+declaration order via Boost.PFR. No specialization is required for:
+
+| Category    | Types                                                                                                                                      |
+|-------------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| Primitives  | `bool`, `int8_t`–`int64_t`, `uint8_t`–`uint64_t`, `float`, `double`                                                                        |
+| Strings     | `std::string` (write+read), `std::string_view` (write only)                                                                                |
+| Byte array  | `std::vector<uint8_t>` (optimized bulk path)                                                                                               |
+| Collections | `std::optional<T>`, `std::vector<T>`, `std::array<T,N>`, `std::map<K,V>`, `std::unordered_map<K,V>`, `std::pair<A,B>`, `std::tuple<Ts...>` |
+| Enums       | Serialized as `underlying_type`                                                                                                            |
+| Aggregates  | Any `struct` with no user-provided constructor — fields serialized recursively                                                             |
+
+For custom types, specialize `TypeAdapter<T>`:
 
 ```cpp
 template<>
-struct EntityCodec<MyType> {
-    static void serialize(const MyType& v, std::vector<uint8_t>& out);
-    static MyType deserialize(std::span<const uint8_t> bytes);
+struct akkaradb::binpack::TypeAdapter<MyType> {
+    static void   write(const MyType& v, std::vector<uint8_t>& out);
+    static MyType read(std::span<const uint8_t>& in);   // must advance span
+    static size_t estimate_size(const MyType& v);
 };
 ```
 
-### 15.5 IdCodec<ID> — Built-In Specializations
+Direct BinPack API:
 
-| Type                   | Encoding                | Ordered             |
-|------------------------|-------------------------|---------------------|
-| `uint8_t` – `uint64_t` | Big-endian              | Yes                 |
-| `int8_t` – `int64_t`   | Big-endian, MSB flipped | Yes                 |
-| `std::string`          | Raw bytes               | Yes (lexicographic) |
+```cpp
+auto bytes = BinPack::encode(value);          // → vector<uint8_t>
+auto val   = BinPack::decode<T>(bytes);       // → T
+BinPack::encode_into(value, buf);             // append to existing buffer
+size_t n   = BinPack::estimate_size(value);   // upper-bound estimate
+```
 
 ---
 
@@ -1055,7 +1100,7 @@ lexicographic ordering of ID types.
 
 | Component             | Note                                                |
 |-----------------------|-----------------------------------------------------|
-| `PackedTable<T,ID>`   | Create one per thread, or synchronize externally    |
+| `PackedTable<MPtr>`   | Create one per thread, or synchronize externally    |
 | `SSTReader`           | One reader instance per thread                      |
 | `BPTree` / `SkipList` | Synchronized by MemTable's per-shard `shared_mutex` |
 | `MonotonicArena`      | Per-shard, accessed only under shard lock           |
@@ -1118,6 +1163,7 @@ fail (key not found, bloom false positive) return `std::optional` or `bool`.
 | Windows      | MSVC 19.38+ (VS 2022 17.8+)                                |
 | Linux        | GCC 13+ or Clang 17+                                       |
 | Zstd         | Fetched automatically (v1.5.6)                             |
+| Boost.PFR    | Fetched automatically (boost-1.84.0, header-only)          |
 | mbedTLS      | Fetched automatically if `AKKARADB_ENABLE_TLS=ON` (v3.6.2) |
 
 ### 19.2 CMake Options
@@ -1140,11 +1186,13 @@ target_include_directories(my_app PRIVATE ${AKKARADB_INCLUDE_DIR})
 
 ### 19.4 Key Headers (Public API)
 
-| Header                     | Contents                                 |
-|----------------------------|------------------------------------------|
-| `akkaradb/AkkaraDB.hpp`    | `AkkaraDB`, `StartupMode`, `Options`     |
-| `akkaradb/PackedTable.hpp` | `PackedTable<T,ID>`, `Query`, `Iterator` |
-| `akkaradb/Codec.hpp`       | `IdCodec<ID>`, `EntityCodec<T>`          |
-| `akkaradb/detail/Hash.hpp` | `fnv1a_64`, `write_be64`, `read_be64`    |
+| Header                                        | Contents                                                         |
+|-----------------------------------------------|------------------------------------------------------------------|
+| `akkaradb/AkkaraDB.hpp`                       | `AkkaraDB`, `StartupMode`, `Options`                             |
+| `akkaradb/PackedTable.hpp`                    | `PackedTable<MPtr>`, `Query`, `Iterator`                         |
+| `akkaradb/binpack/BinPack.hpp`                | `BinPack::encode`, `decode`, `encode_into`, `estimate_size`      |
+| `akkaradb/binpack/TypeAdapter.hpp`            | `TypeAdapter<T>` — specialize for custom types                   |
+| `akkaradb/binpack/detail/MemberPtrTraits.hpp` | `class_of<MPtr>`, `member_of<MPtr>`, `field_byte_offset<MPtr>()` |
+| `akkaradb/detail/Hash.hpp`                    | `fnv1a_64`, `write_be64`, `read_be64`                            |
 
 Internal headers under `akkara/internal/include/` are part of the build interface but not the public API surface.

@@ -19,11 +19,11 @@
 // akkaradb/AkkaraDB.hpp
 #pragma once
 
+#include "Export.hpp"
 #include "PackedTable.hpp"
 #include "engine/AkkEngine.hpp"
 #include <filesystem>
 #include <memory>
-#include <optional>
 #include <string>
 
 namespace akkaradb {
@@ -88,8 +88,8 @@ namespace akkaradb {
      * Thread-safety: AkkaraDB::engine() IS thread-safe.
      *   PackedTable is NOT thread-safe — use one per thread or synchronize.
      */
-    class AkkaraDB {
-    public:
+    class AKDB_API AkkaraDB {
+        public:
         // ── Options ──────────────────────────────────────────────────────────
 
         /**
@@ -172,46 +172,36 @@ namespace akkaradb {
         // ── Table factory ─────────────────────────────────────────────────────
 
         /**
-         * Returns a PackedTable backed by EntityCodec<T> + IdCodec<ID> specializations.
+         * Opens a typed table backed by BinPack serialization.
          *
-         * Requires:
-         *   - akkaradb::EntityCodec<T> fully specialized in scope.
-         *   - akkaradb::IdCodec<ID> specialized (built-in integer/string types qualify).
+         * PrimaryKeyPtr is a member object pointer that identifies the primary
+         * key field. The entity type and key type are inferred automatically:
+         *
+         *   auto users = db->table<&User::id>("users");
+         *
+         * Secondary indexes are added via the fluent .index<>() builder:
+         *
+         *   auto users = db->table<&User::id>("users")
+         *                    .index<&User::email>()
+         *                    .index<&User::age>();
+         *
+         * Serialization is zero-config: any aggregate struct whose fields are
+         * supported by BinPack (primitives, std::string, std::optional<T>,
+         * std::vector<T>, enum, nested aggregates, ...) works without any
+         * specialization. For custom types, specialize TypeAdapter<T>.
          *
          * The returned PackedTable holds a raw pointer to engine(); ensure this
          * AkkaraDB instance outlives the table.
          */
-        template<typename T, typename ID>
-        [[nodiscard]] std::unique_ptr<PackedTable<T, ID>>
-        table(std::string name)
+        template <auto PrimaryKeyPtr>
+        [[nodiscard]] PackedTable<PrimaryKeyPtr> table(std::string name)
         {
-            return PackedTable<T, ID>::open(engine(), std::move(name));
-        }
-
-        /**
-         * Returns a PackedTable with explicit serialize/deserialize lambdas.
-         *
-         * Uses the built-in IdCodec<ID> for key encoding (integer/string types).
-         */
-        template<typename T, typename ID>
-        [[nodiscard]] std::unique_ptr<PackedTable<T, ID>>
-        table(std::string                                              name,
-              typename PackedTable<T, ID>::Serialize                  serialize,
-              typename PackedTable<T, ID>::Deserialize                deserialize)
-        {
-            return PackedTable<T, ID>::open(engine(), std::move(name),
-                                            std::move(serialize),
-                                            std::move(deserialize));
-        }
-
-        /**
-         * Returns a PackedTable with a full Codec bundle (custom encode_id / decode_id).
-         */
-        template<typename T, typename ID>
-        [[nodiscard]] std::unique_ptr<PackedTable<T, ID>>
-        table(std::string name, typename PackedTable<T, ID>::Codec codec)
-        {
-            return PackedTable<T, ID>::open(engine(), std::move(name), std::move(codec));
+            using Table = PackedTable<PrimaryKeyPtr>;
+            Table t;
+            t.engine_ = &engine();
+            t.table_name_ = std::move(name);
+            t.pk_prefix_ = Table::make_table_prefix(t.table_name_);
+            return t;
         }
 
     private:

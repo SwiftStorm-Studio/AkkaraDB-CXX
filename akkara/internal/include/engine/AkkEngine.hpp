@@ -19,6 +19,7 @@
 // internal/include/engine/AkkEngine.hpp
 #pragma once
 
+#include "akkaradb/Export.hpp"
 #include "engine/memtable/MemTable.hpp"
 #include "engine/vlog/VersionLog.hpp"
 #include "engine/wal/WalWriter.hpp"
@@ -426,7 +427,12 @@ namespace akkaradb::engine {
      * Note: Implementation is pending. This header establishes the public contract
      * so callers and tests can be written against it while the Impl is built.
      */
-    class AkkEngine {
+    // C4251: std::unique_ptr<Impl> members are private pimpl — safe to suppress.
+    #ifdef _MSC_VER
+    #pragma warning(push)
+    #pragma warning(disable: 4251)
+    #endif
+    class AKDB_API AkkEngine {
         public:
             // ── Range scan iterator ───────────────────────────────────────────
 
@@ -444,7 +450,7 @@ namespace akkaradb::engine {
              *       // process...
              *   }
              */
-            class ScanIterator {
+            class AKDB_API ScanIterator {
                 public:
                     ~ScanIterator();
                     ScanIterator(ScanIterator&&) noexcept;
@@ -644,5 +650,7 @@ namespace akkaradb::engine {
             class Impl;
             std::unique_ptr<Impl> impl_;
     };
-
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 } // namespace akkaradb::engine

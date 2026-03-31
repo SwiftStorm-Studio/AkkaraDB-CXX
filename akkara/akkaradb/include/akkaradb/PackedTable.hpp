@@ -19,536 +19,560 @@
 // akkaradb/PackedTable.hpp
 #pragma once
 
-#include "Codec.hpp"
+#include "Export.hpp"
+#include "binpack/BinPack.hpp"
+#include "binpack/detail/MemberPtrTraits.hpp"
 #include "detail/Hash.hpp"
 #include "engine/AkkEngine.hpp"
+
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace akkaradb {
+    // =============================================================================
+    // PackedTable<PrimaryKeyPtr>
+    // =============================================================================
+    //
+    // Type-safe, namespace-isolated KV table backed by AkkEngine.
+    //
+    // Template parameter:
+    //   PrimaryKeyPtr — a member object pointer identifying the primary key field.
+    //                   The entity type and key type are inferred automatically.
+    //
+    // Basic usage:
+    //
+    //   struct User {
+    //       uint64_t    id;
+    //       std::string name;
+    //       int32_t     age;
+    //   };
+    //
+    //   // Open — no serializer needed
+    //   auto users = db->table<&User::id>("users");
+    //
+    //   // Optional secondary indexes
+    //   auto users = db->table<&User::id>("users")
+    //                    .index<&User::name>()
+    //                    .index<&User::age>();
+    //
+    //   // CRUD
+    //   users.put({1, "Alice", 25});
+    //   auto alice = users.get(1ULL);          // → std::optional<User>
+    //   users.remove(1ULL);
+    //
+    //   // Secondary index lookup
+    //   auto u = users.find_by<&User::name>("Alice"); // → std::optional<User>
+    //
+    // Serialization:
+    //   Entity fields are serialized by BinPack in declaration order (Boost.PFR).
+    //   All primitive types, std::string, std::optional<T>, std::vector<T>,
+    //   std::map<K,V>, enum, and nested aggregate structs are supported with
+    //   zero configuration. For custom types, specialize TypeAdapter<T>.
+    //
+    // Key layout:
+    //   Primary:         [8B table prefix][encoded PK]  → BinPack(entity)
+    //   Secondary index: [8B index prefix][encoded field value]  → BinPack(pk)
+    //
+    //   Both prefixes are FNV-1a hashes: table prefix = hash(table_name),
+    //   index prefix = hash(table_name + ":index:" + str(field_byte_offset)).
+    //   This makes them stable across runs for the same binary + struct layout.
+    //
+    // Thread-safety:
+    //   PackedTable is NOT thread-safe. AkkEngine IS thread-safe;
+    //   use one PackedTable per thread or synchronize externally.
+    //
+    // Secondary index notes:
+    //   - Indexes are unique: one entity per field value. For non-unique fields
+    //     use find_all_by() with a range scan (a future extension).
+    //   - put() fetches the old entity to clean up stale index entries before
+    //     writing new ones. This incurs one extra get() per put() when indexes
+    //     are registered.
+    //   - remove() fetches the old entity to clean up index entries.
+    //     If the entity is not found, remove() is a no-op.
 
-    /**
-     * PackedTable<T, ID> — Type-safe, namespace-isolated ORM layer over AkkEngine.
-     *
-     * Each table occupies a dedicated 8-byte namespace prefix in the key space,
-     * derived deterministically from the table name via FNV-1a 64-bit hash.
-     * Multiple tables can share the same AkkEngine without key collisions.
-     *
-     * Key layout on disk:
-     *   [8 bytes: ns_prefix (FNV-1a of table name)] [encoded ID bytes]
-     *
-     * ID encoding:
-     *   Integer types are stored big-endian (sign-bit flipped for signed), so
-     *   lexicographic key order matches numeric ID order and range scans work
-     *   correctly for both ascending iteration and bounded range queries.
-     *
-     * Thread-safety: PackedTable is NOT thread-safe. The underlying AkkEngine IS
-     *   thread-safe; create one PackedTable per thread, or synchronize externally.
-     *
-     * --- Creating a table ---
-     *
-     * Option A — specialize EntityCodec<T> (zero-lambda overhead):
-     *
-     *   template<> struct akkaradb::EntityCodec<User> {
-     *       static void serialize(const User& u, std::vector<uint8_t>& out) { ... }
-     *       static User deserialize(std::span<const uint8_t> b) { return ...; }
-     *   };
-     *   auto tbl = PackedTable<User, uint64_t>::open(engine, "users");
-     *
-     * Option B — pass lambdas directly (no specialization required):
-     *
-     *   auto tbl = PackedTable<User, uint64_t>::open(engine, "users",
-     *       [](const User& u, auto& out) { <<serialize>> }
-     *       [](std::span<const uint8_t> b) { return User{ <<parse>> }; }
-     *   );
-     */
-    template<typename T, typename ID>
+    template <auto PrimaryKeyPtr>
     class PackedTable {
-    public:
-        // ── Codec function types ─────────────────────────────────────────────
-
-        using Serialize   = std::function<void(const T&, std::vector<uint8_t>&)>;
-        using Deserialize = std::function<T(std::span<const uint8_t>)>;
-        using EncodeId    = std::function<void(const ID&, std::vector<uint8_t>&)>;
-        using DecodeId    = std::function<ID(std::span<const uint8_t>)>;
-
-        struct Codec {
-            Serialize   serialize;
-            Deserialize deserialize;
-            EncodeId    encode_id;
-            DecodeId    decode_id;
-        };
-
-        // ── Factory ──────────────────────────────────────────────────────────
-
-        /**
-         * Opens a table using explicit codec functions (Option B).
-         *
-         * encode_id / decode_id default to the built-in IdCodec<ID> specialization.
-         * If IdCodec<ID> is not specialized for your ID type, pass them explicitly.
-         *
-         * @param engine     Owning engine (must outlive this PackedTable).
-         * @param table_name Unique name for this table; determines namespace prefix.
-         * @param codec      Full codec bundle.
-         */
-        [[nodiscard]] static std::unique_ptr<PackedTable>
-        open(engine::AkkEngine& engine, std::string table_name, Codec codec) {
-            auto tbl           = std::unique_ptr<PackedTable>(new PackedTable());
-            tbl->engine_       = &engine;
-            tbl->table_name_   = std::move(table_name);
-            tbl->codec_        = std::move(codec);
-            const uint64_t h   = detail::fnv1a_64(tbl->table_name_);
-            detail::write_be64(h, tbl->ns_prefix_.data());
-            return tbl;
-        }
-
-        /**
-         * Opens a table using entity lambdas + built-in IdCodec<ID> (Option B, short form).
-         *
-         * Requires IdCodec<ID> to be specialized (all built-in integer/string types qualify).
-         */
-        [[nodiscard]] static std::unique_ptr<PackedTable>
-        open(engine::AkkEngine& engine,
-             std::string        table_name,
-             Serialize          serialize,
-             Deserialize        deserialize)
-        {
-            Codec c{
-                std::move(serialize),
-                std::move(deserialize),
-                [](const ID& id, std::vector<uint8_t>& out) { IdCodec<ID>::encode(id, out); },
-                [](std::span<const uint8_t> b)              { return IdCodec<ID>::decode(b); },
-            };
-            return open(engine, std::move(table_name), std::move(c));
-        }
-
-        /**
-         * Opens a table using EntityCodec<T> + IdCodec<ID> specializations (Option A).
-         *
-         * Requires both EntityCodec<T> and IdCodec<ID> to be fully specialized.
-         */
-        [[nodiscard]] static std::unique_ptr<PackedTable>
-        open(engine::AkkEngine& engine, std::string table_name)
-        {
-            return open(engine, std::move(table_name),
-                [](const T& e, std::vector<uint8_t>& out) { EntityCodec<T>::serialize(e, out); },
-                [](std::span<const uint8_t> b)            { return EntityCodec<T>::deserialize(b); });
-        }
-
-        // ── CRUD ─────────────────────────────────────────────────────────────
-
-        /**
-         * Inserts or replaces the entity for the given ID.
-         */
-        void put(const ID& id, const T& entity) {
-            const auto key = make_key(id);
-            std::vector<uint8_t> val;
-            codec_.serialize(entity, val);
-            engine_->put(key, val);
-        }
-
-        /**
-         * Returns the entity for the given ID, or nullopt if absent/deleted.
-         */
-        [[nodiscard]] std::optional<T> get(const ID& id) const {
-            const auto key    = make_key(id);
-            auto bytes_opt    = engine_->get(key);
-            if (!bytes_opt)   return std::nullopt;
-            return codec_.deserialize(*bytes_opt);
-        }
-
-        /**
-         * Deletes the entity for the given ID (inserts a tombstone).
-         */
-        void remove(const ID& id) {
-            const auto key = make_key(id);
-            engine_->remove(key);
-        }
-
-        /**
-         * Atomically get-or-default + update + put.
-         *
-         * Retrieves the current entity (or default-constructs one if absent),
-         * passes a mutable reference to the update callback, then puts it back.
-         *
-         * @param id     Key to update.
-         * @param update Called with the entity (existing or default-constructed).
-         *               Modify it in place; changes are persisted on return.
-         */
-        void upsert(const ID& id, std::function<void(T&)> update) {
-            T entity = get(id).value_or(T{});
-            update(entity);
-            put(id, entity);
-        }
-
-        // ── Iterator ─────────────────────────────────────────────────────────
-
-        /**
-         * A record yielded by a PackedTable range scan.
-         */
-        struct Entry {
-            ID id;
-            T  value;
-        };
-
-        /**
-         * Forward iterator over a namespace-scoped range.
-         *
-         * Wraps AkkEngine::ScanIterator; skips keys outside the namespace
-         * (should not happen under normal usage, but guarded for safety).
-         * Tombstones are invisible (AkkEngine suppresses them).
-         */
-        class Iterator {
         public:
-            Iterator(Iterator&&) noexcept = default;
-            Iterator& operator=(Iterator&&) noexcept = default;
-            Iterator(const Iterator&) = delete;
-            Iterator& operator=(const Iterator&) = delete;
+            using Entity = binpack::detail::class_of<PrimaryKeyPtr>;
+            using PK = binpack::detail::member_of<PrimaryKeyPtr>;
 
-            [[nodiscard]] bool has_next() const noexcept { return has_next_; }
+            // ── Construction (via AkkaraDB::table<PrimaryKeyPtr>(name)) ──────────────
+
+            PackedTable(PackedTable&&) noexcept = default;
+            PackedTable& operator=(PackedTable&&) noexcept = default;
+            PackedTable(const PackedTable&) = delete;
+            PackedTable& operator=(const PackedTable&) = delete;
+
+            // ── Index builder ─────────────────────────────────────────────────────────
 
             /**
-             * Returns the current entry and advances the iterator.
-             * Precondition: has_next() == true.
+             * Registers a secondary index on the given field.
+             *
+             * Multiple indexes may be chained:
+             *   auto users = db->table<&User::id>("users")
+             *                    .index<&User::email>()
+             *                    .index<&User::age>();
+             *
+             * Constraints:
+             *   - FieldPtr must be a member of Entity (enforced at compile time).
+             *   - Indexes are unique: find_by<FieldPtr>(value) returns at most one entity.
+             *     If uniqueness is not guaranteed, the last put() for a given field value wins.
+             *
+             * @return *this (as rvalue ref) for fluent chaining.
              */
-            [[nodiscard]] Entry next() {
-                auto [raw_key, raw_val] = *pending_;
-                // Decode: skip ns_prefix (8 bytes), rest is encoded ID
-                const std::span<const uint8_t> id_bytes{
-                    raw_key.data() + 8,
-                    raw_key.size() - 8
-                };
-                Entry e{
-                    decode_id_(id_bytes),
-                    deserialize_(raw_val)
-                };
-                advance();
-                return e;
-            }
+            template <auto FieldPtr>
+            PackedTable&& index() && {
+                static_assert(std::is_same_v<binpack::detail::class_of<FieldPtr>, Entity>, "index() field must be a member of the entity type");
 
-        private:
-            friend class PackedTable;
+                const size_t offset = binpack::detail::field_byte_offset<FieldPtr>();
+                const auto prefix = make_index_prefix(table_name_, offset);
 
-            using RawEntry = std::pair<std::vector<uint8_t>, std::vector<uint8_t>>;
-
-            engine::AkkEngine::ScanIterator               iter_;
-            DecodeId                                      decode_id_;
-            Deserialize                                   deserialize_;
-            std::array<uint8_t, 8>                        ns_prefix_;
-            std::optional<RawEntry>                       pending_;
-            bool                                          has_next_ = false;
-
-            Iterator(engine::AkkEngine::ScanIterator iter,
-                     DecodeId                        decode_id,
-                     Deserialize                     deserialize,
-                     std::array<uint8_t, 8>          ns_prefix)
-                : iter_       {std::move(iter)}
-                , decode_id_  {std::move(decode_id)}
-                , deserialize_{std::move(deserialize)}
-                , ns_prefix_  {ns_prefix}
-            {
-                advance();
-            }
-
-            void advance() {
-                has_next_ = false;
-                pending_.reset();
-                while (iter_.has_next()) {
-                    auto entry = iter_.next();
-                    if (!entry) break;
-                    // Verify namespace prefix (safety guard)
-                    if (entry->first.size() < 8 ||
-                        std::memcmp(entry->first.data(), ns_prefix_.data(), 8) != 0)
+                indexes_.push_back(
                     {
-                        break; // left namespace — stop
+                        prefix,
+                        /*registered_offset=*/
+                        offset,
+                        [](const Entity& e) -> std::vector<uint8_t> {
+                            using Field = binpack::detail::member_of<FieldPtr>;
+                            return binpack::BinPack::encode<Field>(e.*FieldPtr);
+                        }
                     }
-                    pending_ = std::move(entry);
-                    has_next_ = true;
-                    return;
-                }
+                );
+                return std::move(*this);
             }
-        };
 
-        // ── Query builder ────────────────────────────────────────────────────
-
-        /**
-         * Fluent, lazy query builder. Query itself IS the range — no execute() needed.
-         *
-         * Iteration is lazy: entries are filtered one at a time as you advance,
-         * so only one Entry lives in memory at a time (no intermediate vector).
-         *
-         * Usage:
-         *   // Range-for (lazy, zero intermediate allocation)
-         *   for (const auto& [id, user] : users.query([](const User& u) { return u.age > 19; })) {
-         *       process(user);
-         *   }
-         *
-         *   // Multiple where() compose with AND
-         *   auto q = users.query()
-         *                 .where([](const User& u) { return u.vip; })
-         *                 .where([](const User& u) { return u.age >= 18; })
-         *                 .limit(10);
-         *   for (const auto& [id, user] : q) { ... }
-         *
-         *   // Terminal shortcuts
-         *   auto first_vip  = users.query([](const User& u) { return u.vip; }).first();
-         *   bool has_adults = users.query([](const User& u) { return u.age >= 18; }).any();
-         *   size_t n        = users.query([](const User& u) { return u.active; }).count();
-         *
-         *   // Collect into vector when needed
-         *   auto vec = users.query([](const User& u) { return u.active; }).to_vector();
-         */
-        class Query {
-            // Alias to avoid shadowing PackedTable::Iterator inside this nested class.
-            using ScanIter = typename PackedTable::Iterator;
-
-        public:
-            // ── Lazy iterator ─────────────────────────────────────────────────
+            // ── CRUD ──────────────────────────────────────────────────────────────────
 
             /**
-             * Lazy forward iterator: advances through the underlying scan,
-             * skipping entries that do not satisfy the predicate, stopping at limit.
+             * Inserts or replaces the entity.
+             *
+             * When secondary indexes are registered, the old entity is fetched first
+             * to remove stale index entries before writing the new ones.
+             */
+            void put(const Entity& entity) {
+                const PK& pk = entity.*PrimaryKeyPtr;
+                const auto storage_key = make_pk_key(pk);
+                const auto value = binpack::BinPack::encode(entity);
+
+                if (!indexes_.empty()) {
+                    // Clean up stale secondary index entries for the old version.
+                    auto old_bytes = engine_->get(storage_key);
+                    if (old_bytes) {
+                        const auto old_entity = binpack::BinPack::decode<Entity>(*old_bytes);
+                        remove_index_entries(old_entity);
+                    }
+                }
+
+                engine_->put(storage_key, value);
+
+                if (!indexes_.empty()) { write_index_entries(entity, pk); }
+            }
+
+            /**
+             * Returns the entity for the given primary key, or nullopt if not found.
+             */
+            [[nodiscard]] std::optional<Entity> get(const PK& pk) const {
+                auto bytes = engine_->get(make_pk_key(pk));
+                if (!bytes) return std::nullopt;
+                return binpack::BinPack::decode<Entity>(*bytes);
+            }
+
+            /**
+             * Deletes the entity for the given primary key.
+             * Also removes all associated secondary index entries.
+             */
+            void remove(const PK& pk) {
+                const auto storage_key = make_pk_key(pk);
+
+                if (!indexes_.empty()) {
+                    auto old_bytes = engine_->get(storage_key);
+                    if (old_bytes) {
+                        const auto old_entity = binpack::BinPack::decode<Entity>(*old_bytes);
+                        remove_index_entries(old_entity);
+                    }
+                }
+
+                engine_->remove(storage_key);
+            }
+
+            /**
+             * Returns true if the entity exists (no value copy, no BlobManager I/O).
+             */
+            [[nodiscard]] bool exists(const PK& pk) const { return engine_->exists(make_pk_key(pk)); }
+
+            /**
+             * Atomically get-or-default + update + put.
+             *
+             * Retrieves the current entity (or default-constructs one if absent),
+             * passes a mutable reference to the update callback, then puts it back.
+             *
+             * Requires Entity to be default-constructible.
+             */
+            void upsert(const PK& pk, std::function<void(Entity&)> update) {
+                Entity entity = get(pk).value_or(Entity{});
+                update(entity);
+                put(entity);
+            }
+
+            // ── Secondary index lookup ────────────────────────────────────────────────
+
+            /**
+             * Looks up an entity by a secondary index field.
+             *
+             * Requires that .index<FieldPtr>() was called during construction.
+             * Throws std::runtime_error if the index was not registered.
+             *
+             * Returns the entity whose FieldPtr field equals value, or nullopt.
+             * If multiple entities share the same field value (non-unique index),
+             * the result is the last one written.
+             */
+            template <auto FieldPtr>
+            [[nodiscard]] std::optional<Entity> find_by(const binpack::detail::member_of<FieldPtr>& value) const {
+                static_assert(std::is_same_v<binpack::detail::class_of<FieldPtr>, Entity>, "find_by() field must be a member of the entity type");
+
+                const size_t offset = binpack::detail::field_byte_offset<FieldPtr>();
+                const auto prefix = make_index_prefix(table_name_, offset);
+
+                // Verify the index was registered (guard against silent misuse).
+                bool found = false;
+                for (const auto& idx : indexes_) {
+                    if (idx.registered_offset == offset) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    throw std::runtime_error(
+                        "PackedTable::find_by: index not registered for this field. " "Call .index<&" + table_name_ + "::field>() during table construction."
+                    );
+                }
+
+                using Field = binpack::detail::member_of<FieldPtr>;
+                const auto idx_key = make_index_key(prefix, binpack::BinPack::encode<Field>(value));
+                const auto pk_bytes = engine_->get(idx_key);
+                if (!pk_bytes) return std::nullopt;
+
+                const PK pk = binpack::BinPack::decode<PK>(*pk_bytes);
+                return get(pk);
+            }
+
+            // ── Count ─────────────────────────────────────────────────────────────────
+
+            /**
+             * Returns the total number of live entities in this table.
+             * Skips value deserialization and blob I/O.
+             */
+            [[nodiscard]] size_t count() const {
+                auto start = std::vector<uint8_t>(pk_prefix_.begin(), pk_prefix_.end());
+                auto end = std::vector<uint8_t>(pk_prefix_.begin(), pk_prefix_.end());
+                detail::increment_be64(end.data());
+                return engine_->count(start, end);
+            }
+
+            // ── Range scan ────────────────────────────────────────────────────────────
+
+            /**
+             * Forward iterator over PackedTable entries in primary-key ascending order.
+             * Tombstones are suppressed; only live entities are yielded.
              */
             class Iterator {
-            public:
-                // Sentinel type for range end.
-                struct Sentinel {};
+                public:
+                    struct Entry {
+                        PK id;
+                        Entity value;
+                    };
 
-                using value_type = Entry;
+                    Iterator(Iterator&&) noexcept = default;
+                    Iterator& operator=(Iterator&&) noexcept = default;
+                    Iterator(const Iterator&) = delete;
+                    Iterator& operator=(const Iterator&) = delete;
 
-                [[nodiscard]] const Entry& operator*()  const noexcept { return *current_; }
-                [[nodiscard]] const Entry* operator->() const noexcept { return &*current_; }
+                    [[nodiscard]] bool has_next() const noexcept { return has_next_; }
 
-                Iterator& operator++() { advance(); return *this; }
+                    /**
+                     * Returns the current entry and advances the iterator.
+                     * Precondition: has_next() == true.
+                     */
+                    [[nodiscard]] Entry next() {
+                        auto [raw_key, raw_val] = *pending_;
 
-                [[nodiscard]] bool operator!=(const Sentinel&) const noexcept {
-                    return current_.has_value();
-                }
-                [[nodiscard]] bool operator==(const Sentinel&) const noexcept {
-                    return !current_.has_value();
-                }
+                        // Decode PK: skip ns_prefix (8 bytes), rest is encoded PK
+                        auto pk_span = std::span<const uint8_t>{raw_key}.subspan(8);
+                        Entry e{binpack::BinPack::decode<PK>(pk_span), binpack::BinPack::decode<Entity>(raw_val),};
+                        advance();
+                        return e;
+                    }
 
-            private:
-                friend class Query;
+                private:
+                    friend class PackedTable;
+                    using RawEntry = std::pair<std::vector<uint8_t>, std::vector<uint8_t>>;
 
-                Iterator(ScanIter                         scan,
-                         std::function<bool(const T&)>    pred,
-                         std::optional<size_t>            limit)
-                    : scan_   {std::move(scan)}
-                    , pred_   {std::move(pred)}
-                    , limit_  {limit}
-                {
-                    advance(); // position at first matching entry
-                }
+                    engine::AkkEngine::ScanIterator iter_;
+                    std::array<uint8_t, 8> ns_prefix_;
+                    std::optional<RawEntry> pending_;
+                    bool has_next_ = false;
 
-                void advance() {
-                    current_.reset();
-                    while (scan_.has_next()) {
-                        if (limit_ && matched_ >= *limit_) return;
-                        auto e = scan_.next();
-                        if (!pred_ || pred_(e.value)) {
-                            current_ = std::move(e);
-                            ++matched_;
+                    Iterator(engine::AkkEngine::ScanIterator iter, std::array<uint8_t, 8> ns_prefix)
+                        : iter_{std::move(iter)}, ns_prefix_{ns_prefix} { advance(); }
+
+                    void advance() {
+                        has_next_ = false;
+                        pending_.reset();
+                        while (iter_.has_next()) {
+                            auto entry = iter_.next();
+                            if (!entry) break;
+                            if (entry->first.size() < 8 || std::memcmp(entry->first.data(), ns_prefix_.data(), 8) != 0) break;
+                            pending_ = std::move(entry);
+                            has_next_ = true;
                             return;
                         }
                     }
-                }
-
-                ScanIter                       scan_;
-                std::function<bool(const T&)>  pred_;
-                std::optional<size_t>          limit_;
-                size_t                         matched_ = 0;
-                std::optional<Entry>           current_;
             };
 
-            // ── Range interface (range-for support) ───────────────────────────
-
-            [[nodiscard]] Iterator begin() const {
-                return Iterator(table_->scan_all(), predicate_, limit_);
+            /**
+             * Scans all entities in ascending primary key order.
+             */
+            [[nodiscard]] Iterator scan_all() const {
+                auto start = std::vector<uint8_t>(pk_prefix_.begin(), pk_prefix_.end());
+                auto end = std::vector<uint8_t>(pk_prefix_.begin(), pk_prefix_.end());
+                detail::increment_be64(end.data());
+                return Iterator(engine_->scan(start, end), pk_prefix_);
             }
-            [[nodiscard]] typename Iterator::Sentinel end() const noexcept {
-                return {};
-            }
-
-            // ── Builder ───────────────────────────────────────────────────────
 
             /**
-             * Adds a filter predicate. Multiple calls compose with AND.
+             * Scans entities with PK >= start_pk, in ascending order.
              */
-            Query& where(std::function<bool(const T&)> pred) {
-                if (predicate_) {
-                    auto prev = std::move(predicate_);
-                    predicate_ = [prev = std::move(prev), pred](const T& t) {
-                        return prev(t) && pred(t);
+            [[nodiscard]] Iterator scan(const PK& start_pk) const {
+                const auto start = make_pk_key(start_pk);
+                auto end = std::vector<uint8_t>(pk_prefix_.begin(), pk_prefix_.end());
+                detail::increment_be64(end.data());
+                return Iterator(engine_->scan(start, end), pk_prefix_);
+            }
+
+            /**
+             * Scans entities with start_pk <= PK < end_pk, in ascending order.
+             */
+            [[nodiscard]] Iterator scan(const PK& start_pk, const PK& end_pk) const {
+                return Iterator(engine_->scan(make_pk_key(start_pk), make_pk_key(end_pk)), pk_prefix_);
+            }
+
+            // ── Query builder ─────────────────────────────────────────────────────────
+
+            using Entry = typename Iterator::Entry;
+
+            /**
+             * Lazy query builder over this table.
+             *
+             * Usage:
+             *   // range-for (lazy, zero intermediate allocation)
+             *   for (const auto& [id, user] : users.query([](const User& u){ return u.age > 18; })) { ... }
+             *
+             *   // fluent builder
+             *   auto vip_adults = users.query()
+             *       .where([](const User& u){ return u.vip; })
+             *       .where([](const User& u){ return u.age >= 18; })
+             *       .limit(10);
+             *
+             *   // terminal shortcuts
+             *   auto first = users.query([](const User& u){ return u.active; }).first();
+             *   bool any   = users.query([](const User& u){ return u.age > 60; }).any();
+             *   size_t n   = users.query([](const User& u){ return u.active; }).count();
+             *   auto vec   = users.query([](const User& u){ return u.active; }).to_vector();
+             */
+            class Query {
+                using ScanIter = Iterator;
+
+                public:
+                    // ── Lazy iterator ─────────────────────────────────────────────────────
+
+                    class Iterator {
+                        public:
+                            struct Sentinel {};
+
+                            using value_type = Entry;
+
+                            [[nodiscard]] const Entry& operator*() const noexcept { return *current_; }
+                            [[nodiscard]] const Entry* operator->() const noexcept { return &*current_; }
+
+                            Iterator& operator++() {
+                                advance();
+                                return *this;
+                            }
+
+                            [[nodiscard]] bool operator!=(const Sentinel&) const noexcept { return current_.has_value(); }
+                            [[nodiscard]] bool operator==(const Sentinel&) const noexcept { return !current_.has_value(); }
+
+                        private:
+                            friend class Query;
+
+                            Iterator(ScanIter scan, std::function<bool(const Entity&)> pred, std::optional<size_t> limit) : scan_{std::move(scan)},
+                                pred_{std::move(pred)},
+                                limit_{limit} { advance(); }
+
+                            void advance() {
+                                current_.reset();
+                                while (scan_.has_next()) {
+                                    if (limit_ && matched_ >= *limit_) return;
+                                    auto e = scan_.next();
+                                    if (!pred_ || pred_(e.value)) {
+                                        current_ = std::move(e);
+                                        ++matched_;
+                                        return;
+                                    }
+                                }
+                            }
+
+                            ScanIter scan_;
+                            std::function<bool(const Entity&)> pred_;
+                            std::optional<size_t> limit_;
+                            size_t matched_ = 0;
+                            std::optional<Entry> current_;
                     };
-                } else {
-                    predicate_ = std::move(pred);
-                }
-                return *this;
-            }
 
-            /**
-             * Stops iteration after n matching entries.
-             * Does not affect count() (which always counts all matches).
-             */
-            Query& limit(size_t n) { limit_ = n; return *this; }
+                    // ── Range interface ───────────────────────────────────────────────────
 
-            // ── Terminal shortcuts ────────────────────────────────────────────
+                    [[nodiscard]] Iterator begin() const { return Iterator(table_->scan_all(), predicate_, limit_); }
+                    [[nodiscard]] typename Iterator::Sentinel end() const noexcept { return {}; }
 
-            /** Returns the first matching entry, or nullopt. */
-            [[nodiscard]] std::optional<Entry> first() const {
-                auto it = begin();
-                if (it != end()) return *it;
-                return std::nullopt;
-            }
+                    // ── Builder ───────────────────────────────────────────────────────────
 
-            /** Returns true if at least one entry matches the predicate. */
-            [[nodiscard]] bool any() const { return first().has_value(); }
+                    Query& where(std::function<bool(const Entity&)> pred) {
+                        if (predicate_) {
+                            auto prev = std::move(predicate_);
+                            predicate_ = [prev = std::move(prev), pred](const Entity& e) { return prev(e) && pred(e); };
+                        }
+                        else { predicate_ = std::move(pred); }
+                        return *this;
+                    }
 
-            /**
-             * Counts all matching entries. Ignores limit().
-             * Iterates the full table — use PackedTable::count() for unfiltered total.
-             */
-            [[nodiscard]] size_t count() const {
-                size_t n = 0;
-                // Bypass limit_ so we count everything that matches.
-                Iterator it(table_->scan_all(), predicate_, std::nullopt);
-                while (it != typename Iterator::Sentinel{}) { ++n; ++it; }
-                return n;
-            }
+                    Query& limit(size_t n) {
+                        limit_ = n;
+                        return *this;
+                    }
 
-            /** Collects all matching entries (up to limit) into a vector. */
-            [[nodiscard]] std::vector<Entry> to_vector() const {
-                std::vector<Entry> result;
-                for (const auto& e : *this) result.push_back(e);
-                return result;
-            }
+                    // ── Terminals ─────────────────────────────────────────────────────────
+
+                    [[nodiscard]] std::optional<Entry> first() const {
+                        auto it = begin();
+                        if (it != end()) return *it;
+                        return std::nullopt;
+                    }
+
+                    [[nodiscard]] bool any() const { return first().has_value(); }
+
+                    [[nodiscard]] size_t count() const {
+                        size_t n = 0;
+                        Iterator it(table_->scan_all(), predicate_, std::nullopt);
+                        while (it != typename Iterator::Sentinel{}) {
+                            ++n;
+                            ++it;
+                        }
+                        return n;
+                    }
+
+                    [[nodiscard]] std::vector<Entry> to_vector() const {
+                        std::vector<Entry> result;
+                        for (const auto& e : *this) result.push_back(e);
+                        return result;
+                    }
+
+                private:
+                    friend class PackedTable;
+                    explicit Query(const PackedTable* table) : table_(table) {}
+
+                    const PackedTable* table_;
+                    std::function<bool(const Entity&)> predicate_;
+                    std::optional<size_t> limit_;
+            };
+
+            [[nodiscard]] Query query() const { return Query(this); }
+            [[nodiscard]] Query query(std::function<bool(const Entity&)> pred) const { return Query(this).where(std::move(pred)); }
+
+            // ── Metadata ─────────────────────────────────────────────────────────────
+
+            [[nodiscard]] std::string_view table_name() const noexcept { return table_name_; }
+            [[nodiscard]] engine::AkkEngine& engine() noexcept { return *engine_; }
+            [[nodiscard]] const engine::AkkEngine& engine() const noexcept { return *engine_; }
 
         private:
-            friend class PackedTable;
-            explicit Query(const PackedTable* table) : table_(table) {}
+            friend class AkkaraDB;
 
-            const PackedTable*            table_;
-            std::function<bool(const T&)> predicate_; ///< nullptr = no filter
-            std::optional<size_t>         limit_;
-        };
+            engine::AkkEngine* engine_ = nullptr;
+            std::string table_name_;
+            std::array<uint8_t, 8> pk_prefix_{};
 
-        /**
-         * Returns a Query builder with no filter applied.
-         * Chain .where() / .limit() before calling a terminal operation.
-         */
-        [[nodiscard]] Query query() const { return Query(this); }
+            struct IndexDef {
+                std::array<uint8_t, 8> prefix;
+                size_t registered_offset; // for find_by validation
+                std::function<std::vector<uint8_t>(const Entity&)> extract_key;
+            };
 
-        /**
-         * Returns a Query builder with the given predicate pre-applied.
-         * Equivalent to query().where(pred).
-         */
-        [[nodiscard]] Query query(std::function<bool(const T&)> pred) const {
-            return Query(this).where(std::move(pred));
-        }
+            std::vector<IndexDef> indexes_;
 
-        // ── Existence / Count ────────────────────────────────────────────────
+            PackedTable() = default;
 
-        /**
-         * Returns true if the given ID has a live (non-deleted) record.
-         * Avoids value copy and blob I/O — significantly faster than get().
-         */
-        [[nodiscard]] bool exists(const ID& id) const {
-            return engine_->exists(make_key(id));
-        }
+            // ── Key construction ──────────────────────────────────────────────────────
 
-        /**
-         * Returns the total number of live entries in this table.
-         * Skips value deserialization and blob I/O.
-         */
-        [[nodiscard]] size_t count() const {
-            std::vector<uint8_t> start(ns_prefix_.begin(), ns_prefix_.end());
-            std::vector<uint8_t> end  (ns_prefix_.begin(), ns_prefix_.end());
-            detail::increment_be64(end.data());
-            return engine_->count(start, end);
-        }
+            [[nodiscard]] std::vector<uint8_t> make_pk_key(const PK& pk) const {
+                std::vector<uint8_t> key(pk_prefix_.begin(), pk_prefix_.end());
+                binpack::BinPack::encode_into(pk, key);
+                return key;
+            }
 
-        // ── Range scan ───────────────────────────────────────────────────────
+            [[nodiscard]] static std::vector<uint8_t> make_index_key(const std::array<uint8_t, 8>& prefix, const std::vector<uint8_t>& field_bytes) {
+                std::vector<uint8_t> key(prefix.begin(), prefix.end());
+                key.insert(key.end(), field_bytes.begin(), field_bytes.end());
+                return key;
+            }
 
-        /**
-         * Scans all entries in this table in ascending ID order.
-         */
-        [[nodiscard]] Iterator scan_all() const {
-            // start = ns_prefix, end = ns_prefix + 1
-            std::vector<uint8_t> start(ns_prefix_.begin(), ns_prefix_.end());
-            std::vector<uint8_t> end  (ns_prefix_.begin(), ns_prefix_.end());
-            detail::increment_be64(end.data()); // end exclusive
-            return Iterator(
-                engine_->scan(start, end),
-                codec_.decode_id,
-                codec_.deserialize,
-                ns_prefix_
-            );
-        }
+            // ── Prefix helpers ────────────────────────────────────────────────────────
 
-        /**
-         * Scans entries with ID >= start_id, in ascending order.
-         */
-        [[nodiscard]] Iterator scan(const ID& start_id) const {
-            const auto start = make_key(start_id);
-            std::vector<uint8_t> end(ns_prefix_.begin(), ns_prefix_.end());
-            detail::increment_be64(end.data());
-            return Iterator(
-                engine_->scan(start, end),
-                codec_.decode_id,
-                codec_.deserialize,
-                ns_prefix_
-            );
-        }
+            [[nodiscard]] static std::array<uint8_t, 8> make_table_prefix(std::string_view name) {
+                const uint64_t h = detail::fnv1a_64(name);
+                std::array<uint8_t, 8> prefix{};
+                detail::write_be64(h, prefix.data());
+                return prefix;
+            }
 
-        /**
-         * Scans entries with start_id <= ID < end_id, in ascending order.
-         */
-        [[nodiscard]] Iterator scan(const ID& start_id, const ID& end_id) const {
-            const auto start = make_key(start_id);
-            const auto end   = make_key(end_id);
-            return Iterator(
-                engine_->scan(start, end),
-                codec_.decode_id,
-                codec_.deserialize,
-                ns_prefix_
-            );
-        }
+            [[nodiscard]] static std::array<uint8_t, 8> make_index_prefix(std::string_view table_name, size_t field_offset) {
+                // Hash input: "<table_name>:index:<field_byte_offset>"
+                // Field byte offset is stable for the same binary + struct layout.
+                char buf[64];
+                const int n = std::snprintf(buf, sizeof(buf), "%zu", field_offset);
+                std::string input;
+                input.reserve(table_name.size() + 8 + static_cast<size_t>(n));
+                input.append(table_name);
+                input.append(":index:");
+                input.append(buf, static_cast<size_t>(n));
+                const uint64_t h = detail::fnv1a_64(input);
+                std::array<uint8_t, 8> prefix{};
+                detail::write_be64(h, prefix.data());
+                return prefix;
+            }
 
-        // ── Metadata ─────────────────────────────────────────────────────────
+            // ── Index entry helpers ───────────────────────────────────────────────────
 
-        [[nodiscard]] std::string_view table_name() const noexcept { return table_name_; }
+            void write_index_entries(const Entity& entity, const PK& pk) {
+                const auto pk_bytes = binpack::BinPack::encode(pk);
+                for (const auto& idx : indexes_) {
+                    const auto idx_key = make_index_key(idx.prefix, idx.extract_key(entity));
+                    engine_->put(idx_key, pk_bytes);
+                }
+            }
 
-        /// Returns the 8-byte namespace prefix used for all keys in this table.
-        [[nodiscard]] std::span<const uint8_t> namespace_prefix() const noexcept {
-            return ns_prefix_;
-        }
-
-        /// Direct access to the underlying engine (for advanced operations).
-        [[nodiscard]] engine::AkkEngine& engine() noexcept { return *engine_; }
-        [[nodiscard]] const engine::AkkEngine& engine() const noexcept { return *engine_; }
-
-    private:
-        engine::AkkEngine*     engine_     = nullptr;
-        std::string            table_name_;
-        std::array<uint8_t, 8> ns_prefix_{};
-        Codec                  codec_;
-
-        PackedTable() = default;
-
-        /**
-         * Builds the full storage key: [ns_prefix (8)] [encoded_id].
-         */
-        [[nodiscard]] std::vector<uint8_t> make_key(const ID& id) const {
-            std::vector<uint8_t> key(ns_prefix_.begin(), ns_prefix_.end());
-            codec_.encode_id(id, key);
-            return key;
-        }
+            void remove_index_entries(const Entity& entity) {
+                for (const auto& idx : indexes_) {
+                    const auto idx_key = make_index_key(idx.prefix, idx.extract_key(entity));
+                    engine_->remove(idx_key);
+                }
+            }
     };
-
 } // namespace akkaradb

@@ -79,6 +79,14 @@ FetchContent_MakeAvailable(zstd)
 set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 set(CMAKE_WARN_DEPRECATED ON CACHE BOOL "" FORCE)
 
+# ── Boost.PFR (header-only, aggregate struct reflection) ─────────────────────
+FetchContent_Declare(
+        boost_pfr
+        GIT_REPOSITORY https://github.com/boostorg/pfr.git
+        GIT_TAG boost-1.84.0
+)
+FetchContent_MakeAvailable(boost_pfr)
+
 # ── mbedTLS (optional TLS support) ─────────────────────────────────────────────
 option(AKKARADB_ENABLE_TLS "Enable TLS support via mbedTLS 3.x" OFF)
 if(AKKARADB_ENABLE_TLS)
@@ -103,10 +111,15 @@ target_sources(akkaradb PUBLIC FILE_SET HEADERS
         BASE_DIRS ${AKKARADB_INCLUDE_DIR}
         FILES
         # High-level ORM / entry-point headers
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/Export.hpp
         ${AKKARADB_INCLUDE_DIR}/akkaradb/detail/Hash.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/Codec.hpp
         ${AKKARADB_INCLUDE_DIR}/akkaradb/PackedTable.hpp
         ${AKKARADB_INCLUDE_DIR}/akkaradb/AkkaraDB.hpp
+        # BinPack serialization layer
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/binpack/detail/WireHelpers.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/binpack/detail/MemberPtrTraits.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/binpack/TypeAdapter.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/binpack/BinPack.hpp
 )
 
 # Public implementation (akkaradb/src)
@@ -246,6 +259,7 @@ target_include_directories(akkaradb
         PUBLIC
         $<BUILD_INTERFACE:${AKKARADB_INCLUDE_DIR}>
         $<BUILD_INTERFACE:${INTERNAL_INCLUDE_DIR}>   # AkkEngine.hpp is part of the public API
+        $<BUILD_INTERFACE:${boost_pfr_SOURCE_DIR}/include>  # Boost.PFR (used in public TypeAdapter.hpp)
         $<INSTALL_INTERFACE:include>
         $<INSTALL_INTERFACE:include/internal>
 )
@@ -264,12 +278,9 @@ if (BUILD_SHARED_LIBS)
     )
 endif ()
 
-# Windows-specific: auto-export all symbols while the public API layer is not
-# yet implemented.  Once __declspec(dllexport) annotations are added to the
-# public headers, flip this back to OFF and control exports explicitly.
 if (WIN32 AND BUILD_SHARED_LIBS)
     set_target_properties(akkaradb PROPERTIES
-            WINDOWS_EXPORT_ALL_SYMBOLS ON
+            WINDOWS_EXPORT_ALL_SYMBOLS OFF
             RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
 endif ()
