@@ -39,6 +39,14 @@ namespace akkaradb::engine::sst {
     // ============================================================================
 
     namespace {
+        /// Comparator for std::lower_bound on a sorted level vector.
+        /// Finds the first SSTMeta whose last_key >= key (i.e., the file that could
+        /// contain key). Used by get(), contains(), and get_into() — defined once here
+        /// to eliminate four identical lambda copies scattered through the read path.
+        constexpr auto kLevelBinCmp = [](const SSTMeta& m, std::span<const uint8_t> k) noexcept {
+            return std::lexicographical_compare(m.last_key.begin(), m.last_key.end(), k.begin(), k.end());
+        };
+
         std::string bytes_to_hex(std::span<const uint8_t> data) {
             static constexpr char kHex[] = "0123456789abcdef";
             std::string result;
@@ -179,20 +187,62 @@ namespace akkaradb::engine::sst {
     }
 
     // ============================================================================
-    // scan
+    // SSTManager::Iterator
     // ============================================================================
 
-    std::vector<core::MemRecord> SSTManager::scan(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key) const {
-        // Take a snapshot of all readers under a brief shared lock.
-        // The readers are kept alive by shared_ptr even if compaction runs.
-        std::vector<std::shared_ptr<SSTReader>> snapshot;
+    bool SSTManager::Iterator::HeapGreater::operator()(const HeapEntry& a, const HeapEntry& b) const noexcept {
+        const int cmp = a.rec.compare_key(b.rec);
+        if (cmp != 0) return cmp > 0; // ascending key order
+        return a.rec.seq() < b.rec.seq(); // higher seq first for same key
+    }
+
+    void SSTManager::Iterator::advance() {
+        while (!heap_.empty()) {
+            // priority_queue exposes only const& on top(); move out via const_cast.
+            auto entry = std::move(const_cast<HeapEntry&>(heap_.top()));
+            heap_.pop();
+
+            // Refill the source iterator that produced this entry.
+            const size_t idx = entry.source_idx;
+            if (iters_[idx].has_next()) { heap_.push({iters_[idx].next(), idx}); }
+
+            // Dedup: skip if this key was already yielded (lower-seq duplicate).
+            const auto k = entry.rec.key();
+            if (!prev_key_.empty() && prev_key_.size() == k.size() && std::equal(prev_key_.begin(), prev_key_.end(), k.begin())) { continue; }
+            prev_key_.assign(k.begin(), k.end());
+            pending_ = std::move(entry.rec);
+            return;
+        }
+        // heap exhausted — pending_ stays nullopt (end of iteration)
+    }
+
+    core::MemRecord SSTManager::Iterator::next() {
+        auto rec = std::move(*pending_);
+        pending_ = std::nullopt;
+        advance();
+        return rec;
+    }
+
+    void SSTManager::Iterator::init(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key) {
+        iters_.reserve(snapshot_.size());
+        for (const auto& rdr : snapshot_) { iters_.push_back(rdr->scan(start_key, end_key)); }
+        // Prime the heap with the first record from each reader.
+        for (size_t i = 0; i < iters_.size(); ++i) { if (iters_[i].has_next()) heap_.push({iters_[i].next(), i}); }
+        advance(); // sets pending_ to the globally-smallest record
+    }
+
+    // ============================================================================
+    // scan_iter  (lazy streaming — preferred for user-facing scans)
+    // ============================================================================
+
+    SSTManager::Iterator SSTManager::scan_iter(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key) const {
+        Iterator it;
         {
             std::shared_lock lock(sst_mu_);
-            for (const auto& meta : levels_[0]) { if (meta.reader) snapshot.push_back(meta.reader); }
+            for (const auto& meta : levels_[0]) { if (meta.reader) it.snapshot_.push_back(meta.reader); }
             for (int lvl = 1; lvl < opts_.max_levels; ++lvl) {
                 for (const auto& meta : levels_[static_cast<size_t>(lvl)]) {
                     if (!meta.reader) continue;
-                    // Quick range filter using file metadata.
                     if (!start_key.empty() && !meta.last_key.empty() && std::lexicographical_compare(
                         meta.last_key.begin(),
                         meta.last_key.end(),
@@ -205,40 +255,22 @@ namespace akkaradb::engine::sst {
                         end_key.begin(),
                         end_key.end()
                     )) continue;
-                    snapshot.push_back(meta.reader);
+                    it.snapshot_.push_back(meta.reader);
                 }
             }
         }
+        if (!it.snapshot_.empty()) it.init(start_key, end_key);
+        return it;
+    }
 
-        if (snapshot.empty()) return {};
+    // ============================================================================
+    // scan  (eager bulk — used by compaction and blob-orphan collection)
+    // ============================================================================
 
-        // Build per-reader scan iterators (I/O happens outside the lock).
-        std::vector<SSTReader::Iterator> iters;
-        iters.reserve(snapshot.size());
-        for (const auto& rdr : snapshot) { iters.push_back(rdr->scan(start_key, end_key)); }
-
-        // k-way merge: smallest key first; equal keys → highest seq first.
-        std::priority_queue<MergeEntry, std::vector<MergeEntry>, MergeEntryGreater> heap;
-        for (size_t i = 0; i < iters.size(); ++i) { if (iters[i].has_next()) heap.push({iters[i].next(), i}); }
-
+    std::vector<core::MemRecord> SSTManager::scan(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key) const {
+        auto it = scan_iter(start_key, end_key);
         std::vector<core::MemRecord> result;
-        std::vector<uint8_t> prev_key;
-
-        while (!heap.empty()) {
-            core::MemRecord rec = heap.top().rec;
-            const size_t idx = heap.top().source_idx;
-            heap.pop();
-
-            if (iters[idx].has_next()) heap.push({iters[idx].next(), idx});
-
-            // Skip lower-seq duplicates of the same key.
-            const auto k = rec.key();
-            if (!prev_key.empty() && prev_key.size() == k.size() && std::equal(prev_key.begin(), prev_key.end(), k.begin())) continue;
-            prev_key.assign(k.begin(), k.end());
-
-            result.push_back(std::move(rec));
-        }
-
+        while (it.has_next()) result.push_back(it.next());
         return result;
     }
 
@@ -413,7 +445,7 @@ namespace akkaradb::engine::sst {
     // flush
     // ============================================================================
 
-    uint64_t SSTManager::flush(std::vector<core::MemRecord> sorted_records) {
+    uint64_t SSTManager::flush(std::span<const core::MemRecord> sorted_records) {
         if (sorted_records.empty()) return 0;
 
         // ── Write L0 SST file (no locks held during I/O) ─────────────────────
@@ -491,10 +523,12 @@ namespace akkaradb::engine::sst {
         if (opts_.sst_cache_capacity > 0) {
             const size_t sidx = cache_shard_idx(key);
             auto& shard = cache_shards_[sidx];
-            const std::string key_str(reinterpret_cast<const char*>(key.data()), key.size());
+            // key_sv avoids heap allocation on the cache-hit path; std::string is
+            // only constructed below when we need to insert a new entry (cache miss).
+            const std::string_view key_sv(reinterpret_cast<const char*>(key.data()), key.size());
             {
                 std::lock_guard lk(shard.mu);
-                if (auto cached = shard.cache_lookup(key_str)) return cached;
+                if (auto cached = shard.cache_lookup(key_sv)) return cached;
             }
 
             std::shared_lock lock(sst_mu_);
@@ -505,7 +539,7 @@ namespace akkaradb::engine::sst {
                 if (rec.has_value()) {
                     lock.unlock();
                     std::lock_guard lk(shard.mu);
-                    shard.cache_put(key_str, *rec);
+                    shard.cache_put(std::string(key_sv), *rec);
                     return rec;
                 }
             }
@@ -513,21 +547,14 @@ namespace akkaradb::engine::sst {
             for (int lvl = 1; lvl < opts_.max_levels; ++lvl) {
                 const auto& level = levels_[static_cast<size_t>(lvl)];
                 if (level.empty()) continue;
-                auto it = std::lower_bound(
-                    level.begin(),
-                    level.end(),
-                    key,
-                    [](const SSTMeta& m, std::span<const uint8_t> k) {
-                        return std::lexicographical_compare(m.last_key.begin(), m.last_key.end(), k.begin(), k.end());
-                    }
-                );
+                auto it = std::lower_bound(level.begin(), level.end(), key, kLevelBinCmp);
                 if (it == level.end() || !it->reader) continue;
                 if (!it->reader->key_in_range(key)) continue;
                 auto rec = it->reader->get(key);
                 if (rec.has_value()) {
                     lock.unlock();
                     std::lock_guard lk(shard.mu);
-                    shard.cache_put(key_str, *rec);
+                    shard.cache_put(std::string(key_sv), *rec);
                     return rec;
                 }
             }
@@ -553,16 +580,7 @@ namespace akkaradb::engine::sst {
         for (int lvl = 1; lvl < nlevels; ++lvl) {
             const auto& level = levels[static_cast<size_t>(lvl)];
             if (level.empty()) continue;
-
-            auto it = std::lower_bound(
-                level.begin(),
-                level.end(),
-                key,
-                [](const SSTMeta& m, std::span<const uint8_t> k) {
-                    return std::lexicographical_compare(m.last_key.begin(), m.last_key.end(), k.begin(), k.end());
-                }
-            );
-
+            auto it = std::lower_bound(level.begin(), level.end(), key, kLevelBinCmp);
             if (it == level.end() || !it->reader) continue;
             if (!it->reader->key_in_range(key)) continue;
             if (auto rec = it->reader->get(key)) return rec;
@@ -605,19 +623,9 @@ namespace akkaradb::engine::sst {
         for (int lvl = 1; lvl < nlevels; ++lvl) {
             const auto& level = levels[static_cast<size_t>(lvl)];
             if (level.empty()) continue;
-
-            // Find the first file whose last_key >= key.
-            auto it = std::lower_bound(
-                level.begin(),
-                level.end(),
-                key,
-                [](const SSTMeta& m, std::span<const uint8_t> k) {
-                    return std::lexicographical_compare(m.last_key.begin(), m.last_key.end(), k.begin(), k.end());
-                }
-            );
+            auto it = std::lower_bound(level.begin(), level.end(), key, kLevelBinCmp);
             if (it == level.end() || !it->reader) continue;
             if (!it->reader->key_in_range(key)) continue;
-
             auto r = it->reader->contains_fast(key, bloom_h);
             if (r.has_value()) return r;
         }
@@ -654,18 +662,9 @@ namespace akkaradb::engine::sst {
         for (int lvl = 1; lvl < nlevels; ++lvl) {
             const auto& level = levels[static_cast<size_t>(lvl)];
             if (level.empty()) continue;
-
-            auto it = std::lower_bound(
-                level.begin(),
-                level.end(),
-                key,
-                [](const SSTMeta& m, std::span<const uint8_t> k) {
-                    return std::lexicographical_compare(m.last_key.begin(), m.last_key.end(), k.begin(), k.end());
-                }
-            );
+            auto it = std::lower_bound(level.begin(), level.end(), key, kLevelBinCmp);
             if (it == level.end() || !it->reader) continue;
             if (!it->reader->key_in_range(key)) continue;
-
             auto r = it->reader->get_into_fast(key, bloom_h, out);
             if (r.has_value()) return r;
         }
@@ -830,11 +829,8 @@ namespace akkaradb::engine::sst {
                 if (accumulated >= opts_.target_file_size_bytes) break;
             }
 
-            // Write this chunk.
-            std::vector<core::MemRecord> chunk(
-                std::make_move_iterator(merged.begin() + static_cast<ptrdiff_t>(chunk_start)),
-                std::make_move_iterator(merged.begin() + static_cast<ptrdiff_t>(chunk_end))
-            );
+            // Write this chunk as a span — no intermediate vector allocation.
+            const auto chunk = std::span<const core::MemRecord>(merged.data() + chunk_start, chunk_end - chunk_start);
 
             const auto path = make_sst_path(dst_level);
             const auto filename = path.filename().string();

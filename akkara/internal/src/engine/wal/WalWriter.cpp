@@ -24,6 +24,7 @@
 #include "core/buffer/PerThreadArena.hpp"
 
 #include <atomic>
+#include <cassert>
 #include <condition_variable>
 #include <filesystem>
 #include <format>
@@ -402,6 +403,11 @@ namespace akkaradb::wal {
                     }
                     else {
                         // Fast mode (Plan 2): lightweight FastEntry, no shared_ptr.
+                        // FastEntry uses uint32_t fields; guard against truncation.
+                        // In practice the arena is swapped every flush cycle so
+                        // write_pos_ never approaches 4 GiB, but we assert defensively.
+                        assert(offset <= UINT32_MAX && "WAL entry arena offset exceeds uint32_t; consider increasing flush frequency");
+                        assert(size <= UINT32_MAX && "WAL entry size exceeds uint32_t; entry is larger than 4 GiB");
                         fast_queue_.push_back(FastEntry{static_cast<uint32_t>(offset), static_cast<uint32_t>(size)});
                     }
                 }
@@ -442,6 +448,10 @@ namespace akkaradb::wal {
                 sleep_cv_.notify_all();
                 if (flusher_.joinable()) flusher_.join();
                 file_.close();
+                // Re-throw any error that occurred during the terminal fdatasync.
+                // This surfaces the "disk full / I/O error on close" condition to
+                // the caller of WalWriter::close() instead of silently losing it.
+                if (term_sync_error_) std::rethrow_exception(term_sync_error_);
             }
 
         private:
@@ -563,9 +573,11 @@ namespace akkaradb::wal {
                 }
 
                 // Final flush: skip if nosync_mode — caller uses force_sync() when needed.
+                // Store any error in term_sync_error_ so stop() can rethrow it;
+                // swallowing a fdatasync failure here would silently violate durability.
                 if (!nosync_mode_) {
                     try { file_.fdatasync(); }
-                    catch (...) {}
+                    catch (...) { term_sync_error_ = std::current_exception(); }
                 }
             }
 
@@ -780,6 +792,9 @@ namespace akkaradb::wal {
 
             std::thread flusher_;
             std::atomic<bool> stopped_;
+            /// Stores an exception from the terminal fdatasync() so stop() can
+            /// rethrow it after joining the flusher thread.
+            std::exception_ptr term_sync_error_;
 
             bool needs_segment_header_;
             uint64_t current_segment_bytes_; ///< Bytes written to the active segment so far

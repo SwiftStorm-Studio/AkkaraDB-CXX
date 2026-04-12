@@ -156,8 +156,8 @@ namespace akkaradb::engine::cluster {
         h[10] = static_cast<uint8_t>(cfg.mode_);
         h[11] = cfg.repl_factor_;
         write_u64(h, 12, now_us());
-        write_u32(h, 20, 0); // crc placeholder
-        std::memset(h + 24, 0, 8); // reserved... wait, crc is at 24?
+        write_u32(h, 20, 0); // crc placeholder (filled in below)
+        std::memset(h + 24, 0, 8); // reserved[0..7]
 
         // Layout: [magic:u32][version:u16][flags:u16][node_count:u16][mode:u8][repl_factor:u8]
         //         [created_at_us:u64][crc32c:u32][reserved:u8×8]

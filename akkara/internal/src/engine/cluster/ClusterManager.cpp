@@ -173,9 +173,13 @@ namespace akkaradb::engine::cluster {
         // Minimal TCP health-check: try connect to host:port, close immediately.
         bool tcp_reachable(const std::string& host, uint16_t port) noexcept {
 #ifdef _WIN32
-            WSADATA wsa{};
-            ::WSAStartup(MAKEWORD(2,2), &wsa);
-            SOCKET s = ::socket(AF_INET, SOCK_STREAM, 0);
+static std::once_flag wsa_once; std::call_once(
+    wsa_once,
+    [] {
+        WSADATA wsa{};
+        ::WSAStartup(MAKEWORD(2, 2), &wsa);
+    }
+); SOCKET s = ::socket(AF_INET, SOCK_STREAM, 0);
             if (s == INVALID_SOCKET) { return false; }
             addrinfo hints{}, *res = nullptr;
             hints.ai_family   = AF_INET;

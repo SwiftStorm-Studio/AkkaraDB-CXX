@@ -25,6 +25,7 @@
 #include <future>
 #include <queue>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace akkaradb::wal {
@@ -46,24 +47,27 @@ namespace akkaradb::wal {
          * Returns false if the stem does not match the expected pattern.
          */
         [[nodiscard]] bool parse_segment_stem(const std::string& stem, uint32_t& out_shard, uint64_t& out_seg) {
-            // Expected: "shard_NNNN_segNNNN"
-            if (stem.size() < 15) return false; // "shard_0000_seg0000" = 18 chars minimum
-            if (stem.substr(0, 6) != "shard_") return false;
+            // Expected: "shard_NNNN_segNNNN" (min 18 chars: "shard_0000_seg0000")
+            if (stem.size() < 15) return false;
 
-            const auto seg_pos = stem.find("_seg", 6);
-            if (seg_pos == std::string::npos) return false;
+            // Use string_view to avoid two heap allocations (shard_str, seg_str).
+            const std::string_view sv{stem};
+            if (sv.substr(0, 6) != "shard_") return false;
 
-            const std::string shard_str = stem.substr(6, seg_pos - 6);
-            const std::string seg_str = stem.substr(seg_pos + 4);
+            const auto seg_pos = sv.find("_seg", 6);
+            if (seg_pos == std::string_view::npos) return false;
+
+            const std::string_view shard_sv = sv.substr(6, seg_pos - 6);
+            const std::string_view seg_sv = sv.substr(seg_pos + 4);
 
             uint32_t shard_id = 0;
             uint64_t segment_id = 0;
 
-            auto [p1, ec1] = std::from_chars(shard_str.data(), shard_str.data() + shard_str.size(), shard_id);
-            if (ec1 != std::errc{} || p1 != shard_str.data() + shard_str.size()) return false;
+            auto [p1, ec1] = std::from_chars(shard_sv.data(), shard_sv.data() + shard_sv.size(), shard_id);
+            if (ec1 != std::errc{} || p1 != shard_sv.data() + shard_sv.size()) return false;
 
-            auto [p2, ec2] = std::from_chars(seg_str.data(), seg_str.data() + seg_str.size(), segment_id);
-            if (ec2 != std::errc{} || p2 != seg_str.data() + seg_str.size()) return false;
+            auto [p2, ec2] = std::from_chars(seg_sv.data(), seg_sv.data() + seg_sv.size(), segment_id);
+            if (ec2 != std::errc{} || p2 != seg_sv.data() + seg_sv.size()) return false;
 
             out_shard = shard_id;
             out_seg = segment_id;
@@ -366,13 +370,18 @@ namespace akkaradb::wal {
         );
 
         // ── 5. Dispatch in order ──────────────────────────────────────────────
+        // entry_buf is declared once here and reused (via resize) for every Record
+        // entry.  The old code allocated a fresh std::vector<std::byte> per record,
+        // causing O(records_replayed) heap allocations during replay.  Reusing a
+        // single buffer reduces that to O(1) (amortized grow-only resize).
+        std::vector<std::byte> entry_buf;
         for (const auto& mr : all_records) {
             switch (mr.type) {
                 case WalEntryType::Record: {
-                    // Reconstruct an owned buffer that matches the serialised layout
-                    // expected by WalRecordOpRef: [WalEntryHeader:8B][AKHdr32:32B][key][val]
+                    // Reconstruct a buffer matching WalRecordOpRef's expected layout:
+                    // [WalEntryHeader:8B][AKHdr32:32B][key][val]
                     const size_t buf_sz = WalEntryHeader::SIZE + sizeof(core::AKHdr32) + mr.key.size() + mr.value.size();
-                    std::vector<std::byte> entry_buf(buf_sz);
+                    entry_buf.resize(buf_sz);
                     core::BufferView bv(entry_buf.data(), buf_sz);
 
                     if (mr.flags & core::AKHdr32::FLAG_TOMBSTONE) {

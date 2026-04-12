@@ -128,7 +128,7 @@ target_sources(akkaradb PRIVATE
 )
 
 # Internal headers (not exposed to users)
-target_sources(akkaradb PRIVATE
+target_sources(akkaradb PRIVATE 
         # Core - Buffer
         ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferView.hpp
         ${INTERNAL_INCLUDE_DIR}/core/buffer/MonotonicArena.hpp
@@ -381,4 +381,36 @@ if (WIN32 AND BUILD_SHARED_LIBS)
             $<TARGET_FILE_DIR:akkaradb_benchmark>
             COMMENT "Copying akkaradb.dll to benchmark executable directory"
     )
+endif()
+
+# ==================== JNI Bridge ====================
+# cmake -DAKKARADB_BUILD_JNI=ON to enable.
+# Produces akkaradb_jni.dll / libakkaradb_jni.so loaded by AkkaraDB.kt.
+option(AKKARADB_BUILD_JNI "Build JNI bridge for JVM integration" OFF)
+
+if(AKKARADB_BUILD_JNI)
+    find_package(JNI REQUIRED)
+
+    add_library(akkaradb_jni SHARED
+            ${AKKARA_ROOT}/jni/AkkaraJni.cpp
+    )
+    target_link_libraries(akkaradb_jni PRIVATE akkaradb)
+    target_include_directories(akkaradb_jni PRIVATE
+            ${JNI_INCLUDE_DIRS}
+            ${INTERNAL_INCLUDE_DIR}
+            ${AKKARADB_INCLUDE_DIR}
+    )
+    set_target_properties(akkaradb_jni PROPERTIES
+            CXX_STANDARD 23
+            CXX_STANDARD_REQUIRED ON
+    )
+    if(WIN32)
+        set_target_properties(akkaradb_jni PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        )
+    endif()
+    message(STATUS "JNI bridge enabled — target: akkaradb_jni")
+endif()
+
+if(WIN32 AND BUILD_SHARED_LIBS AND NOT AKKARADB_BUILD_JNI)
 endif ()

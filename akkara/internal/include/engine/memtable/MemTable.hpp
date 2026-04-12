@@ -56,10 +56,10 @@ namespace akkaradb::engine::memtable {
 
             /**
              * Called by the background flusher with a sorted, sealed batch.
-             * Records are moved in; the callback takes ownership.
+             * The span is valid for the duration of the call; do not store it.
              * Called from a per-shard flusher thread (not the writer thread).
              */
-            using FlushCallback = std::function<void(std::vector<core::MemRecord>)>;
+            using FlushCallback = std::function<void(std::span<const core::MemRecord>)>;
 
             // ── Backend selection ─────────────────────────────────────────────
 

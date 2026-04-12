@@ -283,10 +283,8 @@ namespace akkaradb::engine::memtable {
                         ++in_flight_;
                         lock.unlock();
 
-                        // Records are already sorted — copy into owned batch and hand off.
-                        std::vector<core::MemRecord> batch(*item.vec);
-
-                        if (callback_) callback_(std::move(batch));
+                        // Records are already sorted — pass as span (zero copy).
+                        if (callback_) callback_(std::span<const core::MemRecord>(*item.vec));
                         if (on_done_) on_done_(item.id);
 
                         {
@@ -391,10 +389,11 @@ namespace akkaradb::engine::memtable {
                         if (npos < vecs_[ni]->size() && !past_end(vecs_[ni]->at(npos))) pq_.push(ni);
                     }
 
-                    auto key_vec = std::vector<uint8_t>(rec.key().begin(), rec.key().end());
-                    if (key_vec == last_key_) continue;
+                    // Compare key span directly — avoids per-record vector allocation.
+                    const auto k = rec.key();
+                    if (k.size() == last_key_.size() && std::equal(k.begin(), k.end(), last_key_.begin())) continue;
 
-                    last_key_ = std::move(key_vec);
+                    last_key_.assign(k.begin(), k.end());
                     next_ = std::move(rec);
                     return;
                 }

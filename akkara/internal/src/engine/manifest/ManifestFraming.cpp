@@ -380,8 +380,8 @@ namespace akkaradb::engine::manifest {
 
         if (key_flags & 0x01) {
             out.first_key_hex.emplace(reinterpret_cast<const char*>(payload + off), fk_len);
-            off += fk_len;
         }
+        off += fk_len; // advance unconditionally — fk bytes always occupy fk_len space
         if (key_flags & 0x02) {
             out.last_key_hex.emplace(reinterpret_cast<const char*>(payload + off), lk_len);
         }
@@ -435,12 +435,12 @@ namespace akkaradb::engine::manifest {
 
         if (key_flags & 0x01) {
             out.first_key_hex.emplace(reinterpret_cast<const char*>(payload + off), fk_len);
-            off += fk_len;
         }
+        off += fk_len; // advance unconditionally — fk bytes always occupy fk_len space
         if (key_flags & 0x02) {
             out.last_key_hex.emplace(reinterpret_cast<const char*>(payload + off), lk_len);
-            off += lk_len;
         }
+        off += lk_len; // advance unconditionally — inputs follow immediately
 
         out.inputs.clear();
         out.inputs.reserve(input_count);

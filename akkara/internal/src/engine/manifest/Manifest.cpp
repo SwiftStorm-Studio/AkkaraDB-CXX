@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -219,6 +220,7 @@ namespace akkaradb::engine::manifest {
                     running_ = false;
                     queue_cv_.notify_one();
                     if (flusher_thread_.joinable()) { flusher_thread_.join(); }
+                    if (term_write_error_) { std::rethrow_exception(term_write_error_); }
                 }
                 file_handle_.close();
             }
@@ -450,33 +452,36 @@ namespace akkaradb::engine::manifest {
                 std::vector<std::vector<uint8_t>> batch;
                 batch.reserve(64);
 
-                while (true) {
-                    {
-                        std::unique_lock lock{queue_mutex_};
-                        queue_cv_.wait_for(lock, MAX_WAIT, [this] { return !queue_.empty() || !running_; });
+                try {
+                    while (true) {
+                        {
+                            std::unique_lock lock{queue_mutex_};
+                            queue_cv_.wait_for(lock, MAX_WAIT, [this] { return !queue_.empty() || !running_; });
 
-                        if (!running_ && queue_.empty()) { break; }
-                        std::swap(batch, queue_);
-                    }
-
-                    if (!batch.empty()) {
-                        std::lock_guard rotation_lock{rotation_mutex_};
-                        for (const auto& record : batch) {
-                            check_rotation();
-                            file_handle_.write(record.data(), record.size());
-                            current_file_size_ += record.size();
+                            if (!running_ && queue_.empty()) { break; }
+                            std::swap(batch, queue_);
                         }
-                        file_handle_.fsync_data();
-                        batch.clear();
-                    }
 
-                    auto now = std::chrono::steady_clock::now();
-                    if (now - last_strong_sync_ > std::chrono::seconds(5)) {
-                        std::lock_guard rotation_lock{rotation_mutex_};
-                        file_handle_.fsync_full();
-                        last_strong_sync_ = now;
+                        if (!batch.empty()) {
+                            std::lock_guard rotation_lock{rotation_mutex_};
+                            for (const auto& record : batch) {
+                                check_rotation();
+                                file_handle_.write(record.data(), record.size());
+                                current_file_size_ += record.size();
+                            }
+                            file_handle_.fsync_data();
+                            batch.clear();
+                        }
+
+                        auto now = std::chrono::steady_clock::now();
+                        if (now - last_strong_sync_ > std::chrono::seconds(5)) {
+                            std::lock_guard rotation_lock{rotation_mutex_};
+                            file_handle_.fsync_full();
+                            last_strong_sync_ = now;
+                        }
                     }
                 }
+                catch (...) { term_write_error_ = std::current_exception(); }
             }
 
             // ----------------------------------------------------------------
@@ -547,6 +552,7 @@ namespace akkaradb::engine::manifest {
                 }
 
                 // --- Read records ---
+                std::vector<uint8_t> payload; // reused across records — avoids per-record heap alloc
                 while (file) {
                     uint8_t rhdr_buf[ManifestRecordHeader::SIZE];
                     file.read(reinterpret_cast<char*>(rhdr_buf), ManifestRecordHeader::SIZE);
@@ -558,7 +564,7 @@ namespace akkaradb::engine::manifest {
                         ManifestRecordHeader::deserialize(rhdr_buf);
 
                     if (rhdr.payload_len > 0) {
-                        std::vector<uint8_t> payload(rhdr.payload_len);
+                        payload.resize(rhdr.payload_len);
                         file.read(reinterpret_cast<char*>(payload.data()), rhdr.payload_len);
                         if (!file || file.gcount() < rhdr.payload_len) { break; }
 
@@ -664,6 +670,7 @@ namespace akkaradb::engine::manifest {
             std::condition_variable  queue_cv_;
             std::vector<std::vector<uint8_t>> queue_;
             std::chrono::steady_clock::time_point last_strong_sync_;
+            std::exception_ptr term_write_error_;
 
             // Rotation
             std::mutex            rotation_mutex_;

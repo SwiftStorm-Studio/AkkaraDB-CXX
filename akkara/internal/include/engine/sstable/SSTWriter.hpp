@@ -24,6 +24,7 @@
 #include "core/record/MemRecord.hpp"
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <vector>
 
 namespace akkaradb::engine::sst {
@@ -88,11 +89,7 @@ namespace akkaradb::engine::sst {
              * @throws std::runtime_error on I/O failure.
              * @throws std::invalid_argument if sorted_records is empty.
              */
-            [[nodiscard]] static Result write(
-                const std::filesystem::path&         sst_path,
-                const std::vector<core::MemRecord>&  sorted_records,
-                const Options&                       opts = {}
-            );
+            [[nodiscard]] static Result write(const std::filesystem::path& sst_path, std::span<const core::MemRecord> sorted_records, const Options& opts = {});
 
         private:
             SSTWriter() = delete;

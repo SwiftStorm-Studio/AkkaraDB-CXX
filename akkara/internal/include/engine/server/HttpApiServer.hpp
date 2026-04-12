@@ -21,9 +21,13 @@
 #include "engine/AkkEngine.hpp"
 #include "core/net/TlsStream.hpp"
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 namespace akkaradb::server {
 
@@ -72,12 +76,15 @@ namespace akkaradb::server {
             };
 
             bool read_request(core::TlsStream& stream, ParsedRequest& req);
-            bool route(core::TlsStream& stream, const ParsedRequest& req);
+            /// val_buf is passed in from handle_connection to be reused across
+            /// keep-alive requests, eliminating a per-request heap allocation.
+            bool route(core::TlsStream& stream, const ParsedRequest& req, std::vector<uint8_t>& val_buf);
             void send_response(core::TlsStream& stream, int status_code, std::span<const uint8_t> body);
             void send_empty(core::TlsStream& stream, int status_code);
 
-            static std::string          query_param(const std::string& query,
-                                                    std::string_view   name);
+            /// Extract a named query-string parameter. query and name are string_view
+            /// to avoid copies; returns std::string (decoded value) or empty string.
+            static std::string query_param(std::string_view query, std::string_view name);
             static std::vector<uint8_t> url_decode(std::string_view encoded);
 
             engine::AkkEngine& engine_;

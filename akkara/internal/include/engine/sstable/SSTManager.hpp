@@ -181,9 +181,10 @@ namespace akkaradb::engine::sst {
              * compaction thread (non-blocking — compaction runs asynchronously).
              *
              * @param sorted_records  Key-sorted records from one MemTable shard flush.
+             *                        Accepted as a span — no copy required from caller.
              * @return                max_seq of the written SST (for checkpoint tracking).
              */
-            uint64_t flush(std::vector<core::MemRecord> sorted_records);
+            uint64_t flush(std::span<const core::MemRecord> sorted_records);
 
             // ── Read path ─────────────────────────────────────────────────────
 
@@ -250,10 +251,62 @@ namespace akkaradb::engine::sst {
             // ── Range scan ────────────────────────────────────────────────────
 
             /**
-             * Returns all records in [start_key, end_key) across all SST levels,
-             * sorted by key ascending. Each key appears at most once (highest seq
-             * wins via k-way merge). Tombstones are included — callers must filter
-             * them if needed (AkkEngine::scan() does this in the merge layer).
+             * Lazy k-way merge iterator over all relevant SST readers.
+             *
+             * Yields MemRecords in ascending key order; equal keys deduplicated
+             * by highest-seq-wins.  Tombstones are NOT filtered — the MemTable/SST
+             * merge layer in AkkEngine::ScanIterator::Impl handles that.
+             *
+             * The iterator holds shared_ptrs to all contributing readers so they
+             * remain valid even if a concurrent compaction replaces them.
+             */
+            class Iterator {
+                public:
+                    Iterator() = default;
+                    Iterator(Iterator&&) noexcept = default;
+                    Iterator& operator=(Iterator&&) noexcept = default;
+                    ~Iterator() = default;
+                    Iterator(const Iterator&) = delete;
+                    Iterator& operator=(const Iterator&) = delete;
+
+                    [[nodiscard]] bool has_next() const noexcept { return pending_.has_value(); }
+                    [[nodiscard]] core::MemRecord next();
+
+                private:
+                    friend class SSTManager;
+
+                    struct HeapEntry {
+                        core::MemRecord rec;
+                        size_t source_idx;
+                    };
+
+                    struct HeapGreater {
+                        bool operator()(const HeapEntry& a, const HeapEntry& b) const noexcept;
+                    };
+
+                    std::vector<std::shared_ptr<SSTReader>> snapshot_;
+                    std::vector<SSTReader::Iterator> iters_;
+                    std::priority_queue<HeapEntry, std::vector<HeapEntry>, HeapGreater> heap_;
+                    std::vector<uint8_t> prev_key_;
+                    std::optional<core::MemRecord> pending_;
+
+                    void advance();
+                    void init(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key);
+            };
+
+            /**
+             * Returns a lazy streaming iterator via k-way merge — no intermediate
+             * vector allocation.  Prefer this for AkkEngine::scan() / count().
+             *
+             * @param start_key  Inclusive lower bound (empty = beginning of all SST).
+             * @param end_key    Exclusive upper bound (empty = end of all SST).
+             */
+            [[nodiscard]] Iterator scan_iter(std::span<const uint8_t> start_key = {}, std::span<const uint8_t> end_key = {}) const;
+
+            /**
+             * Eagerly returns all records in [start_key, end_key) as a vector.
+             * Used by compaction and blob-orphan scans where bulk materialization
+             * is acceptable.  Prefer scan_iter() for user-facing scans.
              *
              * @param start_key  Inclusive lower bound (empty = beginning of all SST).
              * @param end_key    Exclusive upper bound (empty = end of all SST).
@@ -302,7 +355,17 @@ namespace akkaradb::engine::sst {
                 mutable std::mutex mu;
                 using LruList = std::list<std::string>;
                 LruList lru; ///< front=MRU, back=LRU
-                std::unordered_map<std::string, std::pair<core::MemRecord, LruList::iterator>> map;
+
+                /// Transparent hasher: accepts both std::string and std::string_view.
+                /// Enables heterogeneous lookup in unordered_map — no std::string
+                /// construction required on the cache-hit hot path.
+                struct StringViewHash {
+                    using is_transparent = void;
+                    size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
+                    size_t operator()(const std::string& s) const noexcept { return std::hash<std::string_view>{}(s); }
+                };
+
+                std::unordered_map<std::string, std::pair<core::MemRecord, LruList::iterator>, StringViewHash, std::equal_to<>> map;
                 size_t capacity = 0; ///< max entries; 0 = disabled
 
                 void cache_put(std::string key, core::MemRecord rec) {
@@ -321,7 +384,8 @@ namespace akkaradb::engine::sst {
                     map.emplace(std::move(key), std::make_pair(std::move(rec), lru.begin()));
                 }
 
-                std::optional<core::MemRecord> cache_lookup(const std::string& key) {
+                /// Zero-allocation lookup: accepts string_view, no heap alloc required.
+                std::optional<core::MemRecord> cache_lookup(std::string_view key) {
                     auto it = map.find(key);
                     if (it == map.end()) return std::nullopt;
                     lru.splice(lru.begin(), lru, it->second.second); // move to MRU

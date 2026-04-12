@@ -220,8 +220,6 @@ namespace akkaradb::engine::memtable {
             std::optional<SplitResult> insert_internal(Node* node, K&& key, V&& value, std::optional<K>& old_key);
             std::optional<SplitResult> insert_into_leaf(LeafNode* leaf, K&& key, V&& value, std::optional<K>& old_key);
             std::optional<SplitResult> insert_into_internal(InternalNode* node, K&& key, V&& value, std::optional<K>& old_key);
-            SplitResult split_leaf(LeafNode* leaf);
-            SplitResult split_internal(InternalNode* node);
             LeafNode* find_leaf(const K& key) const;
 
             /**
@@ -617,16 +615,6 @@ namespace akkaradb::engine::memtable {
         ++node->count;
 
         return std::nullopt;
-    }
-
-    // ── Unused split stubs (splitting is done inline) ─────────────────────────
-
-    template <typename K, typename V, typename Compare>
-    BPTree<K, V, Compare>::SplitResult BPTree<K, V, Compare>::split_leaf(LeafNode*) { throw std::logic_error("split_leaf should not be called directly"); }
-
-    template <typename K, typename V, typename Compare>
-    BPTree<K, V, Compare>::SplitResult BPTree<K, V, Compare>::split_internal(InternalNode*) {
-        throw std::logic_error("split_internal should not be called directly");
     }
 
     // ── Iteration ─────────────────────────────────────────────────────────────

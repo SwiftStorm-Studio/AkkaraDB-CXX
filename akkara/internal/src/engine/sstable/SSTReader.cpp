@@ -336,7 +336,6 @@ namespace akkaradb::engine::sst {
         }
 
         fclose(f);
-        f = nullptr;
 
         // ── Build SSTReader ───────────────────────────────────────────────────
         auto reader = std::unique_ptr<SSTReader>(new SSTReader());

@@ -447,6 +447,29 @@ bool TlsStream::recv_all(uint8_t* data, size_t len) noexcept {
 #endif
 }
 
+size_t TlsStream::recv_some(uint8_t* data, size_t max_len) noexcept {
+    if (max_len == 0) return 0;
+    if (!impl_->tls_) {
+        // Plain TCP: single ::recv call — returns whatever the kernel has buffered.
+        const int chunk = max_len > 65536u ? 65536 : static_cast<int>(max_len);
+        #ifdef _WIN32
+        const int n = ::recv(impl_->fd_, reinterpret_cast<char*>(data), chunk, 0);
+        #else
+        const int n = static_cast<int>(::recv(impl_->fd_, data, static_cast<size_t>(chunk), 0));
+        #endif
+        return n > 0 ? static_cast<size_t>(n) : 0;
+    }
+    #ifdef AKKARADB_TLS_ENABLED
+    for (;;) {
+        const int n = mbedtls_ssl_read(&impl_->ssl_, data, max_len);
+        if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        return n > 0 ? static_cast<size_t>(n) : 0;
+    }
+    #else
+    return 0;
+    #endif
+}
+
 void TlsStream::shutdown() noexcept {
 #ifdef AKKARADB_TLS_ENABLED
     if (impl_->tls_ && impl_->ssl_inited_) {

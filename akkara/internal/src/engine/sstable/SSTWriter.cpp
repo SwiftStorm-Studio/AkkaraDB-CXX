@@ -159,11 +159,7 @@ namespace akkaradb::engine::sst {
     // SSTWriter::write
     // ============================================================================
 
-    SSTWriter::Result SSTWriter::write(
-        const std::filesystem::path&        sst_path,
-        const std::vector<core::MemRecord>& sorted_records,
-        const Options&                      opts)
-    {
+    SSTWriter::Result SSTWriter::write(const std::filesystem::path& sst_path, std::span<const core::MemRecord> sorted_records, const Options& opts) {
         if (sorted_records.empty()) {
             throw std::invalid_argument("SSTWriter::write: sorted_records must be non-empty");
         }

@@ -62,27 +62,10 @@ namespace akkaradb::engine::cluster {
     // ============================================================================
 
     void ReplClientHello::serialize(uint8_t out[SIZE]) const noexcept {
-        put_u32(out,   magic);
-        put_u64(out+4, node_id);
-        put_u64(out+12, last_seq);
-        put_u16(out+20, flags); // wait, SIZE=18: 4+8+8+? = 20 but SIZE=18
-        // Layout: magic(4) + node_id(8) + last_seq(8) - no room for flags at 18B
-        // Correction: flags is not included in 18-byte layout - remove or recalc
-        // Actual: 4+8+8 = 20 ≠ 18. The plan says 18 but struct is 18. Let me fix:
-        // magic(4) + node_id(8) + last_seq(8) = 20 bytes. static_assert fires at 18.
-        // Looking at the header: static_assert(sizeof == 18) will fail if struct is 20.
-        // The pragma pack fields: u32(4) + u64(8) + u64(8) + u16(2) = 22 ≠ 18.
-        // The plan says 18 bytes. Let me use: magic(4)+node_id(8)+last_seq(4)+flags(2)=18.
-        // Actually let me just use the actual struct size.
-        // Since we have pragma pack(1) and the fields are u32+u64+u64+u16 = 22 bytes,
-        // the static_assert(sizeof==18) was wrong in the header. Let me update.
-        // For now: the header already defined the struct and static_assert. Let me
-        // just serialize correctly.
         put_u32(out,    magic);    // 0..3
         put_u64(out+4,  node_id);  // 4..11
         put_u64(out+12, last_seq); // 12..19
         put_u16(out+20, flags);    // 20..21
-        // SIZE = 22 in practice (corrected below)
     }
 
     ReplClientHello ReplClientHello::deserialize(const uint8_t in[SIZE]) noexcept {
@@ -119,27 +102,12 @@ namespace akkaradb::engine::cluster {
     // ============================================================================
 
     void ReplEntryHeader::serialize(uint8_t out[SIZE]) const noexcept {
-        out[0]  = msg_type;
-        put_u64(out+1,  seq);
-        out[9]  = wal_type;
-        put_u16(out+10, key_len);
-        put_u32(out+12, val_len);
-        // crc32c at offset 16? No: 1+8+1+2+4 = 16 bytes total, crc at last 4
-        // Correction: SIZE=16, layout: [1]+[8]+[1]+[2]+[4] = 16 ✓ — no room for crc
-        // Actually: msg_type(1)+seq(8)+wal_type(1)+key_len(2)+val_len(4)+crc32c(4) = 20
-        // The static_assert says SIZE=16, but struct fields sum to 20.
-        // Let me fix: remove crc from header (crc is appended after key+val in encode_repl_entry)
-        // OR adjust SIZE. For correctness: 1+8+1+2+4+4=20=SIZE.
-        // The static_assert in .hpp says SIZE=16 and sizeof==16 - so field list must be 16 bytes.
-        // Fields: u8+u64+u8+u16+u32+u32 = 1+8+1+2+4+4=20. Doesn't match 16.
-        // Let me use SIZE=20 by fixing the assert.
-        // For now serialize correctly:
-        out[0] = msg_type;
-        put_u64(out+1,  seq);
-        out[9] = wal_type;
-        put_u16(out+10, key_len);
-        put_u32(out+12, val_len);
-        put_u32(out+16, crc32c);
+        out[0] = msg_type; // 0
+        put_u64(out + 1, seq); // 1..8
+        out[9] = wal_type; // 9
+        put_u16(out + 10, key_len); // 10..11
+        put_u32(out + 12, val_len); // 12..15
+        put_u32(out + 16, crc32c); // 16..19
     }
 
     ReplEntryHeader ReplEntryHeader::deserialize(const uint8_t in[SIZE]) noexcept {
@@ -201,15 +169,11 @@ namespace akkaradb::engine::cluster {
         std::span<const uint8_t> key,
         std::span<const uint8_t> val
     ) {
-        // CRC covers key + val
-        const uint32_t crc = [&] {
-            // Compute over key then val using incremental CRC (if available).
-            // For simplicity, concatenate into a temp buffer.
-            std::vector<uint8_t> tmp(key.size() + val.size());
-            std::memcpy(tmp.data(),              key.data(), key.size());
-            std::memcpy(tmp.data() + key.size(), val.data(), val.size());
-            return core::CRC32C::compute(tmp.data(), tmp.size());
-        }();
+        // Allocate the full message buffer and copy payload first so CRC can be
+        // computed directly from the already-in-place bytes — no extra allocation.
+        std::vector<uint8_t> msg(ReplEntryHeader::SIZE + key.size() + val.size());
+        std::memcpy(msg.data() + ReplEntryHeader::SIZE, key.data(), key.size());
+        std::memcpy(msg.data() + ReplEntryHeader::SIZE + key.size(), val.data(), val.size());
 
         ReplEntryHeader hdr{};
         hdr.msg_type = static_cast<uint8_t>(ReplMsgType::Entry);
@@ -217,12 +181,8 @@ namespace akkaradb::engine::cluster {
         hdr.wal_type = static_cast<uint8_t>(wal_type);
         hdr.key_len  = static_cast<uint16_t>(key.size());
         hdr.val_len  = static_cast<uint32_t>(val.size());
-        hdr.crc32c   = crc;
-
-        std::vector<uint8_t> msg(ReplEntryHeader::SIZE + key.size() + val.size());
+        hdr.crc32c = core::CRC32C::compute(msg.data() + ReplEntryHeader::SIZE, key.size() + val.size());
         hdr.serialize(msg.data());
-        std::memcpy(msg.data() + ReplEntryHeader::SIZE, key.data(), key.size());
-        std::memcpy(msg.data() + ReplEntryHeader::SIZE + key.size(), val.data(), val.size());
         return msg;
     }
 

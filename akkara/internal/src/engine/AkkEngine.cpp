@@ -55,9 +55,10 @@ namespace akkaradb::engine {
 
     class AkkEngine::ScanIterator::Impl {
         public:
-            Impl(memtable::MemTable::RangeIterator mt_iter, std::vector<core::MemRecord> sst_records, blob::BlobManager* blob_mgr)
-                : mt_iter_(std::move(mt_iter)), sst_records_(std::move(sst_records)), blob_mgr_(blob_mgr) {
+            Impl(memtable::MemTable::RangeIterator mt_iter, sst::SSTManager::Iterator sst_iter, blob::BlobManager* blob_mgr)
+                : mt_iter_(std::move(mt_iter)), sst_iter_(std::move(sst_iter)), blob_mgr_(blob_mgr) {
                 advance_mt();
+                advance_sst();
                 pre_compute();
             }
 
@@ -72,32 +73,32 @@ namespace akkaradb::engine {
         private:
             memtable::MemTable::RangeIterator mt_iter_;
             std::optional<core::MemRecord> mt_cur_; ///< peeked MemTable record
-            std::vector<core::MemRecord> sst_records_;
-            size_t sst_idx_ = 0;
+            sst::SSTManager::Iterator sst_iter_; ///< lazy k-way merge over SST
+            std::optional<core::MemRecord> sst_cur_; ///< peeked SST record
             blob::BlobManager* blob_mgr_ = nullptr;
 
             std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> pending_;
 
-            void advance_mt() { mt_cur_ = (mt_iter_.has_next()) ? mt_iter_.next() : std::nullopt; }
+            void advance_mt() { mt_cur_ = mt_iter_.has_next() ? mt_iter_.next() : std::optional<core::MemRecord>{}; }
+            void advance_sst() { sst_cur_ = sst_iter_.has_next() ? sst_iter_.next() : std::optional<core::MemRecord>{}; }
 
             void pre_compute() { pending_ = pick_one(); }
 
             std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> pick_one() {
-                while (mt_cur_.has_value() || sst_idx_ < sst_records_.size()) {
+                while (mt_cur_.has_value() || sst_cur_.has_value()) {
                     const bool mt_ok = mt_cur_.has_value();
-                    const bool sst_ok = sst_idx_ < sst_records_.size();
+                    const bool sst_ok = sst_cur_.has_value();
 
                     // Compare keys to determine which source wins.
                     int cmp = 0;
                     if (mt_ok && sst_ok) {
                         const auto mk = mt_cur_->key();
-                        const auto sk = sst_records_[sst_idx_].key();
+                        const auto sk = sst_cur_->key();
                         cmp = std::ranges::lexicographical_compare(mk, sk) ? -1 : std::ranges::lexicographical_compare(sk, mk) ? 1 : 0;
                     }
                     else { cmp = mt_ok ? -1 : 1; }
 
-                    // Extract winner without requiring default-constructible MemRecord.
-                    auto process = [&](const core::MemRecord& rec) -> std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> {
+                    auto process = [&](core::MemRecord rec) -> std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> {
                         if (rec.is_tombstone()) return std::nullopt;
                         const auto key_sp = rec.key();
                         std::vector<uint8_t> key_vec(key_sp.begin(), key_sp.end());
@@ -112,15 +113,16 @@ namespace akkaradb::engine {
                     };
 
                     if (cmp <= 0) {
-                        // MemTable wins (or tie → MemTable wins since it is newer)
+                        // MemTable wins (or tie → MemTable is newer)
                         core::MemRecord rec = std::move(*mt_cur_);
                         advance_mt();
-                        if (cmp == 0) ++sst_idx_; // skip the matching SST entry
+                        if (cmp == 0) advance_sst(); // skip matching SST entry
                         if (auto r = process(std::move(rec))) return r;
                     }
                     else {
                         // SST wins
-                        core::MemRecord rec = std::move(sst_records_[sst_idx_++]);
+                        core::MemRecord rec = std::move(*sst_cur_);
+                        advance_sst();
                         if (auto r = process(std::move(rec))) return r;
                     }
                 }
@@ -502,7 +504,7 @@ namespace akkaradb::engine {
             // with a sorted batch of MemRecords.  SSTManager::flush() writes
             // the batch to a new L0 SST file and triggers compaction if needed.
             impl->memtable_->set_flush_callback(
-                [sst_mgr = impl->sst_manager_.get()](std::vector<core::MemRecord> records) { if (!records.empty()) sst_mgr->flush(std::move(records)); }
+                [sst_mgr = impl->sst_manager_.get()](std::span<const core::MemRecord> records) { if (!records.empty()) sst_mgr->flush(records); }
             );
         }
 
@@ -539,7 +541,10 @@ namespace akkaradb::engine {
             }
 
             // SST: all records from all levels (over-inclusive, see above)
-            if (impl->sst_manager_) { for (const auto& rec : impl->sst_manager_->scan({}, {})) { collect_blob_refs(rec); } }
+            if (impl->sst_manager_) {
+                auto it = impl->sst_manager_->scan_iter({}, {});
+                while (it.has_next()) collect_blob_refs(it.next());
+            }
 
             impl->blob_manager_->scan_orphans([&referenced](uint64_t id) { return referenced.contains(id); });
         }
@@ -820,13 +825,11 @@ namespace akkaradb::engine {
         const std::vector<uint8_t> end_vec(end_key.begin(), end_key.end());
         auto mt_iter = impl_->memtable_->iterator(memtable::MemTable::KeyRange{start_vec, end_vec});
 
-        // Collect SST records (tombstones included — Impl handles suppression)
-        std::vector<core::MemRecord> sst_records;
-        if (impl_->sst_manager_) sst_records = impl_->sst_manager_->scan(start_key, end_key);
+        // SST lazy iterator — no intermediate vector; blob I/O skipped (nullptr blob_mgr)
+        sst::SSTManager::Iterator sst_iter;
+        if (impl_->sst_manager_) sst_iter = impl_->sst_manager_->scan_iter(start_key, end_key);
 
-        // Pass blob_mgr = nullptr → blob I/O skipped; FLAG_BLOB records are still
-        // counted correctly because we only need existence, not the actual value.
-        auto iter_impl = std::make_unique<ScanIterator::Impl>(std::move(mt_iter), std::move(sst_records), nullptr);
+        auto iter_impl = std::make_unique<ScanIterator::Impl>(std::move(mt_iter), std::move(sst_iter), nullptr);
 
         ScanIterator it(std::move(iter_impl));
         size_t n = 0;
@@ -1068,16 +1071,14 @@ namespace akkaradb::engine {
 
         auto mt_iter = impl_->memtable_->iterator(mt_range);
 
-        // ── 2. SST scan (snapshot under reader shared_ptrs) ───────────────────
-        std::vector<core::MemRecord> sst_records;
-        if (impl_->sst_manager_) {
-            sst_records = impl_->sst_manager_->scan(start_key, end_key);
-        }
+        // ── 2. SST lazy scan iterator (no intermediate vector allocation) ────────
+        sst::SSTManager::Iterator sst_iter;
+        if (impl_->sst_manager_) { sst_iter = impl_->sst_manager_->scan_iter(start_key, end_key); }
 
         // ── 3. Build merge iterator ───────────────────────────────────────────
         auto impl = std::make_unique<ScanIterator::Impl>(
             std::move(mt_iter),
-            std::move(sst_records),
+            std::move(sst_iter),
             impl_->blob_manager_.get()
         );
         return ScanIterator(std::move(impl));

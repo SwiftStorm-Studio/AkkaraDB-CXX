@@ -101,6 +101,10 @@ public:
 
     bool send_all(const uint8_t* data, size_t len) noexcept;
     bool recv_all(uint8_t* data, size_t len) noexcept;
+    /// Read up to max_len bytes in a single syscall.
+    /// Returns bytes read (> 0), or 0 on connection close / error.
+    /// Unlike recv_all, this may return fewer bytes than requested.
+    size_t recv_some(uint8_t* data, size_t max_len) noexcept;
     /// TLS close_notify + does NOT close the underlying fd.
     void shutdown() noexcept;
 

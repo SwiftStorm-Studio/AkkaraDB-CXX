@@ -131,9 +131,10 @@ namespace akkaradb::engine::blob {
             if (h == INVALID_HANDLE_VALUE)
                 throw std::runtime_error("BlobManager: blob file not found: " + path.string());
 
-            LARGE_INTEGER sz{};
-            GetFileSizeEx(h, &sz);
-            std::vector<uint8_t> buf(static_cast<size_t>(sz.QuadPart));
+            LARGE_INTEGER sz{}; if (!GetFileSizeEx(h, &sz)) {
+                CloseHandle(h);
+                throw std::runtime_error("BlobManager: GetFileSizeEx failed: " + path.string());
+            } std::vector<uint8_t> buf(static_cast<size_t>(sz.QuadPart));
 
             DWORD nread = 0;
             size_t offset = 0;
@@ -141,7 +142,7 @@ namespace akkaradb::engine::blob {
                 DWORD chunk = (buf.size() - offset > 0x40000000u)
                     ? 0x40000000u
                     : static_cast<DWORD>(buf.size() - offset);
-                if (!ReadFile(h, buf.data() + offset, chunk, &nread, nullptr)) {
+                if (!ReadFile(h, buf.data() + offset, chunk, &nread, nullptr) || nread == 0) {
                     CloseHandle(h);
                     throw std::runtime_error("BlobManager: read error");
                 }
@@ -154,8 +155,12 @@ namespace akkaradb::engine::blob {
             if (fd < 0)
                 throw std::runtime_error("BlobManager: blob file not found: " + path.string());
 
-            off_t sz = ::lseek(fd, 0, SEEK_END);
-            ::lseek(fd, 0, SEEK_SET);
+const off_t sz = ::lseek(fd, 0, SEEK_END);
+if (sz < 0) {
+    ::close(fd);
+    throw std::runtime_error("BlobManager: lseek failed: " + path.string());
+}
+::lseek(fd, 0, SEEK_SET);
             std::vector<uint8_t> buf(static_cast<size_t>(sz));
 
             size_t offset = 0;
@@ -440,16 +445,15 @@ namespace akkaradb::engine::blob {
         auto content = read(blob_id);
         const uint32_t actual = core::CRC32C::compute(content.data(), content.size());
         if (actual != expected_checksum) {
+            auto hex32 = [](uint32_t v) {
+                char buf[9];
+                std::snprintf(buf, sizeof(buf), "%08x", v);
+                return std::string(buf);
+            };
             throw std::runtime_error(
-                "BlobManager: content CRC32C mismatch for blob " + std::to_string(blob_id) + " (expected=0x" + [](uint32_t v) {
-                    char buf[9];
-                    std::snprintf(buf, sizeof(buf), "%08x", v);
-                    return std::string(buf);
-                }(expected_checksum) + " actual=0x" + [](uint32_t v) {
-                    char buf[9];
-                    std::snprintf(buf, sizeof(buf), "%08x", v);
-                    return std::string(buf);
-                }(actual) + ")"
+                "BlobManager: content CRC32C mismatch for blob " + std::to_string(blob_id) + " (expected=0x" + hex32(expected_checksum) + " actual=0x" + hex32(
+                    actual
+                ) + ")"
             );
         }
         return content;

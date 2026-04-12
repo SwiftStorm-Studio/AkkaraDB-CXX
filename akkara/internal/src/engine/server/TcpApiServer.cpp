@@ -31,6 +31,7 @@
 #endif
 
 #include <cstring>
+#include <format>
 #include <stdexcept>
 
 #ifdef _WIN32
@@ -82,8 +83,7 @@ namespace akkaradb::server {
         if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
             ::listen(fd, 16) != 0) {
             close_sock(fd);
-            throw std::runtime_error("TcpApiServer: bind/listen failed on port "
-                                     + std::to_string(port_));
+            throw std::runtime_error(std::format("TcpApiServer: bind/listen failed on port {}", port_));
         }
 
         listen_fd_ = static_cast<int>(fd);
@@ -134,7 +134,10 @@ namespace akkaradb::server {
         // (We don't have direct fd here; TCP_NODELAY is a best-effort optimisation
         //  that can also be applied at accept_loop level if needed.)
 
-        std::vector<uint8_t> key_buf, val_buf, resp_buf;
+        // All four buffers are allocated once per connection and grown as needed.
+        // key_buf/val_buf/resp_buf were already outside the loop; out_buf joins them
+        // to eliminate the per-Get heap allocation that existed inside the switch.
+        std::vector<uint8_t> key_buf, val_buf, resp_buf, out_buf;
 
         while (running_.load(std::memory_order_relaxed)) {
             // ── Read request header ───────────────────────────────────────────
@@ -181,10 +184,8 @@ namespace akkaradb::server {
                     break;
                 }
                 case ApiOp::Get: {
-                    std::vector<uint8_t> out;
-                    if (engine_.get_into(key, out)) {
-                        encode_response(ApiStatus::Ok, hdr.request_id, out, resp_buf);
-                    } else {
+                    out_buf.clear();
+                    if (engine_.get_into(key, out_buf)) { encode_response(ApiStatus::Ok, hdr.request_id, out_buf, resp_buf); } else {
                         encode_response(ApiStatus::NotFound, hdr.request_id, {}, resp_buf);
                     }
                     break;

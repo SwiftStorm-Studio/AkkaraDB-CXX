@@ -299,8 +299,15 @@ namespace akkaradb::engine::cluster {
             if (!rs->stream->send_all(wire.data(), wire.size())) {
                 rs->dead.store(true, std::memory_order_release);
                 rs->stream->shutdown();
-                close_sock(rs->sock);
-                rs->sock = BAD_SOCK;
+                {
+                    // Guard rs->sock under queue_mtx to prevent double-close
+                    // races with recv_loop's concurrent shutdown path.
+                    std::lock_guard<std::mutex> lk(rs->queue_mtx);
+                    if (sock_ok(rs->sock)) {
+                        close_sock(rs->sock);
+                        rs->sock = BAD_SOCK;
+                    }
+                }
                 break;
             }
         }
@@ -331,9 +338,13 @@ namespace akkaradb::engine::cluster {
         // Signal send_loop to exit
         rs->dead.store(true, std::memory_order_release);
         if (rs->stream) rs->stream->shutdown();
-        if (sock_ok(rs->sock)) {
-            close_sock(rs->sock);
-            rs->sock = BAD_SOCK;
+        {
+            // Guard rs->sock under queue_mtx — same lock used by send_loop's close path.
+            std::lock_guard<std::mutex> lk(rs->queue_mtx);
+            if (sock_ok(rs->sock)) {
+                close_sock(rs->sock);
+                rs->sock = BAD_SOCK;
+            }
         }
         rs->queue_cv.notify_all();
 
@@ -485,9 +496,12 @@ namespace akkaradb::engine::cluster {
         for (auto& rs : to_join) {
             rs->dead.store(true, std::memory_order_release);
             if (rs->stream) rs->stream->shutdown();
-            if (sock_ok(rs->sock)) {
-                close_sock(rs->sock);
-                rs->sock = BAD_SOCK;
+            {
+                std::lock_guard<std::mutex> lk(rs->queue_mtx);
+                if (sock_ok(rs->sock)) {
+                    close_sock(rs->sock);
+                    rs->sock = BAD_SOCK;
+                }
             }
             rs->queue_cv.notify_all();
         }

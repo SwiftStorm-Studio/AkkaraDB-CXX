@@ -29,6 +29,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstring>
 #include <format>
@@ -50,6 +51,44 @@
 #endif
 
 namespace akkaradb::server {
+    namespace {
+        // ── HTTP protocol constants ───────────────────────────────────────────
+
+        /// Maximum byte length of a single HTTP header or request line.
+        constexpr size_t kMaxHttpLineBytes = 8192;
+
+        /// Maximum allowed Content-Length — prevents memory exhaustion from
+        /// malicious clients sending a huge value (DoS guard).
+        constexpr size_t kMaxContentLength = 64u * 1024 * 1024; // 64 MiB
+
+        /// Receive buffer size for the buffered line reader.
+        /// Reduces syscall count from O(request_bytes) to O(request_bytes / kRecvBufSize).
+        constexpr size_t kRecvBufSize = 4096;
+
+        // ── Case-insensitive helpers ──────────────────────────────────────────
+        // Both helpers expect `prefix`/`needle` to already be lowercase, and
+        // do the tolower conversion only on the haystack side.  This avoids
+        // allocating a lowercased copy of every incoming header line.
+
+        /// Returns true if `line` starts with `prefix` (case-insensitively).
+        bool iequal_prefix(std::string_view line, std::string_view prefix) noexcept {
+            if (line.size() < prefix.size()) return false;
+            for (size_t i = 0; i < prefix.size(); ++i) { if (static_cast<char>(::tolower(static_cast<unsigned char>(line[i]))) != prefix[i]) return false; }
+            return true;
+        }
+
+        /// Returns true if `haystack` contains `needle` (case-insensitively).
+        bool icontains(std::string_view haystack, std::string_view needle) noexcept {
+            if (needle.empty()) return true;
+            if (haystack.size() < needle.size()) return false;
+            for (size_t i = 0; i <= haystack.size() - needle.size(); ++i) {
+                bool ok = true;
+                for (size_t j = 0; j < needle.size() && ok; ++j) ok = (static_cast<char>(::tolower(static_cast<unsigned char>(haystack[i + j]))) == needle[j]);
+                if (ok) return true;
+            }
+            return false;
+        }
+    } // namespace
 
     // ── factory / ctor ────────────────────────────────────────────────────────
 
@@ -66,7 +105,6 @@ namespace akkaradb::server {
     void HttpApiServer::start() {
         init_winsock_http();
 
-        // Initialise TLS context if enabled
         tls_ctx_ = core::TlsContext::make_server(tls_cfg_);
 
         const sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -84,8 +122,7 @@ namespace akkaradb::server {
         if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
             ::listen(fd, 16) != 0) {
             close_sock(fd);
-            throw std::runtime_error("HttpApiServer: bind/listen failed on port "
-                                     + std::to_string(port_));
+            throw std::runtime_error(std::format("HttpApiServer: bind/listen failed on port {}", port_));
         }
 
         listen_fd_ = static_cast<int>(fd);
@@ -120,7 +157,7 @@ namespace akkaradb::server {
                     stream->shutdown();
                 }
                 catch (...) {
-                    // TLS handshake failure or other error — just close the socket
+                    // TLS handshake failure or connection error — socket is closed below
                 }
                 close_sock(client);
             }).detach();
@@ -130,19 +167,39 @@ namespace akkaradb::server {
     // ── HTTP request parsing ──────────────────────────────────────────────────
 
     bool HttpApiServer::read_request(core::TlsStream& stream, ParsedRequest& req) {
-        // Read one line (up to \r\n) using TlsStream::recv_all byte-by-byte
-        auto recv_line = [&](std::string& line, size_t max = 8192) -> bool {
+        // ── Buffered line reader ──────────────────────────────────────────────
+        // recv_some() fills a 4 KB stack buffer in one syscall.  The old
+        // byte-by-byte approach issued O(request_bytes) syscalls (~500 for a
+        // typical request); this reduces that to O(request_bytes / kRecvBufSize).
+        // The buffer is stack-allocated — no heap allocation per request.
+        std::array<uint8_t, kRecvBufSize> rbuf;
+        size_t rbuf_pos = 0, rbuf_len = 0;
+
+        const auto refill = [&]() -> bool {
+            rbuf_len = stream.recv_some(rbuf.data(), rbuf.size());
+            rbuf_pos = 0;
+            return rbuf_len > 0;
+        };
+
+        const auto read_byte = [&](char& c) -> bool {
+            if (rbuf_pos >= rbuf_len && !refill()) return false;
+            c = static_cast<char>(rbuf[rbuf_pos++]);
+            return true;
+        };
+
+        // Read one CRLF-terminated line. Returns false on error or line overflow.
+        const auto recv_line = [&](std::string& line) -> bool {
             line.clear();
             char c;
-            while (line.size() < max) {
-                if (!stream.recv_all(reinterpret_cast<uint8_t*>(&c), 1)) return false;
+            while (line.size() < kMaxHttpLineBytes) {
+                if (!read_byte(c)) return false;
                 if (c == '\n') {
                     if (!line.empty() && line.back() == '\r') line.pop_back();
                     return true;
                 }
                 line += c;
             }
-            return false; // line too long
+            return false; // line too long → reject request
         };
 
         std::string line;
@@ -160,29 +217,42 @@ namespace akkaradb::server {
         req.path  = (qmark == std::string::npos) ? target : target.substr(0, qmark);
         req.query = (qmark == std::string::npos) ? "" : target.substr(qmark + 1);
 
-        // Headers
+        // ── Headers ───────────────────────────────────────────────────────────
+        // iequal_prefix / icontains compare case-insensitively without allocating
+        // a lowercased copy of the header line (eliminates 8-12 allocs/request).
         size_t content_length = 0;
         req.keep_alive = true;
         while (recv_line(line)) {
-            if (line.empty()) break;  // end of headers
-            // Case-insensitive header matching
-            std::string lower = line;
-            std::transform(lower.begin(), lower.end(), lower.begin(),
-                       [](unsigned char c) -> char { return static_cast<char>(::tolower(c)); });
-
-            if (lower.starts_with("content-length:")) {
-                const auto val = line.substr(line.find(':') + 1);
-                std::from_chars(val.data() + val.find_first_not_of(' '),
-                                val.data() + val.size(), content_length);
-            } else if (lower.starts_with("connection:")) {
-                if (lower.find("close") != std::string::npos) req.keep_alive = false;
+            if (line.empty()) break; // blank line = end of headers
+            if (iequal_prefix(line, "content-length:")) {
+                const auto colon = line.find(':');
+                std::string_view val{line.data() + colon + 1, line.size() - colon - 1};
+                while (!val.empty() && val.front() == ' ') val.remove_prefix(1);
+                const auto res = std::from_chars(val.data(), val.data() + val.size(), content_length);
+                if (res.ec != std::errc{}) return false; // malformed → reject
+                if (content_length > kMaxContentLength) return false; // DoS guard
+            }
+            else if (iequal_prefix(line, "connection:")) {
+                const auto colon = line.find(':');
+                const std::string_view val{line.data() + colon + 1, line.size() - colon - 1};
+                if (icontains(val, "close")) req.keep_alive = false;
             }
         }
 
-        // Body
+        // ── Body ─────────────────────────────────────────────────────────────
+        // Bytes already in rbuf (pipelined with headers) are drained first;
+        // the remainder is read via recv_all.
         if (content_length > 0) {
             req.body.resize(content_length);
-            if (!stream.recv_all(req.body.data(), content_length)) return false;
+            size_t body_pos = 0;
+            const size_t buffered = rbuf_len - rbuf_pos;
+            if (buffered > 0) {
+                const size_t take = std::min(buffered, content_length);
+                std::memcpy(req.body.data(), rbuf.data() + rbuf_pos, take);
+                rbuf_pos += take;
+                body_pos = take;
+            }
+            if (body_pos < content_length) { if (!stream.recv_all(req.body.data() + body_pos, content_length - body_pos)) return false; }
         }
         return true;
     }
@@ -194,11 +264,17 @@ namespace akkaradb::server {
         out.reserve(encoded.size());
         for (size_t i = 0; i < encoded.size(); ++i) {
             if (encoded[i] == '%' && i + 2 < encoded.size()) {
-                const char hex[3] = { encoded[i+1], encoded[i+2], '\0' };
+                const char hex[2] = {encoded[i + 1], encoded[i + 2]};
                 uint8_t byte = 0;
-                std::from_chars(hex, hex + 2, byte, 16);
-                out.push_back(byte);
-                i += 2;
+                const auto res = std::from_chars(hex, hex + 2, byte, 16);
+                if (res.ec != std::errc{}) {
+                    // Invalid percent-sequence: emit '%' literally, re-process next char
+                    out.push_back(static_cast<uint8_t>('%'));
+                }
+                else {
+                    out.push_back(byte);
+                    i += 2;
+                }
             } else if (encoded[i] == '+') {
                 out.push_back(' ');
             } else {
@@ -210,16 +286,14 @@ namespace akkaradb::server {
 
     // ── Query param extraction ────────────────────────────────────────────────
 
-    std::string HttpApiServer::query_param(const std::string& query,
-                                           std::string_view   name) {
-        std::string_view qv{query};
-        while (!qv.empty()) {
-            const auto amp = qv.find('&');
-            const auto part = qv.substr(0, amp);
+    std::string HttpApiServer::query_param(std::string_view query, std::string_view name) {
+        while (!query.empty()) {
+            const auto amp = query.find('&');
+            const auto part = query.substr(0, amp);
             const auto eq   = part.find('=');
             if (eq != std::string_view::npos && part.substr(0, eq) == name)
                 return std::string{part.substr(eq + 1)};
-            qv = (amp == std::string_view::npos) ? "" : qv.substr(amp + 1);
+            query = (amp == std::string_view::npos) ? "" : query.substr(amp + 1);
         }
         return {};
     }
@@ -248,7 +322,7 @@ namespace akkaradb::server {
 
     // ── Router ────────────────────────────────────────────────────────────────
 
-    bool HttpApiServer::route(core::TlsStream& stream, const ParsedRequest& req) {
+    bool HttpApiServer::route(core::TlsStream& stream, const ParsedRequest& req, std::vector<uint8_t>& val_buf) {
         const std::string raw_key = query_param(req.query, "key");
         if (raw_key.empty() && req.path != "/v1/ping") {
             send_empty(stream, 400);
@@ -261,24 +335,33 @@ namespace akkaradb::server {
             engine_.put(key_span, std::span<const uint8_t>{req.body});
             send_empty(stream, 204);
         } else if (req.path == "/v1/get" && req.method == "GET") {
-            std::vector<uint8_t> val;
-            if (engine_.get_into(key_span, val)) { send_response(stream, 200, val); } else { send_empty(stream, 404); }
-
+            // val_buf is reused across keep-alive requests — no per-request alloc
+            val_buf.clear();
+            if (engine_.get_into(key_span, val_buf)) { send_response(stream, 200, val_buf); }
+            else { send_empty(stream, 404); }
         } else if (req.path == "/v1/remove" && req.method == "DELETE") {
             engine_.remove(key_span);
             send_empty(stream, 204);
         } else if (req.path == "/v1/get_at" && req.method == "GET") {
             const std::string seq_str = query_param(req.query, "seq");
+            if (seq_str.empty()) {
+                send_empty(stream, 400);
+                return req.keep_alive;
+            }
             uint64_t seq = 0;
-            std::from_chars(seq_str.data(), seq_str.data() + seq_str.size(), seq);
+            const auto res = std::from_chars(seq_str.data(), seq_str.data() + seq_str.size(), seq);
+            if (res.ec != std::errc{}) {
+                send_empty(stream, 400);
+                return req.keep_alive;
+            }
             const auto v = engine_.get_at(key_span, seq);
             if (v) { send_response(stream, 200, *v); } else { send_empty(stream, 404); }
 
         } else if (req.path == "/v1/ping" && req.method == "GET") {
-            const std::string_view pong = "pong";
+            static constexpr std::string_view pong = "pong";
             send_response(stream, 200, {reinterpret_cast<const uint8_t*>(pong.data()), pong.size()});
-
-        } else { send_empty(stream, 404); }
+        }
+        else { send_empty(stream, 404); }
 
         return req.keep_alive;
     }
@@ -286,10 +369,13 @@ namespace akkaradb::server {
     // ── connection handler ────────────────────────────────────────────────────
 
     void HttpApiServer::handle_connection(core::TlsStream& stream) {
+        // val_buf is allocated once per connection and reused across all
+        // keep-alive requests, eliminating a heap alloc on every GET response.
+        std::vector<uint8_t> val_buf;
         while (running_.load(std::memory_order_relaxed)) {
             ParsedRequest req;
             if (!read_request(stream, req)) break;
-            if (!route(stream, req)) break; // Connection: close
+            if (!route(stream, req, val_buf)) break; // Connection: close
         }
     }
 
