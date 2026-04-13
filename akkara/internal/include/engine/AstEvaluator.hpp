@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -339,6 +340,59 @@ parse_entity(std::span<const uint8_t> data, const AkStructSchema& schema)
     return fields;
 }
 
+// ── Selective entity parser — reads only the columns referenced by the AST ────
+//
+// Iterates the schema fields in wire order.  For each field:
+//   - If the full dotted name is in `required`: read_schema_value → store in out.
+//   - Otherwise: skip_schema_value (advances the span without allocating).
+//
+// For nested STRUCT fields: recurse only when at least one required column lives
+// under that struct's dotted prefix; otherwise skip the entire sub-object.
+//
+// Benefit: a query that touches 1 field out of 10 pays decode cost for 1 field
+// and only skip (byte-advance) cost for the other 9 — no string/variant allocs.
+
+inline void parse_entity_selective_into(
+    std::span<const uint8_t>& data,
+    const AkStructSchema& schema,
+    const std::string& prefix,
+    const std::unordered_set<std::string>& required,
+    std::unordered_map<std::string, FieldValue>& out
+) {
+    for (const auto& field : schema.fields) {
+        const std::string full = prefix.empty() ? field.name : prefix + '.' + field.name;
+
+        if (field.type->kind == AkSchema::Kind::STRUCT) {
+            // Recurse only when at least one required column is nested under this struct.
+            const std::string dot_prefix = full + '.';
+            bool needed = false;
+            for (const auto& col : required) {
+                if (col.size() > full.size() && col.compare(0, dot_prefix.size(), dot_prefix) == 0) {
+                    needed = true;
+                    break;
+                }
+            }
+            if (needed) { parse_entity_selective_into(data, *field.type->struct_schema, full, required, out); }
+            else { skip_schema_value(data, *field.type); }
+        }
+        else {
+            if (required.count(full)) { out[full] = read_schema_value(data, *field.type); }
+            else { skip_schema_value(data, *field.type); }
+        }
+    }
+}
+
+[[nodiscard]] inline std::unordered_map<std::string, FieldValue> parse_entity_selective(
+    std::span<const uint8_t> data,
+    const AkStructSchema& schema,
+    const std::unordered_set<std::string>& required
+) {
+    std::unordered_map<std::string, FieldValue> fields;
+    fields.reserve(required.size());
+    parse_entity_selective_into(data, schema, "", required, fields);
+    return fields;
+}
+
 // ── AST node ──────────────────────────────────────────────────────────────────
 
 struct AstNode {
@@ -389,6 +443,25 @@ parse_ast_node(std::span<const uint8_t>& data)
                                      + std::to_string(node->tag));
     }
     return node;
+}
+
+// ── Collect column names referenced by an AST ────────────────────────────────
+//
+// Walks the AST and inserts every NODE_COL col_name into `out`.
+// Called once per ParsedQuery during from_bytes(); the result is reused across
+// all matches() calls for that query.
+
+inline void collect_cols(const AstNode& node, std::unordered_set<std::string>& out) {
+    switch (node.tag) {
+        case NODE_COL: out.insert(node.col_name);
+            return;
+        case NODE_BIN: collect_cols(*node.left, out);
+            if (node.right) collect_cols(*node.right, out);
+            return;
+        case NODE_UN: collect_cols(*node.left, out);
+            return;
+        default: return; // NODE_LIT, NODE_CAPTURE — no column references
+    }
 }
 
 // ── Evaluate an AST node ──────────────────────────────────────────────────────
@@ -518,8 +591,9 @@ parse_ast_node(std::span<const uint8_t>& data)
 // ── ParsedQuery: parse once, evaluate many times ─────────────────────────────
 
 struct ParsedQuery {
-    std::vector<FieldValue>  captures;
+    std::vector<FieldValue> captures;
     std::unique_ptr<AstNode> root;
+    std::unordered_set<std::string> required_cols; ///< COL names referenced by the AST
 
     [[nodiscard]] static ParsedQuery from_bytes(std::span<const uint8_t> data) {
         ParsedQuery q;
@@ -529,6 +603,7 @@ struct ParsedQuery {
         for (int32_t i = 0; i < num_caps; ++i)
             q.captures.push_back(read_lit_value(read_u8(data), data));
         q.root = parse_ast_node(data);
+        collect_cols(*q.root, q.required_cols); // build required column set once per query
         return q;
     }
 
@@ -536,7 +611,8 @@ struct ParsedQuery {
                                const AkStructSchema&        schema) const
     {
         auto sp     = std::span<const uint8_t>(entity_bytes);
-        auto fields = parse_entity(sp, schema);
+        // Only decode columns referenced by the AST; skip everything else.
+        auto fields = parse_entity_selective(sp, schema, required_cols);
         const auto result = eval_node(*root, fields, captures);
         return result.is_bool() && result.as_bool();
     }

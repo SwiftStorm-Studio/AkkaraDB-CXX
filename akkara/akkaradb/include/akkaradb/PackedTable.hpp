@@ -132,14 +132,14 @@ namespace akkaradb {
             PackedTable&& index() && {
                 static_assert(std::is_same_v<binpack::detail::class_of<FieldPtr>, Entity>, "index() field must be a member of the entity type");
 
-                const size_t offset = binpack::detail::field_byte_offset<FieldPtr>();
-                const auto prefix = make_index_prefix(table_name_, offset);
+                const std::string_view fname = binpack::detail::member_name<FieldPtr>();
+                const auto prefix = make_index_prefix(table_name_, fname);
 
                 indexes_.push_back(
                     {
                         prefix,
-                        /*registered_offset=*/
-                        offset,
+                        /*field_name=*/
+                        std::string(fname),
                         [](const Entity& e) -> std::vector<uint8_t> {
                             using Field = binpack::detail::member_of<FieldPtr>;
                             return binpack::BinPack::encode<Field>(e.*FieldPtr);
@@ -238,13 +238,13 @@ namespace akkaradb {
             [[nodiscard]] std::optional<Entity> find_by(const binpack::detail::member_of<FieldPtr>& value) const {
                 static_assert(std::is_same_v<binpack::detail::class_of<FieldPtr>, Entity>, "find_by() field must be a member of the entity type");
 
-                const size_t offset = binpack::detail::field_byte_offset<FieldPtr>();
-                const auto prefix = make_index_prefix(table_name_, offset);
+                const std::string_view fname = binpack::detail::member_name<FieldPtr>();
+                const auto prefix = make_index_prefix(table_name_, fname);
 
                 // Verify the index was registered (guard against silent misuse).
                 bool found = false;
                 for (const auto& idx : indexes_) {
-                    if (idx.registered_offset == offset) {
+                    if (idx.field_name == fname) {
                         found = true;
                         break;
                     }
@@ -493,8 +493,121 @@ namespace akkaradb {
                     std::optional<size_t> limit_;
             };
 
+            // ── Zero-overhead filter view ─────────────────────────────────────────
+            //
+            // FilterView<Pred> stores the predicate by value, letting the compiler
+            // inline and optimize the per-record check without virtual dispatch.
+            //
+            // Returned by query(Pred&&) when the caller supplies a concrete callable
+            // (lambda, function pointer, std::function, ...).  Supports the same
+            // terminal ops as Query (first/any/count/to_vector) plus range-for.
+            //
+            // For multi-predicate chaining (.where().where()), use the fluent
+            // query().where(...).where(...) path instead.
+
+            template <typename Pred>
+            class FilterView {
+                using ScanIter = Iterator; // PackedTable::Iterator, captured before FilterView::Iterator
+
+                public:
+                    struct Sentinel {};
+
+                    class Iterator {
+                        public:
+                            using value_type = Entry;
+                            using difference_type = std::ptrdiff_t;
+                            using iterator_category = std::input_iterator_tag;
+
+                            [[nodiscard]] const Entry& operator*() const noexcept { return *current_; }
+                            [[nodiscard]] const Entry* operator->() const noexcept { return &*current_; }
+
+                            Iterator& operator++() {
+                                advance();
+                                return *this;
+                            }
+
+                            [[nodiscard]] bool operator!=(const Sentinel&) const noexcept { return current_.has_value(); }
+                            [[nodiscard]] bool operator==(const Sentinel&) const noexcept { return !current_.has_value(); }
+
+                        private:
+                            friend class FilterView;
+
+                            Iterator(ScanIter scan, const Pred* pred, std::optional<size_t> limit)
+                                : scan_{std::move(scan)}, pred_{pred}, limit_{limit} { advance(); }
+
+                            void advance() {
+                                current_.reset();
+                                while (scan_.has_next()) {
+                                    if (limit_ && matched_ >= *limit_) return;
+                                    auto e = scan_.next();
+                                    if ((*pred_)(e.value)) {
+                                        current_ = std::move(e);
+                                        ++matched_;
+                                        return;
+                                    }
+                                }
+                            }
+
+                            ScanIter scan_;
+                            const Pred* pred_;
+                            std::optional<size_t> limit_;
+                            size_t matched_ = 0;
+                            std::optional<Entry> current_;
+                    };
+
+                    [[nodiscard]] Iterator begin() const { return {table_->scan_all(), &pred_, limit_}; }
+                    [[nodiscard]] Sentinel end() const noexcept { return {}; }
+
+                    FilterView& limit(size_t n) {
+                        limit_ = n;
+                        return *this;
+                    }
+
+                    [[nodiscard]] std::optional<Entry> first() const {
+                        auto it = begin();
+                        if (it != end()) return *it;
+                        return std::nullopt;
+                    }
+
+                    [[nodiscard]] bool any() const { return first().has_value(); }
+
+                    [[nodiscard]] std::vector<Entry> to_vector() const {
+                        std::vector<Entry> result;
+                        for (const auto& e : *this) result.push_back(e);
+                        return result;
+                    }
+
+                    [[nodiscard]] size_t count() const {
+                        size_t n = 0;
+                        Iterator it(table_->scan_all(), &pred_, std::nullopt);
+                        while (it != Sentinel{}) {
+                            ++n;
+                            ++it;
+                        }
+                        return n;
+                    }
+
+                private:
+                    friend class PackedTable;
+
+                    FilterView(const PackedTable* table, Pred pred) : table_{table}, pred_{std::move(pred)} {}
+
+                    const PackedTable* table_;
+                    Pred pred_;
+                    std::optional<size_t> limit_;
+            };
+
+            // ── Query entry points ────────────────────────────────────────────────
+
+            /// Fluent builder — supports .where().where().limit() chaining.
             [[nodiscard]] Query query() const { return Query(this); }
-            [[nodiscard]] Query query(std::function<bool(const Entity&)> pred) const { return Query(this).where(std::move(pred)); }
+
+            /// Zero-overhead entry — predicate stored by value, inlineable by the compiler.
+            /// Returns FilterView<Pred> which supports range-for and terminal ops.
+            template <typename Pred>
+            [[nodiscard]] FilterView<std::decay_t<Pred>> query(Pred&& pred) const {
+                return FilterView<std::decay_t<Pred>>(this, std::forward<Pred>(pred));
+            }
 
             // ── Metadata ─────────────────────────────────────────────────────────────
 
@@ -511,7 +624,7 @@ namespace akkaradb {
 
             struct IndexDef {
                 std::array<uint8_t, 8> prefix;
-                size_t registered_offset; // for find_by validation
+                std::string field_name; ///< for find_by validation and error messages
                 std::function<std::vector<uint8_t>(const Entity&)> extract_key;
             };
 
@@ -542,16 +655,22 @@ namespace akkaradb {
                 return prefix;
             }
 
-            [[nodiscard]] static std::array<uint8_t, 8> make_index_prefix(std::string_view table_name, size_t field_offset) {
-                // Hash input: "<table_name>:index:<field_byte_offset>"
-                // Field byte offset is stable for the same binary + struct layout.
-                char buf[64];
-                const int n = std::snprintf(buf, sizeof(buf), "%zu", field_offset);
+            [[nodiscard]] static std::array<uint8_t, 8> make_index_prefix(std::string_view table_name, std::string_view field_name) {
+                // Hash input: "<table_name>:index:<field_name>"
+                //
+                // Using the field NAME (not byte offset) makes the prefix stable across
+                // struct layout changes: adding fields elsewhere, removing unrelated fields,
+                // or reordering fields that appear after the indexed field do not affect
+                // existing index entries.  Only renaming the field itself invalidates the
+                // index — the same invariant as any schema migration in any database.
+                //
+                // This also matches the JVM-side convention (JniPackedTable.kt):
+                //   fnv1a64("$tableName:idx:$fieldName")
                 std::string input;
-                input.reserve(table_name.size() + 8 + static_cast<size_t>(n));
+                input.reserve(table_name.size() + 8 + field_name.size());
                 input.append(table_name);
                 input.append(":index:");
-                input.append(buf, static_cast<size_t>(n));
+                input.append(field_name);
                 const uint64_t h = detail::fnv1a_64(input);
                 std::array<uint8_t, 8> prefix{};
                 detail::write_be64(h, prefix.data());

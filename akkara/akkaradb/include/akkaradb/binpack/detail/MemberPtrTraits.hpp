@@ -20,6 +20,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string_view>
 #include <type_traits>
 
 namespace akkaradb::binpack::detail {
@@ -75,4 +76,52 @@ template<auto MPtr>
         reinterpret_cast<const char*>(field) - storage);
 }
 
+// =============================================================================
+// member_name<MPtr>()
+// =============================================================================
+//
+// Extracts the field name of a member object pointer as a string_view
+// by parsing the compiler's function-signature predefined macro.
+//
+// The returned string_view points into a static string literal (the function
+// signature), so its lifetime is unbounded — safe to use as a map key.
+//
+// Supported compilers:
+//   MSVC  — __FUNCSIG__:          "... member_name<&Class::field>(void)"
+//   Clang — __PRETTY_FUNCTION__:  "... [MPtr = &Class::field]"
+//   GCC   — __PRETTY_FUNCTION__:  "... [with auto MPtr = (& Class::field)]"
+//
+// Limitation: member pointers to fields of template classes with '<' in the
+// class name may cause incorrect extraction. Non-template aggregate structs
+// (the intended use-case for PackedTable) are always handled correctly.
+
+template <auto MPtr>
+[[nodiscard]] inline std::string_view member_name() noexcept {
+    #if defined(_MSC_VER)
+    const std::string_view sig = __FUNCSIG__;
+    // Pattern: "...member_name<&ClassName::fieldName>(void)"
+    // Find the last "<&", then the ">" that closes it; the field name is between
+    // the last "::" before that ">" and the ">" itself.
+    const auto amp_lt = sig.rfind("<&"); if (amp_lt == std::string_view::npos) return {}; const auto gt = sig.find('>', amp_lt); if (gt ==
+        std::string_view::npos) return {}; const auto cc = sig.rfind("::", gt); if (cc == std::string_view::npos || cc < amp_lt) return {}; return sig.substr(
+        cc + 2,
+        gt - cc - 2
+    );
+    #elif defined(__clang__)
+    const std::string_view sig = __PRETTY_FUNCTION__;
+    // Pattern: "... [MPtr = &ClassName::fieldName]"
+    const auto rb = sig.rfind(']'); if (rb == std::string_view::npos) return {}; const auto cc = sig.rfind("::", rb); if (cc == std::string_view::npos) return
+        {}; return sig.substr(cc + 2, rb - cc - 2);
+    #else // GCC
+    const std::string_view sig = __PRETTY_FUNCTION__;
+    // Pattern: "... [with auto MPtr = (& ClassName::fieldName)]"
+    const auto rb = sig.rfind(']');
+    if (rb == std::string_view::npos) return {};
+    const auto rp = sig.rfind(')', rb);
+    if (rp == std::string_view::npos) return {};
+    const auto cc = sig.rfind("::", rp);
+    if (cc == std::string_view::npos) return {};
+    return sig.substr(cc + 2, rp - cc - 2);
+    #endif
+}
 } // namespace akkaradb::binpack::detail

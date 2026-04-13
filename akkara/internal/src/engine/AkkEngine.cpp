@@ -523,11 +523,7 @@ namespace akkaradb::engine {
             const auto collect_blob_refs = [&](const core::MemRecord& rec) {
                 if (rec.flags() & core::AKHdr32::FLAG_BLOB) {
                     const auto val = rec.value();
-                    if (val.size() >= sizeof(uint64_t)) {
-                        uint64_t bid;
-                        std::memcpy(&bid, val.data(), sizeof(bid));
-                        referenced.insert(bid);
-                    }
+                    if (val.size() >= blob::BLOB_REF_SIZE) { referenced.insert(blob::decode_blob_ref(val.data()).blob_id); }
                 }
             };
 
