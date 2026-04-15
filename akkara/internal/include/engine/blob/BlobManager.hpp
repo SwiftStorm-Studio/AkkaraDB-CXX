@@ -161,6 +161,26 @@ namespace akkaradb::engine::blob {
         /** Stops the GC worker thread. */
         void close();
 
+        // ── Metrics ──────────────────────────────────────────────────────────────
+
+        /**
+         * Point-in-time snapshot of BlobManager counters.
+         * All reads are relaxed atomic loads — no lock acquired, no allocation.
+         */
+        struct BlobSnapshot {
+            /// Total .blob files successfully written since start().
+            uint64_t blobs_written      = 0;
+            /// Total uncompressed content bytes across all blobs written.
+            uint64_t bytes_uncompressed = 0;
+            /// Total bytes actually stored on disk (< bytes_uncompressed with Zstd).
+            uint64_t bytes_on_disk      = 0;
+            /// Total .blob files deleted by the GC worker since start().
+            uint64_t blobs_deleted      = 0;
+            /// Number of GC wake-up cycles that deleted at least one file.
+            uint64_t gc_cycles          = 0;
+        };
+        [[nodiscard]] BlobSnapshot snapshot() const noexcept;
+
     private:
         struct Impl;
         std::unique_ptr<Impl> impl_;

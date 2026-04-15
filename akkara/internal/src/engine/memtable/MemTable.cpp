@@ -72,6 +72,12 @@ namespace akkaradb::engine::memtable {
     //   - Flusher: iterates and calls the FlushCallback
     using ImmVec = std::vector<core::MemRecord>;
 
+    struct SealResult {
+        uint64_t id = 0;
+        std::shared_ptr<const ImmVec> vec;
+        size_t bytes = 0; ///< approx_bytes captured before reset
+    };
+
     // ============================================================================
     // Shard
     // ============================================================================
@@ -173,10 +179,10 @@ namespace akkaradb::engine::memtable {
             // ── Flush lifecycle ───────────────────────────────────────────────
 
             /// Seals the active map into a sorted ImmVec.
-            /// Returns {id, sorted_records_ptr}.  Empty active → {0, nullptr}.
-            [[nodiscard]] std::pair<uint64_t, std::shared_ptr<const ImmVec>> seal_active() {
+            /// Returns {id, sorted_records_ptr, bytes}.  Empty active → {0, nullptr, 0}.
+            [[nodiscard]] SealResult seal_active() {
                 std::unique_lock lock{mutex_};
-                if (active_->empty()) return {0, nullptr};
+                if (active_->empty()) return {};
 
                 const uint64_t id = next_imm_id_++;
 
@@ -184,11 +190,12 @@ namespace akkaradb::engine::memtable {
                 vec->reserve(active_->size());
                 active_->collect_sorted(*vec); // IMemMap guarantees sorted order
 
+                const size_t bytes = approx_bytes_.load(std::memory_order_relaxed);
                 active_ = active_->make_empty(); // reset to fresh empty map
                 approx_bytes_.store(0, std::memory_order_relaxed);
 
                 immutables_.emplace_back(id, vec);
-                return {id, vec};
+                return {id, vec, bytes};
             }
 
             void on_flushed(uint64_t id) {
@@ -446,6 +453,7 @@ namespace akkaradb::engine::memtable {
             // ── Write ─────────────────────────────────────────────────────────
 
             void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
+                puts_applied_.fetch_add(1, std::memory_order_relaxed);
                 const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : core::AKHdr32::compute_key_fp64(key.data(), key.size());
                 const uint32_t si = shard_for(fp64, shard_count_);
 
@@ -456,6 +464,7 @@ namespace akkaradb::engine::memtable {
             }
 
             void remove(std::span<const uint8_t> key, uint64_t seq) {
+                removes_applied_.fetch_add(1, std::memory_order_relaxed);
                 const uint64_t fp64 = core::AKHdr32::compute_key_fp64(key.data(), key.size());
                 const uint32_t si = shard_for(fp64, shard_count_);
 
@@ -515,6 +524,20 @@ namespace akkaradb::engine::memtable {
                 return total;
             }
 
+            [[nodiscard]] MemTableSnapshot snapshot() const noexcept {
+                size_t total_bytes = 0;
+                for (const auto& s : shards_) total_bytes += s->approx_bytes();
+                return MemTableSnapshot{
+                    shard_count_,
+                    static_cast<uint64_t>(threshold_bytes_per_shard_),
+                    static_cast<uint64_t>(total_bytes),
+                    puts_applied_.load(std::memory_order_relaxed),
+                    removes_applied_.load(std::memory_order_relaxed),
+                    flushes_completed_.load(std::memory_order_relaxed),
+                    bytes_flushed_.load(std::memory_order_relaxed),
+                };
+            }
+
         private:
             void advance_seq_gen(uint64_t observed_seq) noexcept {
                 uint64_t cur = seq_gen_.load(std::memory_order_relaxed);
@@ -525,12 +548,18 @@ namespace akkaradb::engine::memtable {
 
             void trigger_flush(uint32_t si) {
                 if (!flushers_[si]) return;
-                auto [id, vec] = shards_[si]->seal_active();
-                if (vec) flushers_[si]->enqueue(id, std::move(vec));
+                auto [id, vec, bytes] = shards_[si]->seal_active();
+                if (vec) {
+                    bytes_flushed_.fetch_add(bytes, std::memory_order_relaxed);
+                    flushers_[si]->enqueue(id, std::move(vec));
+                }
             }
 
             void make_flusher(uint32_t i, const FlushCallback& cb) {
-                flushers_[i] = std::make_unique<Flusher>(cb, [this, i](uint64_t id) { shards_[i]->on_flushed(id); });
+                flushers_[i] = std::make_unique<Flusher>(cb, [this, i](uint64_t id) {
+                    shards_[i]->on_flushed(id);
+                    flushes_completed_.fetch_add(1, std::memory_order_relaxed);
+                });
             }
 
             uint32_t shard_count_;
@@ -541,6 +570,12 @@ namespace akkaradb::engine::memtable {
             std::vector<std::unique_ptr<Flusher>> flushers_;
 
             std::atomic<uint64_t> seq_gen_;
+
+            // ── Stats counters (relaxed atomics — zero overhead on write path) ──
+            std::atomic<uint64_t> puts_applied_{0};
+            std::atomic<uint64_t> removes_applied_{0};
+            std::atomic<uint64_t> flushes_completed_{0};
+            std::atomic<uint64_t> bytes_flushed_{0};
     };
 
     // ============================================================================
@@ -569,4 +604,5 @@ namespace akkaradb::engine::memtable {
     void MemTable::force_flush() { impl_->force_flush(); }
     size_t MemTable::approx_size() const noexcept { return impl_->approx_size(); }
     void MemTable::set_flush_callback(const FlushCallback& cb) { impl_->set_flush_callback(cb); }
+    MemTable::MemTableSnapshot MemTable::snapshot() const noexcept { return impl_->snapshot(); }
 } // namespace akkaradb::engine::memtable

@@ -43,7 +43,7 @@ namespace akkaradb::engine::sst {
         /// Finds the first SSTMeta whose last_key >= key (i.e., the file that could
         /// contain key). Used by get(), contains(), and get_into() — defined once here
         /// to eliminate four identical lambda copies scattered through the read path.
-        constexpr auto kLevelBinCmp = [](const SSTMeta& m, std::span<const uint8_t> k) noexcept {
+        constexpr auto kLevelBinCmp = [](const SSTManager::SSTMeta& m, std::span<const uint8_t> k) noexcept {
             return std::lexicographical_compare(m.last_key.begin(), m.last_key.end(), k.begin(), k.end());
         };
 
@@ -175,6 +175,7 @@ namespace akkaradb::engine::sst {
         }
 
         // Slow path: wait for compaction to drain L0.
+        l0_stalls_.fetch_add(1, std::memory_order_relaxed);
         std::unique_lock lk(l0_stall_mu_);
         l0_stall_cv_.wait(
             lk,
@@ -996,6 +997,19 @@ namespace akkaradb::engine::sst {
             compact_busy_srcs_.erase(work.src_level);
         }
 
+        // ── Stats ─────────────────────────────────────────────────────────────
+        {
+            uint64_t bytes_in = 0;
+            for (const auto& m : work.inputs) bytes_in += m.file_size_bytes;
+            uint64_t bytes_out = 0;
+            for (const auto& m : output_metas) bytes_out += m.file_size_bytes;
+
+            compactions_completed_.fetch_add(1, std::memory_order_relaxed);
+            files_compacted_.fetch_add(work.inputs.size(), std::memory_order_relaxed);
+            bytes_compacted_in_.fetch_add(bytes_in, std::memory_order_relaxed);
+            bytes_compacted_out_.fetch_add(bytes_out, std::memory_order_relaxed);
+        }
+
         // ── 11. Delete old files from disk ─────────────────────────────────────
         // Windows: close all handles before deleting.
         iters.clear();
@@ -1012,6 +1026,20 @@ namespace akkaradb::engine::sst {
                 );
             }
         }
+    }
+
+    // ============================================================================
+    // compaction_snapshot
+    // ============================================================================
+
+    SSTManager::CompactionSnapshot SSTManager::compaction_snapshot() const noexcept {
+        return CompactionSnapshot{
+            compactions_completed_.load(std::memory_order_relaxed),
+            files_compacted_.load(std::memory_order_relaxed),
+            bytes_compacted_in_.load(std::memory_order_relaxed),
+            bytes_compacted_out_.load(std::memory_order_relaxed),
+            l0_stalls_.load(std::memory_order_relaxed),
+        };
     }
 
 } // namespace akkaradb::engine::sst

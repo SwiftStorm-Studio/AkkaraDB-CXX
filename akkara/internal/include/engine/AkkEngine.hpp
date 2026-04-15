@@ -20,6 +20,7 @@
 #pragma once
 
 #include "akkaradb/Export.hpp"
+#include "akkaradb/Stats.hpp"
 #include "engine/memtable/MemTable.hpp"
 #include "engine/vlog/VersionLog.hpp"
 #include "engine/wal/WalWriter.hpp"
@@ -622,6 +623,20 @@ namespace akkaradb::engine {
              */
             [[nodiscard]] ScanIterator scan(std::span<const uint8_t> start_key = {}, std::span<const uint8_t> end_key = {}) const;
 
+            // ── Observability ─────────────────────────────────────────────────
+
+            /**
+             * Returns a point-in-time snapshot of engine health and usage counters.
+             *
+             * All reads are relaxed atomic loads — the call is wait-free and adds
+             * no overhead to the write or read paths.  Values are approximate
+             * (no global barrier; individual component counters are read independently).
+             *
+             * Use stats() at any time; it is safe to call concurrently with
+             * any other engine operation.
+             */
+            [[nodiscard]] EngineStats stats() const noexcept;
+
             // ── Durability ────────────────────────────────────────────────────
 
             /**
@@ -645,7 +660,9 @@ namespace akkaradb::engine {
             void close();
 
         private:
-            AkkEngine() = default;
+            // Constructor is defined in AkkEngine.cpp where Impl is complete,
+            // preventing unique_ptr<Impl> destructor instantiation in other TUs.
+            AkkEngine();
 
             class Impl;
             std::unique_ptr<Impl> impl_;

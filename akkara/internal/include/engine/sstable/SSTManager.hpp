@@ -33,6 +33,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <set>
 #include <shared_mutex>
 #include <span>
@@ -239,6 +240,37 @@ namespace akkaradb::engine::sst {
             /// Byte budget for level n (n>=1). Returns 0 for level 0 (count-based trigger).
             [[nodiscard]] uint64_t level_budget(int n) const;
 
+            /// Per-level snapshot. Reads the lock-free levels_snap_ atomic — no mutex.
+            struct LevelStats {
+                int      level        = 0;
+                size_t   file_count   = 0;
+                uint64_t bytes        = 0;
+                uint64_t budget_bytes = 0; ///< 0 for L0 (count-based)
+            };
+            [[nodiscard]] std::vector<LevelStats> level_stats() const;
+
+            /// Returns true if a compaction was requested and a pool thread is
+            /// still working on it (or waiting to start).
+            [[nodiscard]] bool compaction_pending() const noexcept;
+
+            /**
+             * Point-in-time snapshot of compaction counters.
+             * All reads are relaxed atomic loads — no lock acquired, no allocation.
+             */
+            struct CompactionSnapshot {
+                /// Total compaction cycles completed since create().
+                uint64_t compactions_completed = 0;
+                /// Total input SST files consumed by all compaction cycles.
+                uint64_t files_compacted       = 0;
+                /// Total input bytes read by all compaction cycles.
+                uint64_t bytes_compacted_in    = 0;
+                /// Total output bytes written by all compaction cycles.
+                uint64_t bytes_compacted_out   = 0;
+                /// Times stall_if_l0_full() actually blocked a writer (L0 was full).
+                uint64_t l0_stalls             = 0;
+            };
+            [[nodiscard]] CompactionSnapshot compaction_snapshot() const noexcept;
+
             // ── Write backpressure ────────────────────────────────────────────
 
             /**
@@ -419,6 +451,13 @@ namespace akkaradb::engine::sst {
             std::set<int> compact_busy_srcs_;
 
             std::atomic<uint64_t> next_sst_id_{0};
+
+            // ── Compaction counters (relaxed atomics — zero overhead on write path) ──
+            std::atomic<uint64_t> compactions_completed_{0};
+            std::atomic<uint64_t> files_compacted_{0};
+            std::atomic<uint64_t> bytes_compacted_in_{0};
+            std::atomic<uint64_t> bytes_compacted_out_{0};
+            std::atomic<uint64_t> l0_stalls_{0};
 
             // ── Compaction work descriptor ─────────────────────────────────
 

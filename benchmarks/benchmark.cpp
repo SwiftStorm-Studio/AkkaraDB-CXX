@@ -14,6 +14,7 @@
  */
 
 #include "engine/AkkEngine.hpp"
+#include "akkaradb/AkkaraDB.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -550,6 +551,7 @@ static void bench_mem_case(const SizeCase& sc) {
     int found = 0;
     for (int i = 0; i < N; ++i) if (eng->get_into(as_span(keys[i]), rbuf)) ++found;
     const double r_ops = N / (elapsed_ms(t0) / 1000.0);
+    CHECK_EQ(found, N); // all puts must be readable
 
     eng->close();
 
@@ -1245,7 +1247,7 @@ static void bench_sst_lookup() {
     // pages into L3 cache.  Use the LAST 10 K entries of each pool so the timed
     // loop starts at index 0 without cache-warm bias on the first accesses.
     {
-        int dummy = 0;
+        volatile int dummy = 0; // volatile: prevents the compiler from eliding the loop
         constexpr int WARM = 10'000;
         for (int i = N_KEYS - WARM; i < N_KEYS; ++i) if (eng->exists(as_span(neg_keys[i]))) ++dummy;
         for (int i = N_KEYS - WARM; i < N_KEYS; ++i) if (!eng->exists(as_span(exist_keys[i]))) ++dummy;
@@ -1285,6 +1287,182 @@ static void bench_sst_lookup() {
 }
 
 // ============================================================================
+// 19. Low-Level API vs Typed API: performance comparison
+// ============================================================================
+//
+// Compares three access patterns over 1 M ops, in-memory (no WAL):
+//
+//   [raw-inline] AkkEngine::put/get_into, k=8B v=8B (total=16B, inline path)
+//                Zero overhead: no encoding, no heap alloc per op.
+//
+//   [raw-heap  ] AkkEngine::put/get_into, k=16B v=16B (total=32B, heap path)
+//                Isolates the cost of heap allocation vs inline storage.
+//                Key: 8B zero-prefix + 8B uint64_t; value: 8B int64_t + 8B padding.
+//
+//   [typed     ] PackedTable<&KvRecord::id>::put/get, k=16B v=16B (heap path)
+//                Adds: BinPack encode (put) + FNV prefix + BinPack decode (get).
+//                get() allocates a temporary vector internally (no get_into path).
+//
+// Overhead breakdown:
+//   (raw-heap)  vs (raw-inline) → heap allocation cost
+//   (typed)     vs (raw-heap)   → BinPack encode/decode cost
+//   (typed)     vs (raw-inline) → total typed-API overhead
+
+namespace {
+    struct KvRecord {
+        uint64_t id;
+        int64_t  data;
+    };
+} // namespace
+
+static void bench_api_comparison() {
+    section("API comparison: AkkEngine (raw) vs PackedTable (typed)  [1 M ops, in-memory]");
+
+    constexpr int N = 1'000'000;
+
+    // ── Pre-generate keys and values outside timed sections ──────────────────
+    // raw-inline: 8-byte big-endian uint64_t keys and values
+    // raw-heap  : 16-byte keys (8B zero-prefix + 8B id), 16-byte values (8B id + 8B zeros)
+    // typed     : KvRecord{id, data} entities (encoded by BinPack at runtime)
+
+    constexpr size_t K8  = 8;
+    constexpr size_t K16 = 16;
+
+    std::vector<uint8_t> key8_buf (static_cast<size_t>(N) * K8);
+    std::vector<uint8_t> val8_buf (static_cast<size_t>(N) * K8);
+    std::vector<uint8_t> key16_buf(static_cast<size_t>(N) * K16);
+    std::vector<uint8_t> val16_buf(static_cast<size_t>(N) * K16);
+    std::vector<KvRecord> entities(N);
+
+    for (int i = 0; i < N; ++i) {
+        const uint64_t u = static_cast<uint64_t>(i);
+        uint8_t* k8  = key8_buf.data()  + static_cast<size_t>(i) * K8;
+        uint8_t* v8  = val8_buf.data()  + static_cast<size_t>(i) * K8;
+        uint8_t* k16 = key16_buf.data() + static_cast<size_t>(i) * K16;
+        uint8_t* v16 = val16_buf.data() + static_cast<size_t>(i) * K16;
+
+        // 8-byte big-endian encoding
+        for (int b = 7; b >= 0; --b) {
+            k8[b] = v8[b] = static_cast<uint8_t>((u >> (8 * (7 - b))) & 0xFF);
+        }
+        // 16-byte: 8B zero-prefix then 8B id (key), 8B id then 8B zeros (val)
+        std::memset(k16, 0, 8);
+        std::memcpy(k16 + 8, k8, 8);
+        std::memcpy(v16, v8, 8);
+        std::memset(v16 + 8, 0, 8);
+
+        entities[i] = {u, static_cast<int64_t>(u)};
+    }
+
+    auto s_k8  = [&](int i) { return std::span<const uint8_t>(key8_buf.data()  + static_cast<size_t>(i)*K8,  K8);  };
+    auto s_v8  = [&](int i) { return std::span<const uint8_t>(val8_buf.data()  + static_cast<size_t>(i)*K8,  K8);  };
+    auto s_k16 = [&](int i) { return std::span<const uint8_t>(key16_buf.data() + static_cast<size_t>(i)*K16, K16); };
+    auto s_v16 = [&](int i) { return std::span<const uint8_t>(val16_buf.data() + static_cast<size_t>(i)*K16, K16); };
+
+    AkkEngineOptions raw_opts;
+    raw_opts.wal_enabled = false;
+    raw_opts.memtable.threshold_bytes_per_shard = 512ULL << 20; // prevent mid-bench flush
+
+    // ── Warmup (CRT heap, branch predictors, TLB) ────────────────────────────
+    {
+        auto eng = AkkEngine::open(raw_opts);
+        for (int i = 0; i < N; ++i) eng->put(s_k8(i), s_v8(i));
+        eng->close();
+    }
+
+    // ── 1. raw-inline  (k=8, v=8, total=16, inline storage) ─────────────────
+    double raw8_w, raw8_r;
+    {
+        auto eng = AkkEngine::open(raw_opts);
+
+        auto t0 = Clock::now();
+        for (int i = 0; i < N; ++i) eng->put(s_k8(i), s_v8(i));
+        raw8_w = N / (elapsed_ms(t0) / 1000.0);
+
+        std::vector<uint8_t> rbuf;
+        rbuf.reserve(K8);
+        int found = 0;
+        t0 = Clock::now();
+        for (int i = 0; i < N; ++i) if (eng->get_into(s_k8(i), rbuf)) ++found;
+        raw8_r = N / (elapsed_ms(t0) / 1000.0);
+        CHECK_EQ(found, N);
+
+        eng->close();
+    }
+    std::printf("  [raw-inline] k= 8B v= 8B  total=16B inline  1.0M   write %8.0f   read %8.0f ops/s\n", raw8_w, raw8_r);
+
+    // ── 2. raw-heap  (k=16, v=16, total=32, heap storage) ───────────────────
+    double raw16_w, raw16_r;
+    {
+        auto eng = AkkEngine::open(raw_opts);
+
+        auto t0 = Clock::now();
+        for (int i = 0; i < N; ++i) eng->put(s_k16(i), s_v16(i));
+        raw16_w = N / (elapsed_ms(t0) / 1000.0);
+
+        std::vector<uint8_t> rbuf;
+        rbuf.reserve(K16);
+        int found = 0;
+        t0 = Clock::now();
+        for (int i = 0; i < N; ++i) if (eng->get_into(s_k16(i), rbuf)) ++found;
+        raw16_r = N / (elapsed_ms(t0) / 1000.0);
+        CHECK_EQ(found, N);
+
+        eng->close();
+    }
+    std::printf("  [raw-heap  ] k=16B v=16B  total=32B heap    1.0M   write %8.0f   read %8.0f ops/s\n", raw16_w, raw16_r);
+
+    // ── Warmup for typed path (BinPack code paths, alloc patterns) ───────────
+    {
+        using namespace akkaradb;
+        AkkaraDB::Options opts;
+        opts.mode = StartupMode::ULTRA_FAST;
+        opts.overrides.memtable_threshold_per_shard = 512ULL << 20;
+        auto db    = AkkaraDB::open(opts);
+        auto table = db->table<&KvRecord::id>("bench");
+        for (int i = 0; i < N; ++i) table.put(entities[i]);
+        db->close();
+    }
+
+    // ── 3. typed  (PackedTable<&KvRecord::id>, k=16, v=16, heap) ────────────
+    // Key: 8B FNV-hash("bench") + 8B BinPack(uint64_t id) = 16B
+    // Value: BinPack({id, data}) = 8B + 8B = 16B
+    // put: BinPack::encode(entity) + engine->put  — 2 allocs per call
+    // get: engine->get returns optional<vector<uint8_t>>  — 1 alloc + decode
+    double typed_w, typed_r;
+    {
+        using namespace akkaradb;
+        AkkaraDB::Options opts;
+        opts.mode = StartupMode::ULTRA_FAST;
+        opts.overrides.memtable_threshold_per_shard = 512ULL << 20;
+        auto db    = AkkaraDB::open(opts);
+        auto table = db->table<&KvRecord::id>("bench");
+
+        auto t0 = Clock::now();
+        for (int i = 0; i < N; ++i) table.put(entities[i]);
+        typed_w = N / (elapsed_ms(t0) / 1000.0);
+
+        int found = 0;
+        t0 = Clock::now();
+        for (int i = 0; i < N; ++i) if (table.get(entities[i].id)) ++found;
+        typed_r = N / (elapsed_ms(t0) / 1000.0);
+        CHECK_EQ(found, N);
+
+        db->close();
+    }
+    std::printf("  [typed     ] k=16B v=16B  total=32B heap    1.0M   write %8.0f   read %8.0f ops/s\n", typed_w, typed_r);
+
+    // ── Overhead breakdown ────────────────────────────────────────────────────
+    std::printf("\n");
+    std::printf("  heap vs inline:  write %.2fx slower   read %.2fx slower\n",
+        raw8_w / raw16_w, raw8_r / raw16_r);
+    std::printf("  typed vs heap:   write %.2fx slower   read %.2fx slower  (BinPack encode/decode)\n",
+        raw16_w / typed_w, raw16_r / typed_r);
+    std::printf("  typed vs inline: write %.2fx slower   read %.2fx slower  (total typed-API overhead)\n",
+        raw8_w / typed_w, raw8_r / typed_r);
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -1292,7 +1470,7 @@ int main() {
     std::printf("AkkaraDB Engine — correctness + benchmark\n");
     std::printf("==========================================\n");
 
-    constexpr int STEPS = 19;
+    constexpr int STEPS = 20;
 
     // ── Correctness tests ────────────────────────────────────────────────────
     step(STEPS, "test_memory_basic");
@@ -1337,6 +1515,9 @@ int main() {
     // ── SST lookup (negative bloom + positive exists/get) ────────────────────
     step(STEPS, "bench_sst_lookup");
     bench_sst_lookup();
+    // ── API comparison (raw vs typed) ─────────────────────────────────────────
+    step(STEPS, "bench_api_comparison");
+    bench_api_comparison();
 
     // ── Summary ──────────────────────────────────────────────────────────────
     std::printf("\n==========================================\n");

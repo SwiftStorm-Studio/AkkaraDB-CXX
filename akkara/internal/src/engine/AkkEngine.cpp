@@ -248,6 +248,17 @@ namespace akkaradb::engine {
             std::mutex pending_blob_mu_;
             std::unordered_set<uint64_t> pending_blob_seqs_;
 
+            // ── Engine-level stats counters (relaxed atomics, zero write overhead) ──
+            std::atomic<uint64_t> puts_total_{0};
+            std::atomic<uint64_t> removes_total_{0};
+            std::atomic<uint64_t> gets_total_{0};
+            std::atomic<uint64_t> gets_mt_hit_{0};
+            std::atomic<uint64_t> gets_sst_hit_{0};
+            std::atomic<uint64_t> gets_miss_{0};
+            std::atomic<uint64_t> exists_total_{0};
+            std::atomic<uint64_t> scans_total_{0};
+            std::atomic<uint64_t> blob_puts_total_{0};
+
             // =========================================================================
             // apply_record — internal write path used by the Replica apply_callback.
             //
@@ -589,6 +600,7 @@ namespace akkaradb::engine {
     // Destructor
     // ============================================================================
 
+    AkkEngine::AkkEngine() = default; // defined here so Impl is complete when unique_ptr<Impl> is instantiated
     AkkEngine::~AkkEngine() { if (impl_) close(); }
 
     // ============================================================================
@@ -597,6 +609,7 @@ namespace akkaradb::engine {
 
     void AkkEngine::put(std::span<const uint8_t> key, std::span<const uint8_t> value) {
         if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+        impl_->puts_total_.fetch_add(1, std::memory_order_relaxed);
 
         // ── L0 write backpressure ─────────────────────────────────────────────
         // Block until compaction drains L0 below the stall threshold.
@@ -624,6 +637,7 @@ namespace akkaradb::engine {
             if (impl_->repl_server_) { impl_->repl_server_->ship_blob(seq, value); }
 
             // 2. Write blob file locally (seq == WAL seq == blob_id)
+            impl_->blob_puts_total_.fetch_add(1, std::memory_order_relaxed);
             impl_->blob_manager_->write(seq, value);
 
             // 3. Build 20-byte BlobRef: [blob_id:8][total_size:8][checksum:4]
@@ -660,6 +674,7 @@ namespace akkaradb::engine {
 
     void AkkEngine::remove(std::span<const uint8_t> key) {
         if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+        impl_->removes_total_.fetch_add(1, std::memory_order_relaxed);
 
         // If the key has a BLOB ref, schedule the blob for GC before removing the
         // MemTable entry (the only reference to the blob_id).
@@ -691,11 +706,16 @@ namespace akkaradb::engine {
 
     std::optional<std::vector<uint8_t>> AkkEngine::get(std::span<const uint8_t> key) const {
         if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+        impl_->gets_total_.fetch_add(1, std::memory_order_relaxed);
 
         // ── MemTable lookup (active + immutables, newest-first) ──────────────
         const auto rec = impl_->memtable_->get(key);
         if (rec) {
-            if (rec->is_tombstone()) return std::nullopt;
+            if (rec->is_tombstone()) {
+                impl_->gets_miss_.fetch_add(1, std::memory_order_relaxed);
+                return std::nullopt;
+            }
+            impl_->gets_mt_hit_.fetch_add(1, std::memory_order_relaxed);
 
             const auto stored_val = rec->value();
 
@@ -713,7 +733,11 @@ namespace akkaradb::engine {
         if (impl_->sst_manager_) {
             const auto sst_rec = impl_->sst_manager_->get(key);
             if (sst_rec) {
-                if (sst_rec->is_tombstone()) return std::nullopt;
+                if (sst_rec->is_tombstone()) {
+                    impl_->gets_miss_.fetch_add(1, std::memory_order_relaxed);
+                    return std::nullopt;
+                }
+                impl_->gets_sst_hit_.fetch_add(1, std::memory_order_relaxed);
 
                 const auto stored_val = sst_rec->value();
 
@@ -733,6 +757,7 @@ namespace akkaradb::engine {
             }
         }
 
+        impl_->gets_miss_.fetch_add(1, std::memory_order_relaxed);
         return std::nullopt;
     }
 
@@ -792,6 +817,7 @@ namespace akkaradb::engine {
 
     bool AkkEngine::exists(std::span<const uint8_t> key) const {
         if (!impl_ || impl_->closed_.load(std::memory_order_relaxed)) throw std::runtime_error("AkkEngine: engine is closed");
+        impl_->exists_total_.fetch_add(1, std::memory_order_relaxed);
 
         // MemTable: skip entirely when empty (e.g. SST-only read after reopen with no writes).
         // approx_size() is a relaxed atomic load — safe and cheap.
@@ -1057,6 +1083,7 @@ namespace akkaradb::engine {
         std::span<const uint8_t> end_key) const {
         if (!impl_ || impl_->closed_.load(std::memory_order_relaxed))
             throw std::runtime_error("AkkEngine: engine is closed");
+        impl_->scans_total_.fetch_add(1, std::memory_order_relaxed);
 
         // ── 1. MemTable snapshot iterator ─────────────────────────────────────
         memtable::MemTable::KeyRange mt_range;
@@ -1078,6 +1105,102 @@ namespace akkaradb::engine {
             impl_->blob_manager_.get()
         );
         return ScanIterator(std::move(impl));
+    }
+
+    // ============================================================================
+    // stats
+    // ============================================================================
+
+    EngineStats AkkEngine::stats() const noexcept {
+        if (!impl_) return {};
+
+        EngineStats s;
+
+        // ── Identity ──────────────────────────────────────────────────────────
+        s.current_seq = impl_->memtable_->last_seq();
+        s.node_id     = impl_->node_id_;
+
+        // ── Engine-level operation counts ─────────────────────────────────────
+        s.puts_total        = impl_->puts_total_.load(std::memory_order_relaxed);
+        s.removes_total     = impl_->removes_total_.load(std::memory_order_relaxed);
+        s.gets_total        = impl_->gets_total_.load(std::memory_order_relaxed);
+        s.gets_memtable_hit = impl_->gets_mt_hit_.load(std::memory_order_relaxed);
+        s.gets_sst_hit      = impl_->gets_sst_hit_.load(std::memory_order_relaxed);
+        s.gets_miss         = impl_->gets_miss_.load(std::memory_order_relaxed);
+        s.exists_total      = impl_->exists_total_.load(std::memory_order_relaxed);
+        s.scans_total       = impl_->scans_total_.load(std::memory_order_relaxed);
+        s.blob_puts_total   = impl_->blob_puts_total_.load(std::memory_order_relaxed);
+
+        // ── MemTable ──────────────────────────────────────────────────────────
+        {
+            const auto snap = impl_->memtable_->snapshot();
+            s.memtable.shard_count               = snap.shard_count;
+            s.memtable.threshold_bytes_per_shard  = snap.threshold_bytes_per_shard;
+            s.memtable.approx_bytes              = snap.approx_bytes;
+            s.memtable.puts_applied              = snap.puts_applied;
+            s.memtable.removes_applied           = snap.removes_applied;
+            s.memtable.flushes_completed         = snap.flushes_completed;
+            s.memtable.bytes_flushed             = snap.bytes_flushed;
+        }
+
+        // ── WAL ───────────────────────────────────────────────────────────────
+        s.wal.enabled = impl_->opts_.wal_enabled;
+        if (impl_->wal_writer_) {
+            const auto snap = impl_->wal_writer_->snapshot();
+            s.wal.shard_count       = snap.shard_count;
+            s.wal.entries_written   = snap.entries_written;
+            s.wal.bytes_written     = snap.bytes_written;
+            s.wal.batches_flushed   = snap.batches_flushed;
+            s.wal.syncs_executed    = snap.syncs_executed;
+            s.wal.segment_rotations = snap.segment_rotations;
+        }
+
+        // ── Blob ──────────────────────────────────────────────────────────────
+        s.blob.enabled = impl_->opts_.blob_enabled && impl_->opts_.wal_enabled;
+        if (impl_->blob_manager_) {
+            s.blob.threshold_bytes = impl_->blob_manager_->threshold();
+            const auto snap = impl_->blob_manager_->snapshot();
+            s.blob.blobs_written      = snap.blobs_written;
+            s.blob.bytes_uncompressed = snap.bytes_uncompressed;
+            s.blob.bytes_on_disk      = snap.bytes_on_disk;
+            s.blob.blobs_deleted      = snap.blobs_deleted;
+            s.blob.gc_cycles          = snap.gc_cycles;
+        }
+
+        // ── SST ───────────────────────────────────────────────────────────────
+        s.sst.enabled = (impl_->sst_manager_ != nullptr);
+        if (impl_->sst_manager_) {
+            const auto levels = impl_->sst_manager_->level_stats();
+            s.sst.levels.reserve(levels.size());
+            uint64_t total_bytes = 0;
+            size_t total_files = 0;
+            for (const auto& lv : levels) {
+                LevelStats ls;
+                ls.level        = lv.level;
+                ls.file_count   = lv.file_count;
+                ls.bytes        = lv.bytes;
+                ls.budget_bytes = lv.budget_bytes;
+                s.sst.levels.push_back(ls);
+                total_bytes += lv.bytes;
+                total_files += lv.file_count;
+            }
+            s.sst.file_count         = total_files;
+            s.sst.bytes              = total_bytes;
+            s.sst.l0_file_count      = levels.empty() ? 0 : levels[0].file_count;
+            s.sst.compaction_pending = impl_->sst_manager_->compaction_pending();
+
+            const auto csnap = impl_->sst_manager_->compaction_snapshot();
+            s.sst.compactions_completed = csnap.compactions_completed;
+            s.sst.files_compacted       = csnap.files_compacted;
+            s.sst.bytes_compacted_in    = csnap.bytes_compacted_in;
+            s.sst.bytes_compacted_out   = csnap.bytes_compacted_out;
+            s.sst.l0_stalls             = csnap.l0_stalls;
+        }
+
+        // ── Version Log ───────────────────────────────────────────────────────
+        s.vlog.enabled = impl_->opts_.version_log_enabled;
+
+        return s;
     }
 
 } // namespace akkaradb::engine

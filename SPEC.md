@@ -1,6 +1,6 @@
 # AkkaraDB — Technical Specification
 
-> Version 0.1.0 · C++23 · Copyright 2026 Swift Storm Studio · AGPL-3.0
+> Version 0.5.0 · C++23 · Copyright 2026 Swift Storm Studio · AGPL-3.0
 
 ---
 
@@ -205,15 +205,20 @@ The `FLAG_BLOB` flag in `AKHdr32.flags` signals that the value bytes are a `Blob
 ┌──────────────────────┬──────────────────────────────┐
 │  Index Prefix (8 B)  │  Encoded field value bytes    │
 │  FNV-1a-64(name +    │  BinPack::encode(entity.field)│
-│  ":index:" + offset) │                               │
+│  ":index:" +         │                               │
+│  field_name)         │                               │
 └──────────────────────┴──────────────────────────────┘
 → value: BinPack::encode(pk)
 ```
 
 **Namespace prefix** is deterministic: same table name → same 8 bytes across all processes and restarts.
 
-**Index prefix** is derived from `FNV-1a-64("<table_name>:index:<field_byte_offset>")`.
-The field byte offset is stable for the same binary and struct layout.
+**Index prefix** is derived from `FNV-1a-64("<table_name>:index:<field_name>")`, where
+`field_name` is the C++ member name extracted at **compile time** via `member_name<MPtr>()`
+(parsing `__FUNCSIG__` on MSVC, `__PRETTY_FUNCTION__` on Clang/GCC).
+Name-based prefixes are **stable across struct layout changes** — adding, removing, or reordering
+unrelated fields does not shift the index prefix, unlike an offset-based scheme.
+The prefix changes only when the field is renamed.
 
 **PK encoding ordering rules** (BinPack wire format):
 
@@ -1002,20 +1007,27 @@ while (it.has_next()) {
     auto [id, user] = it.next();
 }
 
-// Query builder
+// Zero-overhead single-predicate query (FilterView<Pred> — template, inlined by compiler)
 auto results = users
     .query([](const User& u) { return u.age > 21; })
+    .limit(100)
+    .to_vector();
+
+// Multi-predicate builder query (Query — chains .where() calls, uses std::function)
+auto results = users
+    .query()
+    .where([](const User& u) { return u.age > 21; })
     .where([](const User& u) { return u.active; })
     .limit(100)
     .to_vector();
 
-// Range-for
-for (const auto& [id, user] : users.query(...)) { ... }
+// Range-for (works with both FilterView and Query)
+for (const auto& [id, user] : users.query([](const User& u) { return u.active; })) { ... }
 
-// Terminal operators
-auto first = users.query(...).first();    // optional<Entry{id, value}>
-bool any   = users.query(...).any();
-size_t cnt = users.query(...).count();
+// Terminal operators (available on both FilterView and Query)
+auto first = users.query([](const User& u) { return u.age > 18; }).first();  // optional<Entry{id, value}>
+bool any   = users.query([](const User& u) { return u.age > 18; }).any();
+size_t cnt = users.query([](const User& u) { return u.age > 18; }).count();
 ```
 
 **Thread-safety**: `PackedTable` is **not thread-safe**. `AkkEngine` (accessed via `engine()`) is.
@@ -1189,10 +1201,10 @@ target_include_directories(my_app PRIVATE ${AKKARADB_INCLUDE_DIR})
 | Header                                        | Contents                                                         |
 |-----------------------------------------------|------------------------------------------------------------------|
 | `akkaradb/AkkaraDB.hpp`                       | `AkkaraDB`, `StartupMode`, `Options`                             |
-| `akkaradb/PackedTable.hpp`                    | `PackedTable<MPtr>`, `Query`, `Iterator`                         |
+| `akkaradb/PackedTable.hpp`                    | `PackedTable<MPtr>`, `FilterView<Pred>`, `Query`, `Iterator`     |
 | `akkaradb/binpack/BinPack.hpp`                | `BinPack::encode`, `decode`, `encode_into`, `estimate_size`      |
 | `akkaradb/binpack/TypeAdapter.hpp`            | `TypeAdapter<T>` — specialize for custom types                   |
-| `akkaradb/binpack/detail/MemberPtrTraits.hpp` | `class_of<MPtr>`, `member_of<MPtr>`, `field_byte_offset<MPtr>()` |
+| `akkaradb/binpack/detail/MemberPtrTraits.hpp` | `class_of<MPtr>`, `member_of<MPtr>`, `field_byte_offset<MPtr>()`, `member_name<MPtr>()` |
 | `akkaradb/detail/Hash.hpp`                    | `fnv1a_64`, `write_be64`, `read_be64`                            |
 
 Internal headers under `akkara/internal/include/` are part of the build interface but not the public API surface.

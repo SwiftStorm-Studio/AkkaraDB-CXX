@@ -234,6 +234,13 @@ if (sz < 0) {
         std::condition_variable del_cv;
         std::vector<uint64_t> del_queue; // blob_ids to delete
 
+        // ── Stats counters (relaxed atomics — zero overhead on write path) ──
+        std::atomic<uint64_t> blobs_written_{0};
+        std::atomic<uint64_t> bytes_uncompressed_{0};
+        std::atomic<uint64_t> bytes_on_disk_{0};
+        std::atomic<uint64_t> blobs_deleted_{0};
+        std::atomic<uint64_t> gc_cycles_{0};
+
         // ── path helpers ─────────────────────────────────────────────────────
 
         std::filesystem::path id_to_path(uint64_t id) const {
@@ -293,6 +300,22 @@ if (sz < 0) {
             uint8_t hdr_buf[BlobFileHeader::SIZE];
             hdr.serialize(hdr_buf);
             write_atomic_split(path, hdr_buf, BlobFileHeader::SIZE, payload_data, payload_len);
+
+            blobs_written_.fetch_add(1, std::memory_order_relaxed);
+            bytes_uncompressed_.fetch_add(content.size(), std::memory_order_relaxed);
+            bytes_on_disk_.fetch_add(BlobFileHeader::SIZE + payload_len, std::memory_order_relaxed);
+        }
+
+        // ── Snapshot ─────────────────────────────────────────────────────────
+
+        [[nodiscard]] BlobManager::BlobSnapshot snapshot() const noexcept {
+            return BlobManager::BlobSnapshot{
+                blobs_written_.load(std::memory_order_relaxed),
+                bytes_uncompressed_.load(std::memory_order_relaxed),
+                bytes_on_disk_.load(std::memory_order_relaxed),
+                blobs_deleted_.load(std::memory_order_relaxed),
+                gc_cycles_.load(std::memory_order_relaxed),
+            };
         }
 
         // ── GC worker ────────────────────────────────────────────────────────
@@ -313,13 +336,21 @@ if (sz < 0) {
 
                 // Process the batch outside the lock so schedule_delete() is never
                 // blocked by disk rename/unlink latency.
+                uint64_t deleted_count = 0;
                 for (uint64_t id : local_batch) {
                     auto src = id_to_path(id);
                     auto dst = src;
                     dst += ".del";
-                    if (rename_file(src, dst)) { delete_file(dst); }
+                    if (rename_file(src, dst)) {
+                        delete_file(dst);
+                        ++deleted_count;
+                    }
                     // If rename fails (file already gone), ignore silently
                 }
+                if (deleted_count > 0) {
+                    blobs_deleted_.fetch_add(deleted_count, std::memory_order_relaxed);
+                }
+                gc_cycles_.fetch_add(1, std::memory_order_relaxed);
                 local_batch.clear();
             }
         }
@@ -335,6 +366,10 @@ if (sz < 0) {
 
     uint64_t BlobManager::threshold() const noexcept {
         return impl_->threshold;
+    }
+
+    BlobManager::BlobSnapshot BlobManager::snapshot() const noexcept {
+        return impl_->snapshot();
     }
 
     // ============================================================================

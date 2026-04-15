@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 4.1)
 project(AkkaraDB
         DESCRIPTION "Low-latency, crash-safe JVM KV store with WAL & stripe parity"
-        VERSION 0.1.0
+        VERSION 0.5.0
         LANGUAGES CXX
 )
 
@@ -112,6 +112,7 @@ target_sources(akkaradb PUBLIC FILE_SET HEADERS
         FILES
         # High-level ORM / entry-point headers
         ${AKKARADB_INCLUDE_DIR}/akkaradb/Export.hpp
+        ${AKKARADB_INCLUDE_DIR}/akkaradb/Stats.hpp
         ${AKKARADB_INCLUDE_DIR}/akkaradb/detail/Hash.hpp
         ${AKKARADB_INCLUDE_DIR}/akkaradb/PackedTable.hpp
         ${AKKARADB_INCLUDE_DIR}/akkaradb/AkkaraDB.hpp
@@ -127,8 +128,13 @@ target_sources(akkaradb PRIVATE
         ${AKKARADB_SRC_DIR}/AkkaraDB.cpp
 )
 
-# Internal headers (not exposed to users)
-target_sources(akkaradb PRIVATE 
+# Internal headers — installed to include/internal so external consumers can
+# use AkkEngine directly (the Low-Level API).  AkkaraDB::engine() and
+# PackedTable.hpp both expose types from these headers, so they must be
+# available after installation, not just at build time.
+target_sources(akkaradb PUBLIC FILE_SET internal_headers TYPE HEADERS
+        BASE_DIRS ${INTERNAL_INCLUDE_DIR}
+        FILES
         # Core - Buffer
         ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferView.hpp
         ${INTERNAL_INCLUDE_DIR}/core/buffer/MonotonicArena.hpp
@@ -267,22 +273,32 @@ target_include_directories(akkaradb
 # Specify C++ linker
 set_target_properties(akkaradb PROPERTIES LINKER_LANGUAGE CXX)
 
-# Shared library configuration
+# Shared / static library configuration
 if (BUILD_SHARED_LIBS)
+    # ── Shared (.dll / .so) ───────────────────────────────────────────────────
+    # AKKARADB_BUILD_SHARED is PRIVATE: only the library compilation sees it
+    # (triggers __declspec(dllexport) / visibility("default") in Export.hpp).
+    # Consumers see neither BUILD_SHARED nor STATIC → default dllimport path.
     target_compile_definitions(akkaradb PRIVATE AKKARADB_BUILD_SHARED)
     set_target_properties(akkaradb PROPERTIES
-            CXX_VISIBILITY_PRESET hidden
+            CXX_VISIBILITY_PRESET  hidden
             VISIBILITY_INLINES_HIDDEN ON
-            VERSION ${PROJECT_VERSION}
+            VERSION   ${PROJECT_VERSION}
             SOVERSION ${PROJECT_VERSION_MAJOR}
     )
-endif ()
-
-if (WIN32 AND BUILD_SHARED_LIBS)
-    set_target_properties(akkaradb PROPERTIES
-            WINDOWS_EXPORT_ALL_SYMBOLS OFF
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    )
+    if (WIN32)
+        set_target_properties(akkaradb PROPERTIES
+                WINDOWS_EXPORT_ALL_SYMBOLS OFF          # rely on explicit AKDB_API marks
+                RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        )
+    endif ()
+    message(STATUS "AkkaraDB: building as SHARED library (.dll / .so)")
+else ()
+    # ── Static (.lib / .a) ────────────────────────────────────────────────────
+    # AKKARADB_STATIC is PUBLIC: propagates to every target that links akkaradb,
+    # so Export.hpp emits empty AKDB_API macros (no dllimport) for consumers too.
+    target_compile_definitions(akkaradb PUBLIC AKKARADB_STATIC)
+    message(STATUS "AkkaraDB: building as STATIC library (.lib / .a)")
 endif ()
 
 # ==================== Installation ====================
@@ -291,12 +307,41 @@ install(TARGETS akkaradb
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
         RUNTIME DESTINATION bin
-        FILE_SET HEADERS DESTINATION include
+        FILE_SET HEADERS          DESTINATION include
+        FILE_SET internal_headers DESTINATION include/internal
 )
 
 install(EXPORT AkkaraDBTargets
         FILE AkkaraDBTargets.cmake
         NAMESPACE AkkaraDB::
+        DESTINATION lib/cmake/AkkaraDB
+)
+
+# ── find_package() support ────────────────────────────────────────────────────
+# Generates AkkaraDBConfig.cmake and AkkaraDBConfigVersion.cmake in the build
+# tree, then installs them alongside AkkaraDBTargets.cmake so that consumers
+# can locate the package via:
+#
+#   find_package(AkkaraDB 0.1 REQUIRED)
+#   target_link_libraries(myapp PRIVATE AkkaraDB::akkaradb)
+#
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AkkaraDBConfig.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/AkkaraDBConfig.cmake"
+        INSTALL_DESTINATION lib/cmake/AkkaraDB
+)
+
+write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/AkkaraDBConfigVersion.cmake"
+        VERSION       ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion   # 0.x.y is compatible with 0.x.z
+)
+
+install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/AkkaraDBConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/AkkaraDBConfigVersion.cmake"
         DESTINATION lib/cmake/AkkaraDB
 )
 

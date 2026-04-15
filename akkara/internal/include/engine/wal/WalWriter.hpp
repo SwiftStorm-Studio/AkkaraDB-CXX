@@ -230,6 +230,27 @@ namespace akkaradb::wal {
              */
             void close();
 
+            // ── Metrics ──────────────────────────────────────────────────────────
+
+            /**
+             * Point-in-time snapshot of WAL counters aggregated across all shards.
+             * All reads are relaxed atomic loads — no lock acquired, no allocation.
+             */
+            struct WalSnapshot {
+                uint32_t shard_count       = 0;
+                /// Total WAL entries written to disk (puts + deletes).
+                uint64_t entries_written   = 0;
+                /// Raw bytes written to WAL files (batch headers + entry payloads).
+                uint64_t bytes_written     = 0;
+                /// Number of batch write operations (one per file_.write() call).
+                uint64_t batches_flushed   = 0;
+                /// Number of fdatasync() calls (write syncs + rotation syncs + force_sync).
+                uint64_t syncs_executed    = 0;
+                /// Number of segment file rotations (new .akwal file created).
+                uint64_t segment_rotations = 0;
+            };
+            [[nodiscard]] WalSnapshot snapshot() const noexcept;
+
         private:
             WalWriter(); // use create()
 

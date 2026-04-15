@@ -19,6 +19,8 @@
 // internal/include/engine/vlog/VersionLog.hpp
 #pragma once
 
+#include "akkaradb/Export.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -74,7 +76,13 @@ namespace akkaradb::engine::vlog {
     // VersionEntry — one historical write event for a key
     // ============================================================================
 
-    struct VersionEntry {
+    // C4251: value (std::vector<uint8_t>) is a private-member-of-exported-struct —
+    // safe to suppress because both the DLL and its consumers share the same CRT.
+    #ifdef _MSC_VER
+    #pragma warning(push)
+    #pragma warning(disable: 4251)
+    #endif
+    struct AKDB_API VersionEntry {
         uint64_t seq            = 0;
         uint64_t source_node_id = 0;    ///< 0=system/unknown, UINT64_MAX=rollback
         uint64_t timestamp_ns   = 0;    ///< wall-clock nanoseconds since epoch
@@ -88,6 +96,9 @@ namespace akkaradb::engine::vlog {
         /// - TOMBSTONE: empty
         std::vector<uint8_t> value;
     };
+    #ifdef _MSC_VER
+    #pragma warning(pop)
+    #endif
 
     // ============================================================================
     // VersionLog

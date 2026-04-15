@@ -207,7 +207,17 @@ namespace akkaradb {
     private:
         AkkaraDB() = default;
 
+        // C4251: engine_ is private and AkkEngine is AKDB_API — safe to suppress.
+        // suppress: pragma is insufficient when #endif intervenes between pragma and decl;
+        // push/disable/pop is reliable regardless of preprocessor line-number tracking.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4251)
+#endif
         std::unique_ptr<engine::AkkEngine> engine_;
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
     };
 
 } // namespace akkaradb

@@ -31,6 +31,8 @@
 #include <string>
 #include <string_view>
 
+using namespace std::string_view_literals;
+
 using namespace akkaradb::engine;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -61,12 +63,12 @@ static uint16_t arg_uint16(int argc, char** argv, const char* flag, uint16_t def
 static void seed(AkkEngine& eng) {
     struct KV { std::string_view k, v; };
     static constexpr KV PAIRS[] = {
-        { "hello",          "world"                         },
-        { "akkaradb",       "blazing fast KV store"         },
-        { "version",        "4.0.0"                         },
-        { "author",         "Swift Storm Studio"             },
-        { "greeting",       "Konnichiwa!"                   },
-        { "binary_key\x00", "value with embedded null byte" },
+        { "hello",              "world"                         },
+        { "akkaradb",           "blazing fast KV store"         },
+        { "version",            "4.0.0"                         },
+        { "author",             "Swift Storm Studio"             },
+        { "greeting",           "Konnichiwa!"                   },
+        { "binary_key\x00"sv,   "value with embedded null byte" }, // sv: includes \x00 (length=11)
     };
     for (const auto& [k, v] : PAIRS)
         eng.put(as_bytes(k), as_bytes(v));

@@ -306,7 +306,7 @@ namespace akkaradb::engine::vlog {
 
             /// Writes a pruned snapshot to wf (all entries with seq >= threshold).
             /// Populates new_index with the kept entries. Must be called with mu_ held.
-            size_t write_snapshot(FILE* wf, uint64_t seq_threshold, std::unordered_map<std::string, std::vector<VersionEntry>>& new_index) {
+            size_t write_snapshot(FILE* wf, uint64_t seq_threshold, decltype(index_)& new_index) {
                 AkvlogFileHeader file_hdr{};
                 file_hdr.magic = AKVLOG_MAGIC;
                 file_hdr.version = AKVLOG_VERSION;
@@ -495,7 +495,7 @@ namespace akkaradb::engine::vlog {
         #endif
         if (!wf) { throw std::runtime_error("VersionLog::prune_before: cannot open temp file: " + tmp_path.string()); }
 
-        std::unordered_map<std::string, std::vector<VersionEntry>> new_index;
+        decltype(impl_->index_) new_index;
         size_t removed = 0;
         try { removed = impl_->write_snapshot(wf, seq_threshold, new_index); }
         catch (...) {

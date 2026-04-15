@@ -270,6 +270,21 @@ namespace akkaradb::engine::memtable {
             /** Approximate total bytes across all shards (active + immutables). */
             [[nodiscard]] size_t approx_size() const noexcept;
 
+            /**
+             * Point-in-time snapshot of MemTable counters.
+             * All reads are relaxed atomic loads — no lock acquired, no allocation.
+             */
+            struct MemTableSnapshot {
+                uint32_t shard_count              = 0;
+                uint64_t threshold_bytes_per_shard = 0;
+                uint64_t approx_bytes             = 0;  ///< current in-memory bytes
+                uint64_t puts_applied             = 0;  ///< records inserted (incl. recovery)
+                uint64_t removes_applied          = 0;  ///< tombstones inserted
+                uint64_t flushes_completed        = 0;  ///< seal→SST cycles completed
+                uint64_t bytes_flushed            = 0;  ///< bytes handed to SST flush
+            };
+            [[nodiscard]] MemTableSnapshot snapshot() const noexcept;
+
         private:
             class Impl;
             explicit MemTable(const Options& options);

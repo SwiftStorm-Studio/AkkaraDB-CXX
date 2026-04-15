@@ -50,7 +50,9 @@ struct TableHandle {
 
 struct ScanCursor {
     virtual ~ScanCursor() = default;
-    virtual std::optional<std::vector<uint8_t>> next_match() = 0;
+    // Returns a span into an internal buffer valid until the next call.
+    // Empty span signals exhaustion.
+    virtual std::span<const uint8_t> next_match() = 0;
 };
 
 template<typename Iter>
@@ -61,20 +63,24 @@ struct ScanCursorImpl final : ScanCursor {
     Iter                       iter_;
     std::optional<ParsedQuery> query_;   // nullopt → full scan (no predicate filter)
     AkStructSchema             schema_;
+    std::vector<uint8_t>       out_buf_; // reused across next_match calls; no per-entity alloc
 
     ScanCursorImpl(std::vector<uint8_t> sk, std::vector<uint8_t> ek,
                    Iter it, std::optional<ParsedQuery> q, AkStructSchema s)
         : start_key_(std::move(sk)), end_key_(std::move(ek)),
           iter_(std::move(it)), query_(std::move(q)), schema_(std::move(s)) {}
 
-    std::optional<std::vector<uint8_t>> next_match() override {
+    std::span<const uint8_t> next_match() override {
         while (iter_.has_next()) {
             auto pair = iter_.next();
             if (!pair) continue;
-            if (!query_ || query_->matches(pair->second, schema_))
-                return std::move(pair->second);
+            if (!query_ || query_->matches(pair->second, schema_)) {
+                // assign reuses capacity when entity size is stable (fixed schema)
+                out_buf_.assign(pair->second.begin(), pair->second.end());
+                return std::span<const uint8_t>(out_buf_);
+            }
         }
-        return std::nullopt;
+        return {};
     }
 };
 
@@ -95,7 +101,9 @@ static std::unique_ptr<ScanCursor> make_scan_cursor(
 
 struct KeyScanCursor {
     virtual ~KeyScanCursor() = default;
-    virtual std::optional<std::vector<uint8_t>> next_key() = 0;
+    // Returns a span into an internal buffer valid until the next call.
+    // Empty span signals exhaustion.
+    virtual std::span<const uint8_t> next_key() = 0;
 };
 
 template<typename Iter>
@@ -103,17 +111,19 @@ struct KeyScanCursorImpl final : KeyScanCursor {
     std::vector<uint8_t> start_key_;
     std::vector<uint8_t> end_key_;
     Iter                 iter_;
+    std::vector<uint8_t> out_buf_; // reused across next_key calls
 
     KeyScanCursorImpl(std::vector<uint8_t> sk, std::vector<uint8_t> ek, Iter it)
         : start_key_(std::move(sk)), end_key_(std::move(ek)), iter_(std::move(it)) {}
 
-    std::optional<std::vector<uint8_t>> next_key() override {
+    std::span<const uint8_t> next_key() override {
         while (iter_.has_next()) {
             auto pair = iter_.next();
             if (!pair) continue;
-            return std::move(pair->first);
+            out_buf_.assign(pair->first.begin(), pair->first.end());
+            return std::span<const uint8_t>(out_buf_);
         }
-        return std::nullopt;
+        return {};
     }
 };
 
@@ -127,6 +137,25 @@ static std::unique_ptr<KeyScanCursor> make_key_scan_cursor(
 
 // ── JNI helpers ──────────────────────────────────────────────────────────────
 
+// Thread-local scratch buffers — reused across calls to avoid per-operation
+// heap allocation on the hot CRUD and cursor paths.
+thread_local std::vector<uint8_t> tls_key_buf;   // composite [prefix|pk] key
+thread_local std::vector<uint8_t> tls_val_buf;   // entity / raw value bytes
+thread_local std::vector<uint8_t> tls_query_buf; // serialized query AST bytes
+
+// Read a jbyteArray into a caller-supplied buffer; returns a span into it.
+// Use for transient data that does not outlive the current JNI call.
+static std::span<const uint8_t> jbytes_to_span(JNIEnv* env, jbyteArray arr,
+                                                std::vector<uint8_t>& buf) {
+    if (!arr) { buf.clear(); return {}; }
+    const jsize len = env->GetArrayLength(arr);
+    buf.resize(static_cast<size_t>(len));
+    env->GetByteArrayRegion(arr, 0, len, reinterpret_cast<jbyte*>(buf.data()));
+    return std::span<const uint8_t>(buf);
+}
+
+// Read a jbyteArray into a newly-allocated vector.
+// Use only when the data must outlive the current JNI call (e.g., cursor key ranges).
 static std::vector<uint8_t> jbytes_to_vec(JNIEnv* env, jbyteArray arr) {
     if (!arr) return {};
     const jsize len = env->GetArrayLength(arr);
@@ -135,12 +164,17 @@ static std::vector<uint8_t> jbytes_to_vec(JNIEnv* env, jbyteArray arr) {
     return vec;
 }
 
-static jbyteArray vec_to_jbytes(JNIEnv* env, const std::vector<uint8_t>& vec) {
-    jbyteArray arr = env->NewByteArray(static_cast<jsize>(vec.size()));
+// Write a span to a new jbyteArray (one allocation + one copy).
+static jbyteArray span_to_jbytes(JNIEnv* env, std::span<const uint8_t> data) {
+    jbyteArray arr = env->NewByteArray(static_cast<jsize>(data.size()));
     if (!arr) return nullptr;
-    env->SetByteArrayRegion(arr, 0, static_cast<jsize>(vec.size()),
-                            reinterpret_cast<const jbyte*>(vec.data()));
+    env->SetByteArrayRegion(arr, 0, static_cast<jsize>(data.size()),
+                            reinterpret_cast<const jbyte*>(data.data()));
     return arr;
+}
+
+static jbyteArray vec_to_jbytes(JNIEnv* env, const std::vector<uint8_t>& vec) {
+    return span_to_jbytes(env, std::span<const uint8_t>(vec));
 }
 
 static std::string jstring_to_str(JNIEnv* env, jstring js) {
@@ -156,15 +190,47 @@ static void throw_jni(JNIEnv* env, const char* cls, const char* msg) {
     if (ex) env->ThrowNew(ex, msg);
 }
 
-// Build prefixed key: [8 B prefix][pk_bytes]
-static std::vector<uint8_t> make_key(const std::array<uint8_t, 8>& prefix,
-                                     const std::vector<uint8_t>&    pk_bytes) {
-    std::vector<uint8_t> key;
-    key.reserve(8 + pk_bytes.size());
-    key.insert(key.end(), prefix.begin(), prefix.end());
-    key.insert(key.end(), pk_bytes.begin(), pk_bytes.end());
-    return key;
+// Build prefixed key [8 B prefix | pk] into tls_key_buf.
+// Returns a span valid until the next build_key call on this thread.
+static std::span<const uint8_t> build_key(JNIEnv* env,
+                                           const std::array<uint8_t, 8>& prefix,
+                                           jbyteArray jpk) {
+    const jsize pk_len = env->GetArrayLength(jpk);
+    tls_key_buf.resize(8 + static_cast<size_t>(pk_len));
+    std::memcpy(tls_key_buf.data(), prefix.data(), 8);
+    env->GetByteArrayRegion(jpk, 0, pk_len,
+                            reinterpret_cast<jbyte*>(tls_key_buf.data() + 8));
+    return std::span<const uint8_t>(tls_key_buf);
 }
+
+// ── ParsedQuery cache ─────────────────────────────────────────────────────────
+//
+// Queries are compile-time constants (IR plugin generates fixed AkkQuery objects),
+// so the serialized bytes are identical on every call site invocation.
+// A direct-mapped thread-local cache with CAP=16 slots gives ~100% hit rate
+// in steady state with zero contention and zero heap allocation on a cache hit.
+
+static uint64_t fnv1a_bytes(std::span<const uint8_t> data) noexcept {
+    uint64_t h = 14695981039346656037ULL;
+    for (uint8_t b : data) { h ^= b; h *= 1099511628211ULL; }
+    return h;
+}
+
+struct QueryCache {
+    static constexpr size_t CAP = 16;
+    struct Slot { uint64_t hash = 0; ParsedQuery query; bool valid = false; };
+    std::array<Slot, CAP> slots{};
+
+    [[nodiscard]] const ParsedQuery* get(uint64_t h) const noexcept {
+        const auto& s = slots[h % CAP];
+        return (s.valid && s.hash == h) ? &s.query : nullptr;
+    }
+    void put(uint64_t h, ParsedQuery q) {
+        auto& s = slots[h % CAP];
+        s.hash = h; s.query = std::move(q); s.valid = true;
+    }
+};
+thread_local QueryCache tls_query_cache;
 
 // Compute namespace prefix from table name
 static std::array<uint8_t, 8> make_prefix(const std::string& name) {
@@ -249,8 +315,8 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativePut(
 {
     try {
         auto* th    = reinterpret_cast<TableHandle*>(handle);
-        auto  key   = make_key(th->prefix, jbytes_to_vec(env, jPkBytes));
-        auto  value = jbytes_to_vec(env, jEntityBytes);
+        auto  key   = build_key(env, th->prefix, jPkBytes);
+        auto  value = jbytes_to_span(env, jEntityBytes, tls_val_buf);
         th->engine->put(key, value);
     } catch (const std::exception& e) {
         throw_jni(env, "java/lang/RuntimeException", e.what());
@@ -263,7 +329,7 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeGet(
 {
     try {
         auto* th  = reinterpret_cast<TableHandle*>(handle);
-        auto  key = make_key(th->prefix, jbytes_to_vec(env, jPkBytes));
+        auto  key = build_key(env, th->prefix, jPkBytes);
         auto  opt = th->engine->get(key);
         return opt ? vec_to_jbytes(env, *opt) : nullptr;
     } catch (const std::exception& e) {
@@ -278,7 +344,7 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeRemove(
 {
     try {
         auto* th  = reinterpret_cast<TableHandle*>(handle);
-        auto  key = make_key(th->prefix, jbytes_to_vec(env, jPkBytes));
+        auto  key = build_key(env, th->prefix, jPkBytes);
         th->engine->remove(key);
     } catch (const std::exception& e) {
         throw_jni(env, "java/lang/RuntimeException", e.what());
@@ -291,7 +357,7 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeExistsPk(
 {
     try {
         auto* th  = reinterpret_cast<TableHandle*>(handle);
-        auto  key = make_key(th->prefix, jbytes_to_vec(env, jPkBytes));
+        auto  key = build_key(env, th->prefix, jPkBytes);
         return th->engine->get(key).has_value() ? JNI_TRUE : JNI_FALSE;
     } catch (const std::exception& e) {
         throw_jni(env, "java/lang/RuntimeException", e.what());
@@ -320,9 +386,14 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeOpenCursor(
 
         std::optional<ParsedQuery> query;
         if (jqueryBytes) {
-            auto  qvec  = jbytes_to_vec(env, jqueryBytes);
-            auto  qspan = std::span<const uint8_t>(qvec);
-            query = ParsedQuery::from_bytes(qspan);
+            auto qspan = jbytes_to_span(env, jqueryBytes, tls_query_buf);
+            const uint64_t qhash = fnv1a_bytes(qspan);
+            if (const auto* cached = tls_query_cache.get(qhash)) {
+                query = *cached;
+            } else {
+                query = ParsedQuery::from_bytes(qspan);
+                tls_query_cache.put(qhash, *query);
+            }
         }
 
         auto iter   = th->engine->scan(start_key, end_key);
@@ -343,7 +414,7 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeCursorNext(
     try {
         auto* cursor = reinterpret_cast<ScanCursor*>(cursorHandle);
         auto  result = cursor->next_match();
-        return result ? vec_to_jbytes(env, *result) : nullptr;
+        return result.empty() ? nullptr : span_to_jbytes(env, result);
     } catch (const std::exception& e) {
         throw_jni(env, "java/lang/RuntimeException", e.what());
         return nullptr;
@@ -388,8 +459,8 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeRawPut(
 {
     try {
         auto* th  = reinterpret_cast<TableHandle*>(handle);
-        auto  key = jbytes_to_vec(env, jkey);
-        auto  val = jbytes_to_vec(env, jval);
+        auto  key = jbytes_to_span(env, jkey, tls_key_buf);
+        auto  val = jbytes_to_span(env, jval, tls_val_buf);
         th->engine->put(key, val);
     } catch (const std::exception& e) {
         throw_jni(env, "java/lang/RuntimeException", e.what());
@@ -402,7 +473,7 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeRawRemove(
 {
     try {
         auto* th  = reinterpret_cast<TableHandle*>(handle);
-        auto  key = jbytes_to_vec(env, jkey);
+        auto  key = jbytes_to_span(env, jkey, tls_key_buf);
         th->engine->remove(key);
     } catch (const std::exception& e) {
         throw_jni(env, "java/lang/RuntimeException", e.what());
@@ -435,7 +506,7 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeRawCursorNext(
     try {
         auto* cursor = reinterpret_cast<KeyScanCursor*>(cursorHandle);
         auto  result = cursor->next_key();
-        return result ? vec_to_jbytes(env, *result) : nullptr;
+        return result.empty() ? nullptr : span_to_jbytes(env, result);
     } catch (const std::exception& e) {
         throw_jni(env, "java/lang/RuntimeException", e.what());
         return nullptr;
@@ -458,7 +529,7 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeGetAt(
 {
     try {
         auto* th  = reinterpret_cast<TableHandle*>(handle);
-        auto  key = make_key(th->prefix, jbytes_to_vec(env, jPkBytes));
+        auto  key = build_key(env, th->prefix, jPkBytes);
         auto  opt = th->engine->get_at(key, static_cast<uint64_t>(seq));
         return opt ? vec_to_jbytes(env, *opt) : nullptr;
     } catch (const std::exception& e) {
@@ -473,7 +544,7 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeHistory(
 {
     try {
         auto* th      = reinterpret_cast<TableHandle*>(handle);
-        auto  key     = make_key(th->prefix, jbytes_to_vec(env, jPkBytes));
+        auto  key     = build_key(env, th->prefix, jPkBytes);
         auto  entries = th->engine->history(key);
 
         // Wire format:
@@ -506,7 +577,7 @@ Java_dev_swiftstorm_akkaradb_engine_JniPackedTable_nativeRollbackKey(
 {
     try {
         auto* th  = reinterpret_cast<TableHandle*>(handle);
-        auto  key = make_key(th->prefix, jbytes_to_vec(env, jPkBytes));
+        auto  key = build_key(env, th->prefix, jPkBytes);
         th->engine->rollback_key(key, static_cast<uint64_t>(targetSeq));
     } catch (const std::exception& e) {
         throw_jni(env, "java/lang/RuntimeException", e.what());

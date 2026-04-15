@@ -411,6 +411,7 @@ namespace akkaradb::wal {
                         fast_queue_.push_back(FastEntry{static_cast<uint32_t>(offset), static_cast<uint32_t>(size)});
                     }
                 }
+                entries_written_.fetch_add(1, std::memory_order_relaxed);
                 // Notify outside the lock: avoids the "notify-then-block" pattern.
                 // Only notify when transitioning empty→non-empty; flusher is already
                 // awake while work is queued.
@@ -454,6 +455,14 @@ namespace akkaradb::wal {
                 if (term_sync_error_) std::rethrow_exception(term_sync_error_);
             }
 
+            void accumulate_stats(WalWriter::WalSnapshot& snap) const noexcept {
+                snap.entries_written   += entries_written_.load(std::memory_order_relaxed);
+                snap.bytes_written     += bytes_written_.load(std::memory_order_relaxed);
+                snap.batches_flushed   += batches_flushed_.load(std::memory_order_relaxed);
+                snap.syncs_executed    += syncs_executed_.load(std::memory_order_relaxed);
+                snap.segment_rotations += segment_rotations_.load(std::memory_order_relaxed);
+            }
+
         private:
             // ── Segment path helper ───────────────────────────────────────────────
 
@@ -479,12 +488,14 @@ namespace akkaradb::wal {
             void rotate_segment() {
                 // Ensure the current segment is fully durable before closing.
                 file_.fdatasync();
+                syncs_executed_.fetch_add(1, std::memory_order_relaxed);
                 file_.close();
 
                 ++segment_id_;
                 file_ = FileHandle::open(segment_path(shard_id_, segment_id_));
                 write_segment_header();
                 current_segment_bytes_ = WalSegmentHeader::SIZE;
+                segment_rotations_.fetch_add(1, std::memory_order_relaxed);
             }
 
             // ── Flusher loop ──────────────────────────────────────────────────────
@@ -622,7 +633,12 @@ namespace akkaradb::wal {
                 std::exception_ptr write_ex;
                 try {
                     file_.write(view.data(), batch_total);
-                    if (!nosync_mode_) file_.fdatasync();
+                    bytes_written_.fetch_add(batch_total, std::memory_order_relaxed);
+                    batches_flushed_.fetch_add(1, std::memory_order_relaxed);
+                    if (!nosync_mode_) {
+                        file_.fdatasync();
+                        syncs_executed_.fetch_add(1, std::memory_order_relaxed);
+                    }
                     current_segment_bytes_ += batch_total;
                 }
                 catch (...) { write_ex = std::current_exception(); }
@@ -679,7 +695,12 @@ namespace akkaradb::wal {
                 std::exception_ptr write_ex;
                 try {
                     file_.write(view.data(), batch_total);
-                    if (!nosync_mode_) file_.fdatasync();
+                    bytes_written_.fetch_add(batch_total, std::memory_order_relaxed);
+                    batches_flushed_.fetch_add(1, std::memory_order_relaxed);
+                    if (!nosync_mode_) {
+                        file_.fdatasync();
+                        syncs_executed_.fetch_add(1, std::memory_order_relaxed);
+                    }
                     current_segment_bytes_ += batch_total;
                 }
                 catch (...) { write_ex = std::current_exception(); }
@@ -699,6 +720,7 @@ namespace akkaradb::wal {
                     switch (cmd.type) {
                         case Command::Type::FORCE_SYNC:
                             file_.fdatasync();
+                            syncs_executed_.fetch_add(1, std::memory_order_relaxed);
                             if (cmd.waiter) cmd.waiter->signal();
                             return false;
 
@@ -798,6 +820,13 @@ namespace akkaradb::wal {
 
             bool needs_segment_header_;
             uint64_t current_segment_bytes_; ///< Bytes written to the active segment so far
+
+            // ── Stats counters (relaxed atomics — zero overhead on write path) ──
+            std::atomic<uint64_t> entries_written_{0};
+            std::atomic<uint64_t> bytes_written_{0};
+            std::atomic<uint64_t> batches_flushed_{0};
+            std::atomic<uint64_t> syncs_executed_{0};
+            std::atomic<uint64_t> segment_rotations_{0};
 
             // ── Command queues ────────────────────────────────────────────────────
             //
@@ -917,6 +946,13 @@ namespace akkaradb::wal {
                 for (auto& shard : shards_) shard->stop();
             }
 
+            [[nodiscard]] WalWriter::WalSnapshot snapshot() const noexcept {
+                WalWriter::WalSnapshot snap;
+                snap.shard_count = shard_count_;
+                for (const auto& shard : shards_) shard->accumulate_stats(snap);
+                return snap;
+            }
+
         private:
             void enqueue_entry(uint64_t key_fp64, const void* data, size_t size) {
                 const uint32_t shard_id = (shard_count_ == 1) ? 0u : shard_for(key_fp64, shard_count_);
@@ -971,4 +1007,5 @@ namespace akkaradb::wal {
     void WalWriter::force_sync() { impl_->force_sync(); }
     void WalWriter::truncate() { impl_->truncate(); }
     void WalWriter::close() { impl_->close(); }
+    WalWriter::WalSnapshot WalWriter::snapshot() const noexcept { return impl_->snapshot(); }
 } // namespace akkaradb::wal
