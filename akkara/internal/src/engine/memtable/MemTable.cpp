@@ -452,13 +452,21 @@ namespace akkaradb::engine::memtable {
 
             // ── Write ─────────────────────────────────────────────────────────
 
-            void put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
+            void put(
+                std::span<const uint8_t> key,
+                std::span<const uint8_t> value,
+                uint64_t seq,
+                uint8_t flags,
+                uint64_t precomputed_fp64,
+                uint64_t precomputed_mk = 0
+            ) {
                 puts_applied_.fetch_add(1, std::memory_order_relaxed);
                 const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : core::AKHdr32::compute_key_fp64(key.data(), key.size());
                 const uint32_t si = shard_for(fp64, shard_count_);
 
-                auto record = core::MemRecord::create(key, value, seq, flags, fp64);
-                advance_seq_gen(seq);
+                auto record = core::MemRecord::create(key, value, seq, flags, fp64, precomputed_mk);
+                // advance_seq_gen removed from hot path: callers using externally-assigned
+                // seqs (WAL recovery, replication) must call advance_seq() explicitly.
 
                 if (shards_[si]->put(std::move(record))) trigger_flush(si);
             }
@@ -469,7 +477,8 @@ namespace akkaradb::engine::memtable {
                 const uint32_t si = shard_for(fp64, shard_count_);
 
                 auto record = core::MemRecord::tombstone(key, seq, fp64);
-                advance_seq_gen(seq);
+                // advance_seq_gen removed from hot path: callers using externally-assigned
+                // seqs (WAL recovery, replication) must call advance_seq() explicitly.
 
                 if (shards_[si]->put(std::move(record))) trigger_flush(si);
             }
@@ -587,11 +596,18 @@ namespace akkaradb::engine::memtable {
     MemTable::MemTable(const Options& options) : impl_{std::make_unique<Impl>(options)} {}
     MemTable::~MemTable() = default;
 
-    void MemTable::put(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
-        impl_->put(key, value, seq, flags, precomputed_fp64);
-    }
+    void MemTable::put(
+        std::span<const uint8_t> key,
+        std::span<const uint8_t> value,
+        uint64_t seq,
+        uint8_t flags,
+        uint64_t precomputed_fp64,
+        uint64_t precomputed_mk
+    ) { impl_->put(key, value, seq, flags, precomputed_fp64, precomputed_mk); }
 
     void MemTable::remove(std::span<const uint8_t> key, uint64_t seq) { impl_->remove(key, seq); }
+
+    void MemTable::advance_seq(uint64_t seq) noexcept { impl_->advance_seq_gen(seq); }
 
     std::optional<core::MemRecord> MemTable::get(std::span<const uint8_t> key) const { return impl_->get(key); }
     std::optional<bool> MemTable::get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const { return impl_->get_into(key, out); }

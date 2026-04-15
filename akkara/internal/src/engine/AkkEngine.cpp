@@ -34,7 +34,7 @@
 #include "core/record/AKHdr32.hpp"
 
 #include <atomic>
-#include <chrono>
+#include <ctime>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -167,9 +167,13 @@ namespace akkaradb::engine {
 
     namespace {
         /// Returns the current wall-clock time in nanoseconds since epoch.
+        /// Uses timespec_get (C17) which on MSVC calls GetSystemTimeAsFileTime (~10 ns)
+        /// instead of system_clock::now() → GetSystemTimePreciseAsFileTime (~50 ns).
+        /// Millisecond resolution is sufficient for VersionLog timestamps; seq provides ordering.
         uint64_t now_ns() noexcept {
-            using namespace std::chrono;
-            return static_cast<uint64_t>(duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count());
+            struct timespec ts{};
+            timespec_get(&ts, TIME_UTC);
+            return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL + static_cast<uint64_t>(ts.tv_nsec);
         }
 
         /**
@@ -289,9 +293,11 @@ namespace akkaradb::engine {
                     // flags carries FLAG_BLOB when the Replica received a ReplBlobPut
                     // for this seq before the ReplEntry arrived (TCP ordering guarantee).
                     if (wal_writer_) wal_writer_->append_put(key, val, seq, fp64, mk, flags);
-                    memtable_->put(key, val, seq, flags, fp64);
+                    memtable_->put(key, val, seq, flags, fp64, mk);
                     if (version_log_) version_log_->append(key, seq, source_node_id, now_ns(), flags, val);
                 }
+                // Seq comes from the Primary — advance local counter to stay in sync.
+                memtable_->advance_seq(seq);
             }
 
             // =========================================================================
@@ -462,6 +468,7 @@ namespace akkaradb::engine {
                 [&](const wal::WalRecordOpRef& ref) {
                     if (ref.is_tombstone()) { mt.remove(ref.key(), ref.seq()); }
                     else { mt.put(ref.key(), ref.value(), ref.seq(), ref.header().flags); }
+                    mt.advance_seq(ref.seq());
                 },
 
                 // Commit handler: informational only at this stage
@@ -649,7 +656,7 @@ namespace akkaradb::engine {
             // 4. WAL + MemTable store the BlobRef (inline, 20 bytes), tagged FLAG_BLOB
             //    so get() can identify them reliably without heuristics.
             if (impl_->wal_writer_) impl_->wal_writer_->append_put(key, ref_span, seq, fp64, mk, core::AKHdr32::FLAG_BLOB);
-            impl_->memtable_->put(key, ref_span, seq, core::AKHdr32::FLAG_BLOB, fp64);
+            impl_->memtable_->put(key, ref_span, seq, core::AKHdr32::FLAG_BLOB, fp64, mk);
 
             // 5. Record in VersionLog (stores the 20-byte BlobRef, FLAG_BLOB)
             if (impl_->version_log_) impl_->version_log_->append(key, seq, impl_->node_id_, now_ns(), core::AKHdr32::FLAG_BLOB, ref_span);
@@ -662,7 +669,7 @@ namespace akkaradb::engine {
 
         // ── Inline path ───────────────────────────────────────────────────────
         if (impl_->wal_writer_) impl_->wal_writer_->append_put(key, value, seq, fp64, mk);
-        impl_->memtable_->put(key, value, seq, core::AKHdr32::FLAG_NORMAL, fp64);
+        impl_->memtable_->put(key, value, seq, core::AKHdr32::FLAG_NORMAL, fp64, mk);
         if (impl_->version_log_) impl_->version_log_->append(key, seq, impl_->node_id_, now_ns(), core::AKHdr32::FLAG_NORMAL, value);
 
         if (impl_->repl_server_) impl_->repl_server_->ship(seq, wal::WalEntryType::Record, key, value);
@@ -746,7 +753,10 @@ namespace akkaradb::engine {
                 // is served from memory.  Blob records are promoted as-is (the
                 // inline BlobRef bytes are still correct); the BlobManager entry
                 // remains alive independently.
-                if (impl_->opts_.sst_promote_reads) { impl_->memtable_->put(key, stored_val, sst_rec->seq(), sst_rec->flags()); }
+                if (impl_->opts_.sst_promote_reads) {
+                    impl_->memtable_->put(key, stored_val, sst_rec->seq(), sst_rec->flags());
+                    impl_->memtable_->advance_seq(sst_rec->seq());
+                }
 
                 if (impl_->blob_manager_ && (sst_rec->flags() & core::AKHdr32::FLAG_BLOB)) {
                     const blob::BlobRef ref = blob::decode_blob_ref(stored_val.data());
@@ -794,7 +804,10 @@ namespace akkaradb::engine {
                     // Read-through promotion needs seq/flags — fall back to get().
                     if (impl_->opts_.sst_promote_reads) {
                         const auto sst_rec = impl_->sst_manager_->get(key);
-                        if (sst_rec) impl_->memtable_->put(key, sst_rec->value(), sst_rec->seq(), sst_rec->flags());
+                        if (sst_rec) {
+                            impl_->memtable_->put(key, sst_rec->value(), sst_rec->seq(), sst_rec->flags());
+                            impl_->memtable_->advance_seq(sst_rec->seq());
+                        }
                     }
 
                     return true;

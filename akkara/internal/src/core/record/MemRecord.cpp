@@ -28,7 +28,14 @@ namespace akkaradb::core {
 
     // ── Factories ─────────────────────────────────────────────────────────────
 
-    MemRecord MemRecord::create(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
+    MemRecord MemRecord::create(
+        std::span<const uint8_t> key,
+        std::span<const uint8_t> value,
+        uint64_t seq,
+        uint8_t flags,
+        uint64_t precomputed_fp64,
+        uint64_t precomputed_mk
+    ) {
         const AKHdr32 header{
             .k_len = static_cast<uint16_t>(key.size()),
             .v_len = static_cast<uint16_t>(value.size()),
@@ -37,7 +44,7 @@ namespace akkaradb::core {
             .flags = flags,
             .pad0 = 0,
             .key_fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : AKHdr32::compute_key_fp64(key.data(), key.size()),
-            .mini_key = AKHdr32::build_mini_key(key.data(), key.size()),
+            .mini_key = precomputed_mk != 0 ? precomputed_mk : AKHdr32::build_mini_key(key.data(), key.size()),
         };
         // SmallBuffer: inline for key+value <= 24 bytes (zero heap alloc), heap otherwise.
         return MemRecord{header, SmallBuffer{key.data(), key.size(), value.data(), value.size()}};

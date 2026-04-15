@@ -80,7 +80,9 @@ namespace akkaradb::core {
                 std::span<const uint8_t> value,
                 uint64_t seq,
                 uint8_t flags = AKHdr32::FLAG_NORMAL,
-                uint64_t precomputed_fp64 = 0 ///< 0 = compute internally
+                uint64_t precomputed_fp64 = 0,
+                ///< 0 = compute internally
+                uint64_t precomputed_mk = 0 ///< 0 = compute internally
             );
 
             /**

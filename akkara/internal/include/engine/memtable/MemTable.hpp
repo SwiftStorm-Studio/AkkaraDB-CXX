@@ -183,7 +183,8 @@ namespace akkaradb::engine::memtable {
                 std::span<const uint8_t> value,
                 uint64_t seq,
                 uint8_t flags = core::AKHdr32::FLAG_NORMAL,
-                uint64_t precomputed_fp64 = 0
+                uint64_t precomputed_fp64 = 0,
+                uint64_t precomputed_mk = 0
             );
 
             /**
@@ -193,6 +194,16 @@ namespace akkaradb::engine::memtable {
              * @param seq Sequence number
              */
             void remove(std::span<const uint8_t> key, uint64_t seq);
+
+            /**
+             * Advances seq_gen_ to max(seq_gen_, seq+1).
+             *
+             * Must be called explicitly after put()/remove() when the seq was assigned
+             * externally (WAL recovery, replication apply).  Normal writes go through
+             * next_seq() which already bumps the counter, so calling this is wasteful
+             * in the hot path.
+             */
+            void advance_seq(uint64_t seq) noexcept;
 
             // ── Read path ─────────────────────────────────────────────────────
 
