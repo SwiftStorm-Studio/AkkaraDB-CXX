@@ -371,7 +371,7 @@ namespace akkaradb::engine::sst {
 
             // ── Background compaction thread pool ──────────────────────────
             std::vector<std::thread> compact_pool_; ///< N worker threads
-            std::mutex compact_notify_mu_;
+            mutable std::mutex compact_notify_mu_;
             std::condition_variable compact_cv_;
             bool compact_requested_ = false;
             std::atomic<bool> shutting_down_{false};

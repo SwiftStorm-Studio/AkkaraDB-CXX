@@ -1042,4 +1042,29 @@ namespace akkaradb::engine::sst {
         };
     }
 
+    // ============================================================================
+    // level_stats
+    // ============================================================================
+
+    std::vector<SSTManager::LevelStats> SSTManager::level_stats() const {
+        std::shared_lock lock(sst_mu_);
+        std::vector<LevelStats> result;
+        result.reserve(static_cast<size_t>(opts_.max_levels));
+        for (int lvl = 0; lvl < opts_.max_levels; ++lvl) {
+            const auto& lv = levels_[static_cast<size_t>(lvl)];
+            uint64_t bytes = 0;
+            for (const auto& m : lv) bytes += m.file_size_bytes;
+            result.push_back(LevelStats{lvl, lv.size(), bytes, level_budget(lvl)});
+        }
+        return result;
+    }
+
+    // ============================================================================
+    // compaction_pending
+    // ============================================================================
+
+    bool SSTManager::compaction_pending() const noexcept {
+        std::lock_guard lk(compact_notify_mu_);
+        return compact_requested_;
+    }
 } // namespace akkaradb::engine::sst

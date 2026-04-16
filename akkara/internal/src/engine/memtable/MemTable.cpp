@@ -511,6 +511,13 @@ namespace akkaradb::engine::memtable {
             [[nodiscard]] uint64_t next_seq() noexcept { return seq_gen_.fetch_add(1, std::memory_order_relaxed); }
             [[nodiscard]] uint64_t last_seq() const noexcept { return seq_gen_.load(std::memory_order_relaxed); }
 
+            void advance_seq_gen(uint64_t observed_seq) noexcept {
+                uint64_t cur = seq_gen_.load(std::memory_order_relaxed);
+                while (cur <= observed_seq) {
+                    if (seq_gen_.compare_exchange_weak(cur, observed_seq + 1, std::memory_order_relaxed, std::memory_order_relaxed)) break;
+                }
+            }
+
             // ── Flush control ─────────────────────────────────────────────────
 
             void flush_hint() { for (uint32_t i = 0; i < shard_count_; ++i) if (shards_[i]->approx_bytes() > threshold_bytes_per_shard_) trigger_flush(i); }
@@ -548,13 +555,6 @@ namespace akkaradb::engine::memtable {
             }
 
         private:
-            void advance_seq_gen(uint64_t observed_seq) noexcept {
-                uint64_t cur = seq_gen_.load(std::memory_order_relaxed);
-                while (cur <= observed_seq) {
-                    if (seq_gen_.compare_exchange_weak(cur, observed_seq + 1, std::memory_order_relaxed, std::memory_order_relaxed)) break;
-                }
-            }
-
             void trigger_flush(uint32_t si) {
                 if (!flushers_[si]) return;
                 auto [id, vec, bytes] = shards_[si]->seal_active();
