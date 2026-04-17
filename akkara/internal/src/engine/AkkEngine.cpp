@@ -1093,7 +1093,8 @@ namespace akkaradb::engine {
 
     AkkEngine::ScanIterator AkkEngine::scan(
         std::span<const uint8_t> start_key,
-        std::span<const uint8_t> end_key) const {
+        std::span<const uint8_t> end_key
+    ) const {
         if (!impl_ || impl_->closed_.load(std::memory_order_relaxed))
             throw std::runtime_error("AkkEngine: engine is closed");
         impl_->scans_total_.fetch_add(1, std::memory_order_relaxed);
