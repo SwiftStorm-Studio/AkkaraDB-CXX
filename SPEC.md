@@ -1,4 +1,4 @@
-# AkkaraDB — Technical Specification
+# AkkaraDB — Technical Specification v4
 
 > Version 0.5.0 · C++23 · Copyright 2026 Swift Storm Studio · AGPL-3.0
 
