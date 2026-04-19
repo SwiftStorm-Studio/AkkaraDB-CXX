@@ -1,15 +1,15 @@
-# AkkaraDB C++ - Shared Library Build Configuration
 cmake_minimum_required(VERSION 4.1)
+
 project(AkkaraDB
         DESCRIPTION "Low-latency, crash-safe JVM KV store with WAL & stripe parity"
         VERSION 0.5.0
         LANGUAGES CXX
 )
 
-# ==================== ! Build Options ! ====================
+# ==================== Build Options ====================
 option(BUILD_SHARED_LIBS "Build shared libraries (.so/.dll)" ON)
 option(AKKARADB_BUILD_TESTS "Build unit tests" OFF)
-option(AKKARADB_ENABLE_SIMD "Enable SIMD optimizations (SSE4.2/AVX2)" ON)
+option(AKKARADB_BUILD_JNI "Build JNI bridge for JVM integration" OFF)
 
 # ==================== C++ Standard ====================
 set(CMAKE_CXX_STANDARD 23)
@@ -35,13 +35,11 @@ else ()
     add_compile_options(-Wall -Wextra -Werror -pedantic)
 endif ()
 
-# Enable SIMD if requested
-if (AKKARADB_ENABLE_SIMD)
-    if (MSVC)
-        add_compile_options(/arch:AVX2)
-    else ()
-        add_compile_options(-msse4.2 -mavx2)
-    endif ()
+# Always enable SIMD optimizations (SSE4.2 + AVX2)
+if(MSVC)
+    add_compile_options(/arch:AVX2)
+else()
+    add_compile_options(-msse4.2 -mavx2)
 endif ()
 
 # ==================== Windows-specific definitions ====================
@@ -50,7 +48,6 @@ if (WIN32)
 endif ()
 
 # ==================== Dependencies ====================
-
 include(FetchContent)
 
 # ── Zstd compression ──────────────────────────────────────────────────────────
@@ -65,21 +62,14 @@ set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-# Suppress two warnings produced by zstd v1.5.6's CMakeLists.txt:
-#   1. cmake_minimum_required(VERSION 2.8.12) — CMake 4.x deprecation
-#      (MessageType::DEPRECATION, suppressed by CMAKE_WARN_DEPRECATED OFF)
-#   2. "BUILD_SHARED_LIBS is ON, but ZSTD_BUILD_SHARED is OFF…"
-#      (message(WARNING ...) in lib/CMakeLists.txt:164, triggered because our
-#      project sets BUILD_SHARED_LIBS=ON while we force zstd to be static.
-#      Temporarily setting BUILD_SHARED_LIBS=OFF avoids the mismatch check.)
-# Both are restored immediately after FetchContent_MakeAvailable returns.
+
 set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(zstd)
 set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 set(CMAKE_WARN_DEPRECATED ON CACHE BOOL "" FORCE)
 
-# ── Boost.PFR (header-only, aggregate struct reflection) ─────────────────────
+# ── Boost.PFR (header-only) ───────────────────────────────────────────────────
 FetchContent_Declare(
         boost_pfr
         GIT_REPOSITORY https://github.com/boostorg/pfr.git
@@ -87,216 +77,97 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(boost_pfr)
 
-# ── mbedTLS (optional TLS support) ─────────────────────────────────────────────
-option(AKKARADB_ENABLE_TLS "Enable TLS support via mbedTLS 3.x" OFF)
-if(AKKARADB_ENABLE_TLS)
-    FetchContent_Declare(
-            mbedtls
-            GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
-            GIT_TAG v3.6.2
-    )
-    set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
-    set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
-    set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(mbedtls)
-    set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
-endif()
+# ── mbedTLS (always enabled) ──────────────────────────────────────────────────
+FetchContent_Declare(
+        mbedtls
+        GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
+        GIT_TAG v3.6.2
+)
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(mbedtls)
+set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 
 # ==================== Main Library ====================
 add_library(akkaradb)
 
-# Public headers (C++ API - User-facing)
+# ====================== Public Headers ======================
+file(GLOB_RECURSE PUBLIC_HEADERS
+        "${AKKARADB_INCLUDE_DIR}/akkaradb/*.hpp"
+        "${AKKARADB_INCLUDE_DIR}/akkaradb/*.h"
+)
+
 target_sources(akkaradb PUBLIC FILE_SET HEADERS
         BASE_DIRS ${AKKARADB_INCLUDE_DIR}
-        FILES
-        # High-level ORM / entry-point headers
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/Export.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/Stats.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/detail/Hash.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/PackedTable.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/AkkaraDB.hpp
-        # BinPack serialization layer
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/binpack/detail/WireHelpers.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/binpack/detail/MemberPtrTraits.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/binpack/TypeAdapter.hpp
-        ${AKKARADB_INCLUDE_DIR}/akkaradb/binpack/BinPack.hpp
+        FILES ${PUBLIC_HEADERS}
 )
 
-# Public implementation (akkaradb/src)
-target_sources(akkaradb PRIVATE
-        ${AKKARADB_SRC_DIR}/AkkaraDB.cpp
+# ====================== Internal Headers ======================
+file(GLOB_RECURSE INTERNAL_HEADERS
+        "${INTERNAL_INCLUDE_DIR}/*.hpp"
+        "${INTERNAL_INCLUDE_DIR}/*.h"
 )
 
-# Internal headers — installed to include/internal so external consumers can
-# use AkkEngine directly (the Low-Level API).  AkkaraDB::engine() and
-# PackedTable.hpp both expose types from these headers, so they must be
-# available after installation, not just at build time.
 target_sources(akkaradb PUBLIC FILE_SET internal_headers TYPE HEADERS
         BASE_DIRS ${INTERNAL_INCLUDE_DIR}
-        FILES
-        # Core - Buffer
-        ${INTERNAL_INCLUDE_DIR}/core/buffer/BufferView.hpp
-        ${INTERNAL_INCLUDE_DIR}/core/buffer/MonotonicArena.hpp
-        ${INTERNAL_INCLUDE_DIR}/core/buffer/OwnedBuffer.hpp
-        ${INTERNAL_INCLUDE_DIR}/core/buffer/PerThreadArena.hpp
-
-        # Core - Record
-        ${INTERNAL_INCLUDE_DIR}/core/record/AKHdr32.hpp
-        ${INTERNAL_INCLUDE_DIR}/core/record/RecordView.hpp
-        ${INTERNAL_INCLUDE_DIR}/core/record/MemRecord.hpp
-
-        # Core - CRC
-        ${INTERNAL_INCLUDE_DIR}/core/CRC32C.hpp
-
-        # Core - Net / TLS
-        ${INTERNAL_INCLUDE_DIR}/core/net/TlsStream.hpp
-
-        # Engine
-        ${INTERNAL_INCLUDE_DIR}/engine/AkkEngine.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/Compression.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/vlog/VersionLog.hpp
-
-        # Engine - API Server
-        ${INTERNAL_INCLUDE_DIR}/engine/server/ApiFraming.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/server/AkkApiServer.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/server/TcpApiServer.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/server/HttpApiServer.hpp
-
-        # Engine - MemTable
-        ${INTERNAL_INCLUDE_DIR}/engine/memtable/IMemMap.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/memtable/BPTree.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/memtable/BPTreeMap.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/memtable/SkipListMap.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/memtable/MemTable.hpp
-
-        # Engine - WAL
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalOp.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalFraming.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalWriter.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalReader.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/wal/WalRecovery.hpp
-
-        # Engine - SST
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTFormat.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTWriter.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTReader.hpp
-        ${INTERNAL_INCLUDE_DIR}/engine/sstable/SSTManager.hpp
+        FILES ${INTERNAL_HEADERS}
 )
 
-# Internal implementation (internal/src)
+# ====================== Source Files ======================
+file(GLOB_RECURSE AKKARADB_SOURCES
+        "${AKKARADB_SRC_DIR}/*.cpp"
+)
+
+file(GLOB_RECURSE INTERNAL_SOURCES
+        "${INTERNAL_SRC_DIR}/*.cpp"
+)
+
 target_sources(akkaradb PRIVATE
-        # Core - Buffer
-        ${INTERNAL_SRC_DIR}/core/buffer/BufferView.cpp
-        ${INTERNAL_SRC_DIR}/core/buffer/OwnedBuffer.cpp
-        ${INTERNAL_SRC_DIR}/core/buffer/PerThreadArena.cpp
-
-        # Core - Record
-        ${INTERNAL_SRC_DIR}/core/record/AKHdr32.cpp
-        ${INTERNAL_SRC_DIR}/core/record/RecordView.cpp
-        ${INTERNAL_SRC_DIR}/core/record/MemRecord.cpp
-
-        # Core - CRC
-        ${INTERNAL_SRC_DIR}/core/CRC32C.cpp
-
-        # Core - Net / TLS
-        ${INTERNAL_SRC_DIR}/core/net/TlsStream.cpp
-
-        # Engine
-        ${INTERNAL_SRC_DIR}/engine/AkkEngine.cpp
-
-        # Engine - MemTable
-        ${INTERNAL_SRC_DIR}/engine/memtable/MemTable.cpp
-        ${INTERNAL_SRC_DIR}/engine/memtable/SkipListMap.cpp
-
-        # Engine - WAL
-        ${INTERNAL_SRC_DIR}/engine/wal/WalOp.cpp
-        ${INTERNAL_SRC_DIR}/engine/wal/WalFraming.cpp
-        ${INTERNAL_SRC_DIR}/engine/wal/WalWriter.cpp
-        ${INTERNAL_SRC_DIR}/engine/wal/WalReader.cpp
-        ${INTERNAL_SRC_DIR}/engine/wal/WalRecovery.cpp
-
-        # Engine - Blob
-        ${INTERNAL_SRC_DIR}/engine/blob/BlobFraming.cpp
-        ${INTERNAL_SRC_DIR}/engine/blob/BlobManager.cpp
-
-        # Engine - Manifest
-        ${INTERNAL_SRC_DIR}/engine/manifest/ManifestFraming.cpp
-        ${INTERNAL_SRC_DIR}/engine/manifest/Manifest.cpp
-
-        # Engine - Cluster
-        ${INTERNAL_SRC_DIR}/engine/cluster/ClusterConfig.cpp
-        ${INTERNAL_SRC_DIR}/engine/cluster/ClusterManager.cpp
-        ${INTERNAL_SRC_DIR}/engine/cluster/ReplFraming.cpp
-        ${INTERNAL_SRC_DIR}/engine/cluster/ReplicationServer.cpp
-        ${INTERNAL_SRC_DIR}/engine/cluster/ReplicationClient.cpp
-
-        # Engine - API Server
-        ${INTERNAL_SRC_DIR}/engine/server/ApiFraming.cpp
-        ${INTERNAL_SRC_DIR}/engine/server/AkkApiServer.cpp
-        ${INTERNAL_SRC_DIR}/engine/server/TcpApiServer.cpp
-        ${INTERNAL_SRC_DIR}/engine/server/HttpApiServer.cpp
-
-        # Engine - Version Log
-        ${INTERNAL_SRC_DIR}/engine/vlog/VersionLog.cpp
-
-        # Engine - SST
-        ${INTERNAL_SRC_DIR}/engine/sstable/SSTWriter.cpp
-        ${INTERNAL_SRC_DIR}/engine/sstable/SSTReader.cpp
-        ${INTERNAL_SRC_DIR}/engine/sstable/SSTManager.cpp
+        ${AKKARADB_SOURCES}
+        ${INTERNAL_SOURCES}
 )
 
-# Zstd (static, all platforms)
-target_link_libraries(akkaradb PRIVATE libzstd_static)
+# ==================== Linking ====================
+target_link_libraries(akkaradb PRIVATE libzstd_static mbedtls mbedcrypto mbedx509)
 
-# mbedTLS (optional TLS support)
-if(AKKARADB_ENABLE_TLS)
-    target_link_libraries(akkaradb PRIVATE mbedtls mbedcrypto mbedx509)
-    target_compile_definitions(akkaradb PRIVATE AKKARADB_TLS_ENABLED)
-endif()
+# TLS always enabled
+target_compile_definitions(akkaradb PRIVATE AKKARADB_TLS_ENABLED)
 
-# Windows: link Winsock2 for ReplicationServer / ReplicationClient TCP sockets
 if(WIN32)
     target_link_libraries(akkaradb PRIVATE ws2_32)
 endif()
 
-# Include directories
+# ==================== Include Directories ====================
 target_include_directories(akkaradb
         PUBLIC
         $<BUILD_INTERFACE:${AKKARADB_INCLUDE_DIR}>
-        $<BUILD_INTERFACE:${INTERNAL_INCLUDE_DIR}>   # AkkEngine.hpp is part of the public API
-        $<BUILD_INTERFACE:${boost_pfr_SOURCE_DIR}/include>  # Boost.PFR (used in public TypeAdapter.hpp)
+        $<BUILD_INTERFACE:${INTERNAL_INCLUDE_DIR}>
+        $<BUILD_INTERFACE:${boost_pfr_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
         $<INSTALL_INTERFACE:include/internal>
 )
 
-# Specify C++ linker
 set_target_properties(akkaradb PROPERTIES LINKER_LANGUAGE CXX)
 
-# Shared / static library configuration
+# ==================== Shared / Static Configuration ====================
 if (BUILD_SHARED_LIBS)
-    # ── Shared (.dll / .so) ───────────────────────────────────────────────────
-    # AKKARADB_BUILD_SHARED is PRIVATE: only the library compilation sees it
-    # (triggers __declspec(dllexport) / visibility("default") in Export.hpp).
-    # Consumers see neither BUILD_SHARED nor STATIC → default dllimport path.
     target_compile_definitions(akkaradb PRIVATE AKKARADB_BUILD_SHARED)
     set_target_properties(akkaradb PROPERTIES
-            CXX_VISIBILITY_PRESET  hidden
+            CXX_VISIBILITY_PRESET hidden
             VISIBILITY_INLINES_HIDDEN ON
-            VERSION   ${PROJECT_VERSION}
+            VERSION ${PROJECT_VERSION}
             SOVERSION ${PROJECT_VERSION_MAJOR}
     )
     if (WIN32)
         set_target_properties(akkaradb PROPERTIES
-                WINDOWS_EXPORT_ALL_SYMBOLS OFF          # rely on explicit AKDB_API marks
+                WINDOWS_EXPORT_ALL_SYMBOLS OFF
                 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
         )
     endif ()
     message(STATUS "AkkaraDB: building as SHARED library (.dll / .so)")
 else ()
-    # ── Static (.lib / .a) ────────────────────────────────────────────────────
-    # AKKARADB_STATIC is PUBLIC: propagates to every target that links akkaradb,
-    # so Export.hpp emits empty AKDB_API macros (no dllimport) for consumers too.
     target_compile_definitions(akkaradb PUBLIC AKKARADB_STATIC)
     message(STATUS "AkkaraDB: building as STATIC library (.lib / .a)")
 endif ()
@@ -307,7 +178,7 @@ install(TARGETS akkaradb
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
         RUNTIME DESTINATION bin
-        FILE_SET HEADERS          DESTINATION include
+        FILE_SET HEADERS DESTINATION include
         FILE_SET internal_headers DESTINATION include/internal
 )
 
@@ -318,15 +189,7 @@ install(EXPORT AkkaraDBTargets
 )
 
 # ── find_package() support ────────────────────────────────────────────────────
-# Generates AkkaraDBConfig.cmake and AkkaraDBConfigVersion.cmake in the build
-# tree, then installs them alongside AkkaraDBTargets.cmake so that consumers
-# can locate the package via:
-#
-#   find_package(AkkaraDB 0.1 REQUIRED)
-#   target_link_libraries(myapp PRIVATE AkkaraDB::akkaradb)
-#
 include(CMakePackageConfigHelpers)
-
 configure_package_config_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AkkaraDBConfig.cmake.in"
         "${CMAKE_CURRENT_BINARY_DIR}/AkkaraDBConfig.cmake"
@@ -335,8 +198,8 @@ configure_package_config_file(
 
 write_basic_package_version_file(
         "${CMAKE_CURRENT_BINARY_DIR}/AkkaraDBConfigVersion.cmake"
-        VERSION       ${PROJECT_VERSION}
-        COMPATIBILITY SameMajorVersion   # 0.x.y is compatible with 0.x.z
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion
 )
 
 install(FILES
@@ -354,7 +217,6 @@ endif ()
 # ==================== Benchmarks ====================
 message(STATUS "Building AkkaraDB benchmarks")
 
-# Benchmark executable
 add_executable(akkaradb_benchmark
         benchmarks/benchmark.cpp
 )
@@ -369,33 +231,22 @@ else ()
     endif ()
 endif ()
 
-# Link against akkaradb library
-target_link_libraries(akkaradb_benchmark
-        PRIVATE
-        akkaradb
-)
+target_link_libraries(akkaradb_benchmark PRIVATE akkaradb)
 
-# Include benchmark headers
 target_include_directories(akkaradb_benchmark
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
         ${AKKARADB_INCLUDE_DIR}
-        ${INTERNAL_DIR}/include
+        ${INTERNAL_INCLUDE_DIR}
 )
 
-# Set output directory
 set_target_properties(akkaradb_benchmark PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
-# Install benchmark executable
-install(TARGETS akkaradb_benchmark
-        RUNTIME DESTINATION bin
-)
+install(TARGETS akkaradb_benchmark RUNTIME DESTINATION bin)
 
-message(STATUS "Benchmark executable will be built at: ${CMAKE_BINARY_DIR}/bin/akkaradb_benchmark")
-
-# ── API Server test — interactive runner (type "stop" to exit) ────────────────
+# ── API Server Test ───────────────────────────────────────────────────────────
 add_executable(akkaradb_api_server_test
         benchmarks/api_server_test.cpp
 )
@@ -410,14 +261,12 @@ target_include_directories(akkaradb_api_server_test
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
         ${AKKARADB_INCLUDE_DIR}
-        ${INTERNAL_DIR}/include
+        ${INTERNAL_INCLUDE_DIR}
 )
 
 set_target_properties(akkaradb_api_server_test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
-
-message(STATUS "API server test will be built at: ${CMAKE_BINARY_DIR}/bin/akkaradb_api_server_test")
 
 if (WIN32 AND BUILD_SHARED_LIBS)
     add_custom_command(TARGET akkaradb_benchmark POST_BUILD
@@ -429,33 +278,31 @@ if (WIN32 AND BUILD_SHARED_LIBS)
 endif()
 
 # ==================== JNI Bridge ====================
-# cmake -DAKKARADB_BUILD_JNI=ON to enable.
-# Produces akkaradb_jni.dll / libakkaradb_jni.so loaded by AkkaraDB.kt.
-option(AKKARADB_BUILD_JNI "Build JNI bridge for JVM integration" OFF)
-
 if(AKKARADB_BUILD_JNI)
     find_package(JNI REQUIRED)
-
     add_library(akkaradb_jni SHARED
             ${AKKARA_ROOT}/jni/AkkaraJni.cpp
     )
+
     target_link_libraries(akkaradb_jni PRIVATE akkaradb)
     target_include_directories(akkaradb_jni PRIVATE
             ${JNI_INCLUDE_DIRS}
             ${INTERNAL_INCLUDE_DIR}
             ${AKKARADB_INCLUDE_DIR}
     )
+
     set_target_properties(akkaradb_jni PROPERTIES
             CXX_STANDARD 23
             CXX_STANDARD_REQUIRED ON
     )
+
     if(WIN32)
         set_target_properties(akkaradb_jni PROPERTIES
                 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
         )
     endif()
+
     message(STATUS "JNI bridge enabled — target: akkaradb_jni")
 endif()
 
-if(WIN32 AND BUILD_SHARED_LIBS AND NOT AKKARADB_BUILD_JNI)
-endif ()
+message(STATUS "AkkaraDB CMake configuration completed. TLS and SIMD are always enabled.")
