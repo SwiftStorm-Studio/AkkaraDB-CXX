@@ -1,325 +1,144 @@
-/*
- * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
- * Copyright (C) 2026 Swift Storm Studio
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- *
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-// internal/include/core/buffer/BufferView.hpp
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string_view>
+#include <type_traits>
 
 namespace akkaradb::core {
+    class OwnedBuffer;
+
     /**
-     * BufferView - Zero-copy, non-owning view over a contiguous byte region.
+     * @brief Non-owning, read-only view over a contiguous byte region.
      *
-     * This class provides Little-Endian (LE) accessors and serves as the C++
-     * equivalent of JVM's ByteBufferL for zero-copy operations.
+     * BufferView provides zero-copy access to a byte sequence without owning it.
      *
      * Design principles:
-     * - No ownership: lifetime managed externally
-     * - Stack-allocated: trivial copy/move
-     * - Immutable view: all write operations modify in-place
-     * - LE-only: all multi-byte reads/writes are Little-Endian
+     * - Non-owning: lifetime is managed externally
+     * - Read-only: no mutation allowed through this type
+     * - Trivially copyable: cheap to pass by value
+     * - Little-Endian only (for multi-byte reads)
      *
-     * Thread-safety: Read-only operations are thread-safe. Concurrent writes
-     * to the same region require external synchronization.
+     * @warning
+     * The underlying memory is NOT owned. The data is only valid while the source
+     * buffer remains alive.
+     *
+     * If you need to retain the data, call to_owned().
      */
     class BufferView {
         public:
-            /**
-             * Constructs an empty BufferView.
-             */
+            // ==================== Constructors ====================
+
             constexpr BufferView() noexcept : data_{nullptr}, size_{0} {}
 
-            /**
-             * Constructs a BufferView from raw pointer and size.
-             *
-             * @param data Pointer to the beginning of the buffer
-             * @param size Size in bytes
-             */
-            constexpr BufferView(std::byte* data, size_t size) noexcept : data_{data}, size_{size} {}
+            constexpr BufferView(const std::byte* data, size_t size) noexcept : data_{data}, size_{size} {}
 
-            /**
-             * Constructs a BufferView from a std::span.
-             *
-             * @param span Byte span
-             */
-            constexpr explicit BufferView(std::span<std::byte> span) noexcept : data_{span.data()}, size_{span.size()} {}
+            constexpr explicit BufferView(std::span<const std::byte> span) noexcept : data_{span.data()}, size_{span.size()} {}
 
             // ==================== Basic Accessors ====================
 
-            /**
-             * Returns the raw pointer to the buffer.
-             */
-            [[nodiscard]] constexpr std::byte* data() const noexcept { return data_; }
+            [[nodiscard]] constexpr const std::byte* data() const noexcept { return data_; }
 
-            /**
-             * Returns the size of the buffer in bytes.
-             */
             [[nodiscard]] constexpr size_t size() const noexcept { return size_; }
 
-            /**
-             * Returns true if the buffer is empty.
-             */
             [[nodiscard]] constexpr bool empty() const noexcept { return size_ == 0; }
 
-            /**
-             * Returns a std::span view of the buffer.
-             */
-            [[nodiscard]] constexpr std::span<std::byte> as_span() const noexcept { return {data_, size_}; }
+            [[nodiscard]] constexpr std::span<const std::byte> as_span() const noexcept { return {data_, size_}; }
 
             /**
-             * Returns a typed span view of the buffer.
-             * T must be a byte-sized trivial type.
+             * @brief Returns a typed span view (byte-compatible types only).
+             *
+             * Only char / unsigned char / std::byte are allowed to avoid
+             * strict aliasing violations.
              */
             template <typename T>
             [[nodiscard]] constexpr std::span<const T> as_span() const noexcept {
-                static_assert(sizeof(T) == 1);
+                static_assert(std::is_same_v<T, std::byte> || std::is_same_v<T, char> || std::is_same_v<T, unsigned char>, "T must be a byte-like type");
                 return {reinterpret_cast<const T*>(data_), size_};
             }
 
-            /**
-             * Returns a const std::span view of the buffer.
-             */
-            [[nodiscard]] constexpr std::span<const std::byte> as_const_span() const noexcept { return {data_, size_}; }
-
             // ==================== Slicing ====================
 
-            /**
-             * Creates a sub-view starting at offset with specified length.
-             *
-             * @param offset Starting offset (in bytes)
-             * @param length Length of the slice (in bytes)
-             * @return A new BufferView representing the slice
-             * @throws std::out_of_range if offset + length > size()
-             */
             [[nodiscard]] BufferView slice(size_t offset, size_t length) const;
 
-            /**
-             * Creates a sub-view starting at offset to the end.
-             *
-             * @param offset Starting offset (in bytes)
-             * @return A new BufferView from offset to end
-             * @throws std::out_of_range if offset > size()
-             */
             [[nodiscard]] BufferView slice(size_t offset) const;
 
-            // ==================== Little-Endian Read Operations ====================
+            // ==================== Ownership ====================
 
             /**
-             * Reads an unsigned 8-bit integer.
+             * @brief Creates an owning copy of this buffer.
              *
-             * @param offset Offset in bytes
-             * @return uint8_t value
-             * @throws std::out_of_range if offset >= size() (debug only)
+             * Performs a deep copy of the underlying byte sequence.
+             *
+             * @note O(n) operation.
              */
+            [[nodiscard]] OwnedBuffer to_owned() const;
+
+            // ==================== Little-Endian Reads ====================
+
             [[nodiscard]] uint8_t read_u8(size_t offset) const noexcept {
                 check_bounds_inline(offset, 1);
                 return static_cast<uint8_t>(data_[offset]);
             }
 
-            /**
-             * Reads an unsigned 16-bit integer (Little-Endian).
-             *
-             * @param offset Offset in bytes
-             * @return uint16_t value
-             * @throws std::out_of_range if offset + 2 > size() (debug only)
-             */
             [[nodiscard]] uint16_t read_u16_le(size_t offset) const noexcept {
                 check_bounds_inline(offset, 2);
-                uint16_t value;
-                std::memcpy(&value, data_ + offset, 2);
-                return value;
+                uint16_t v;
+                std::memcpy(&v, data_ + offset, 2);
+                return v;
             }
 
-            /**
-             * Reads an unsigned 32-bit integer (Little-Endian).
-             *
-             * @param offset Offset in bytes
-             * @return uint32_t value
-             * @throws std::out_of_range if offset + 4 > size() (debug only)
-             */
             [[nodiscard]] uint32_t read_u32_le(size_t offset) const noexcept {
                 check_bounds_inline(offset, 4);
-                uint32_t value;
-                std::memcpy(&value, data_ + offset, 4);
-                return value;
+                uint32_t v;
+                std::memcpy(&v, data_ + offset, 4);
+                return v;
             }
 
-            /**
-             * Reads an unsigned 64-bit integer (Little-Endian).
-             *
-             * @param offset Offset in bytes
-             * @return uint64_t value
-             * @throws std::out_of_range if offset + 8 > size() (debug only)
-             */
             [[nodiscard]] uint64_t read_u64_le(size_t offset) const noexcept {
                 check_bounds_inline(offset, 8);
-                uint64_t value;
-                std::memcpy(&value, data_ + offset, 8);
-                return value;
+                uint64_t v;
+                std::memcpy(&v, data_ + offset, 8);
+                return v;
             }
 
-            // ==================== Little-Endian Write Operations ====================
+            // ==================== CRC ====================
 
-            /**
-             * Writes an unsigned 8-bit integer.
-             *
-             * @param offset Offset in bytes
-             * @param value Value to write
-             * @throws std::out_of_range if offset >= size() (debug only)
-             */
-            void write_u8(size_t offset, uint8_t value) const noexcept {
-                check_bounds_inline(offset, 1);
-                data_[offset] = static_cast<std::byte>(value);
-            }
-
-            /**
-             * Writes an unsigned 16-bit integer (Little-Endian).
-             *
-             * @param offset Offset in bytes
-             * @param value Value to write
-             * @throws std::out_of_range if offset + 2 > size() (debug only)
-             */
-            void write_u16_le(size_t offset, uint16_t value) const noexcept {
-                check_bounds_inline(offset, 2);
-                std::memcpy(data_ + offset, &value, 2);
-            }
-
-            /**
-             * Writes an unsigned 32-bit integer (Little-Endian).
-             *
-             * @param offset Offset in bytes
-             * @param value Value to write
-             * @throws std::out_of_range if offset + 4 > size() (debug only)
-             */
-            void write_u32_le(size_t offset, uint32_t value) const noexcept {
-                check_bounds_inline(offset, 4);
-                std::memcpy(data_ + offset, &value, 4);
-            }
-
-            /**
-             * Writes an unsigned 64-bit integer (Little-Endian).
-             *
-             * @param offset Offset in bytes
-             * @param value Value to write
-             * @throws std::out_of_range if offset + 8 > size() (debug only)
-             */
-            void write_u64_le(size_t offset, uint64_t value) const noexcept {
-                check_bounds_inline(offset, 8);
-                std::memcpy(data_ + offset, &value, 8);
-            }
-
-            // ==================== Bulk Operations ====================
-
-            /**
-             * Copies data from source buffer to this buffer.
-             *
-             * @param offset Destination offset
-             * @param src Source buffer
-             * @param src_offset Source offset
-             * @param length Number of bytes to copy
-             * @throws std::out_of_range if bounds are violated
-             */
-            void copy_from(size_t offset, BufferView src, size_t src_offset, size_t length) const;
-
-            /**
-             * Fills a region with a specific byte value.
-             *
-             * @param offset Starting offset
-             * @param length Number of bytes to fill
-             * @param value Byte value to fill with
-             * @throws std::out_of_range if offset + length > size()
-             */
-            void fill(size_t offset, size_t length, std::byte value) const;
-
-            /**
-             * Fills the entire buffer with zeros.
-             * Uses optimized SIMD/platform-specific implementation when available.
-             */
-            void zero_fill() const noexcept;
-
-            /**
-             * Fills the entire buffer with zeros (inlined fast path).
-             * For small buffers, this avoids function call overhead.
-             */
-            void zero_fill_inline() const noexcept { if (data_ && size_ > 0) { std::memset(data_, 0, size_); } }
-
-            // ==================== CRC Computation ====================
-
-            /**
-             * Computes CRC32C checksum over a range.
-             *
-             * Uses hardware acceleration (SSE4.2 crc32c instruction) when available.
-             *
-             * @param offset Starting offset
-             * @param length Number of bytes to checksum
-             * @return 32-bit CRC32C value
-             * @throws std::out_of_range if offset + length > size()
-             */
             [[nodiscard]] uint32_t crc32c(size_t offset, size_t length) const;
 
-            /**
-             * Computes CRC32C checksum over the entire buffer.
-             *
-             * @return 32-bit CRC32C value
-             */
             [[nodiscard]] uint32_t crc32c() const noexcept { return crc32c(0, size_); }
 
-            // ==================== String Operations ====================
+            // ==================== String ====================
 
             /**
-             * Creates a string_view from a region of the buffer.
+             * @brief Creates a string_view over a region.
              *
-             * @param offset Starting offset
-             * @param length Number of bytes
-             * @return std::string_view over the region
-             * @throws std::out_of_range if offset + length > size()
+             * @warning Not null-terminated. Lifetime follows BufferView.
              */
             [[nodiscard]] std::string_view as_string_view(size_t offset, size_t length) const;
 
-            /**
-             * Creates a string_view over the entire buffer.
-             */
-            [[nodiscard]] std::string_view as_string_view() const noexcept { return {reinterpret_cast<const char*>(data_), size_}; }
+            [[nodiscard]] std::string_view as_string_view() const noexcept {
+                return {reinterpret_cast<const char*>(data_), size_};
+            }
 
         private:
-            std::byte* data_;
+            const std::byte* data_;
             size_t size_;
 
             void check_bounds(size_t offset, size_t length) const;
 
-            /**
-             * Inlined bounds check with conditional compilation.
-             * In Release builds (NDEBUG), this becomes a no-op.
-             * In Debug builds, performs full bounds checking.
-             */
             void check_bounds_inline(size_t offset, size_t length) const noexcept {
                 #ifndef NDEBUG
-                // Debug: Full bounds checking with branch hints
-                if (offset + length > size_ || offset + length < offset) [[unlikely]] {
-                    check_bounds(offset, length); // Throws exception
-                }
+                if (offset > size_ || length > size_ - offset) [[unlikely]] { check_bounds(offset, length); }
                 #else
-                // Release: No-op (optimized away by compiler)
-                (void)offset; (void)length;
-                #endif
-            }
+                (void)offset;
+                (void)length;
+#endif
+        }
     };
-} // namespace akkaradb::core
+
+    static_assert(std::is_trivially_copyable_v<BufferView>);
+    static_assert(std::is_trivially_destructible_v<BufferView>);
+
+} // namespace
