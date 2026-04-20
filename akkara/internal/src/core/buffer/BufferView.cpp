@@ -41,7 +41,7 @@ namespace akkaradb::core {
     }
 
     BufferView BufferView::slice(size_t offset) const {
-        if (offset > size_) { throw std::out_of_range("BufferView::slice"); }
+        if (offset > size_) { throw std::out_of_range("BufferView::slice: offset out of range"); }
         return BufferView{data_ + offset, size_ - offset};
     }
 
@@ -50,7 +50,7 @@ namespace akkaradb::core {
     OwnedBuffer BufferView::to_owned() const {
         if (size_ == 0) { return OwnedBuffer::allocate(0); }
 
-        OwnedBuffer out = OwnedBuffer::allocate(size_);
+        auto out = OwnedBuffer::allocate(size_);
         std::memcpy(out.data(), data_, size_);
         return out;
     }

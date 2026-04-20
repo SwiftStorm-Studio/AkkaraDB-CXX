@@ -74,7 +74,7 @@ namespace akkaradb::core {
             template <typename T>
             [[nodiscard]] constexpr std::span<const T> as_span() const noexcept {
                 static_assert(std::is_same_v<T, std::byte> || std::is_same_v<T, char> || std::is_same_v<T, unsigned char>, "T must be a byte-like type");
-                return {reinterpret_cast<const T*>(data_), size_};
+                return {reinterpret_cast<const T*>(data_), size_ / sizeof(T)};
             }
 
             // ==================== Slicing ====================

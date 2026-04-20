@@ -129,7 +129,9 @@ namespace akkaradb::core {
              * @brief Releases ownership and invokes the deleter.
              */
             void reset() noexcept {
-                if (data_ && deleter_) [[likely]] { deleter_(data_, size_, ctx_); }
+                if (data_) [[likely]] {
+                    deleter_(data_, size_, ctx_);
+                }
                 data_ = nullptr;
                 size_ = 0;
                 deleter_ = nullptr;
@@ -176,22 +178,6 @@ namespace akkaradb::core {
             [[nodiscard]] BufferView as_view() const noexcept;
 
             // ==================== Ownership control ====================
-
-            /**
-             * @brief Releases ownership without invoking deleter.
-             *
-             * After this call, the caller is responsible for freeing memory.
-             *
-             * @return Pointer to buffer
-             */
-            [[nodiscard]] std::byte* release() noexcept {
-                std::byte* out = data_;
-                data_ = nullptr;
-                size_ = 0;
-                deleter_ = nullptr;
-                ctx_ = nullptr;
-                return out;
-            }
 
             /**
              * @brief Swaps with another buffer.
