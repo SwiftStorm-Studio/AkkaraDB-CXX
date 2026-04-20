@@ -16,6 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+// internal/src/core/buffer/BufferView.cpp
 #include "core/buffer/BufferView.hpp"
 #include "core/buffer/OwnedBuffer.hpp"
 

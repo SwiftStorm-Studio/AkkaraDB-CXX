@@ -137,9 +137,7 @@ namespace akkaradb::core {
              */
             [[nodiscard]] std::string_view as_string_view(size_t offset, size_t length) const;
 
-            [[nodiscard]] std::string_view as_string_view() const noexcept {
-                return {reinterpret_cast<const char*>(data_), size_};
-            }
+            [[nodiscard]] std::string_view as_string_view() const noexcept { return {reinterpret_cast<const char*>(data_), size_}; }
 
         private:
             const std::byte* data_;
@@ -153,11 +151,10 @@ namespace akkaradb::core {
                 #else
                 (void)offset;
                 (void)length;
-#endif
-        }
+                #endif
+            }
     };
 
     static_assert(std::is_trivially_copyable_v<BufferView>);
     static_assert(std::is_trivially_destructible_v<BufferView>);
-
 } // namespace
