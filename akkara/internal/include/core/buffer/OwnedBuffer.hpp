@@ -60,32 +60,32 @@ namespace akkaradb::core {
      */
     class OwnedBuffer {
         public:
-            /**
-         * @brief Deleter function signature.
-         *
-         * @param ptr Pointer to buffer
-         * @param size Size of buffer
-         * @param ctx User-defined context (allocator / pool / arena)
-         */
+           /**
+            * @brief Deleter function signature.
+            *
+            * @param ptr Pointer to buffer
+            * @param size Size of buffer
+            * @param ctx User-defined context (allocator / pool / arena)
+            */
             using Deleter = void(*)(void* ptr, size_t size, void* ctx);
 
             // ==================== Constructors ====================
 
-            /**
-         * @brief Constructs an empty buffer.
-         */
-        constexpr OwnedBuffer() noexcept = default;
+           /**
+            * @brief Constructs an empty buffer.
+            */
+            constexpr OwnedBuffer() noexcept = default;
 
-            /**
-         * @brief Constructs a buffer with explicit ownership and deleter.
-         *
-         * @param data Pointer to memory
-         * @param size Size in bytes
-         * @param deleter Deallocation function
-         * @param ctx Context passed to deleter
-         *
-         * @warning data must be valid for the given size.
-         */
+           /**
+            * @brief Constructs a buffer with explicit ownership and deleter.
+            *
+            * @param data Pointer to memory
+            * @param size Size in bytes
+            * @param deleter Deallocation function
+            * @param ctx Context passed to deleter
+            *
+            * @warning data must be valid for the given size.
+            */
             OwnedBuffer(std::byte* data, size_t size, Deleter deleter, void* ctx) noexcept : data_{data}, size_{size}, deleter_{deleter}, ctx_{ctx} {}
 
             // ==================== Move semantics ====================
@@ -94,45 +94,46 @@ namespace akkaradb::core {
             OwnedBuffer& operator=(const OwnedBuffer&) = delete;
 
             OwnedBuffer(OwnedBuffer&& other) noexcept
-            : data_{other.data_},
-              size_{other.size_},
-              deleter_{other.deleter_},
-              ctx_{other.ctx_} {
-            other.data_ = nullptr;
-            other.size_ = 0;
-            other.deleter_ = nullptr;
-            other.ctx_ = nullptr;
-        }
-
-        OwnedBuffer& operator=(OwnedBuffer&& other) noexcept {
-            if (this != &other) {
-                reset();
-
-                data_ = other.data_;
-                size_ = other.size_;
-                deleter_ = other.deleter_;
-                ctx_ = other.ctx_;
-
+                : data_{other.data_},
+                  size_{other.size_},
+                  deleter_{other.deleter_},
+                  ctx_{other.ctx_}
+            {
                 other.data_ = nullptr;
                 other.size_ = 0;
                 other.deleter_ = nullptr;
                 other.ctx_ = nullptr;
             }
-            return *this;
-        }
 
-        // ==================== Destructor ====================
+            OwnedBuffer& operator=(OwnedBuffer&& other) noexcept {
+                if (this != &other) {
+                    reset();
 
-        /**
-         * @brief Releases the owned buffer using the configured deleter.
-         */
-        ~OwnedBuffer() {
-            reset();
-        }
+                    data_ = other.data_;
+                    size_ = other.size_;
+                    deleter_ = other.deleter_;
+                    ctx_ = other.ctx_;
+
+                    other.data_ = nullptr;
+                    other.size_ = 0;
+                    other.deleter_ = nullptr;
+                    other.ctx_ = nullptr;
+                }
+                return *this;
+            }
+
+            // ==================== Destructor ====================
 
             /**
-         * @brief Releases ownership and invokes the deleter.
-         */
+             * @brief Releases the owned buffer using the configured deleter.
+             */
+            ~OwnedBuffer() {
+                reset();
+            }
+
+           /**
+            * @brief Releases ownership and invokes the deleter.
+            */
             void reset() noexcept {
                 if (data_ && deleter_) [[likely]] { deleter_(data_, size_, ctx_); }
                 data_ = nullptr;
@@ -143,52 +144,52 @@ namespace akkaradb::core {
 
             // ==================== Factory ====================
 
-            /**
-         * @brief Allocates a buffer on the heap.
-         *
-         * Uses global operator new/delete.
-         *
-         * @param size Size in bytes
-         * @return OwnedBuffer instance
-         */
-        static OwnedBuffer allocate(size_t size);
+           /**
+            * @brief Allocates a buffer on the heap.
+            *
+            * Uses global operator new/delete.
+            *
+            * @param size Size in bytes
+            * @return OwnedBuffer instance
+            */
+            static OwnedBuffer allocate(size_t size);
 
-        // ==================== Accessors ====================
+            // ==================== Accessors ====================
 
-            /**
-         * @brief Returns raw pointer.
-         */
+           /**
+            * @brief Returns raw pointer.
+            */
             [[nodiscard]] std::byte* data() noexcept { return data_; }
 
-            /**
-         * @brief Returns raw pointer (const).
-         */
-        [[nodiscard]] const std::byte* data() const noexcept { return data_; }
-
-        /**
-         * @brief Returns buffer size in bytes.
-         */
-        [[nodiscard]] size_t size() const noexcept { return size_; }
+           /**
+            * @brief Returns raw pointer (const).
+            */
+            [[nodiscard]] const std::byte* data() const noexcept { return data_; }
 
             /**
-         * @brief Returns whether buffer is empty.
-         */
+             * @brief Returns buffer size in bytes.
+             */
+            [[nodiscard]] size_t size() const noexcept { return size_; }
+
+           /**
+            * @brief Returns whether buffer is empty.
+            */
             [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
 
-            /**
-         * @brief Creates a non-owning view of the buffer.
-         */
-        [[nodiscard]] BufferView as_view() const noexcept;
+           /**
+            * @brief Creates a non-owning view of the buffer.
+            */
+            [[nodiscard]] BufferView as_view() const noexcept;
 
-        // ==================== Ownership control ====================
+            // ==================== Ownership control ====================
 
-            /**
-         * @brief Releases ownership without invoking deleter.
-         *
-         * After this call, the caller is responsible for freeing memory.
-         *
-         * @return Pointer to buffer
-         */
+           /**
+            * @brief Releases ownership without invoking deleter.
+            *
+            * After this call, the caller is responsible for freeing memory.
+            *
+            * @return Pointer to buffer
+            */
             [[nodiscard]] std::byte* release() noexcept {
                 std::byte* out = data_;
                 data_ = nullptr;
@@ -198,9 +199,9 @@ namespace akkaradb::core {
                 return out;
             }
 
-            /**
-         * @brief Swaps with another buffer.
-         */
+           /**
+            * @brief Swaps with another buffer.
+            */
             void swap(OwnedBuffer& other) noexcept {
                 std::swap(data_, other.data_);
                 std::swap(size_, other.size_);
@@ -209,10 +210,10 @@ namespace akkaradb::core {
             }
 
         private:
-        std::byte* data_ = nullptr;
-        size_t size_ = 0;
-        Deleter deleter_ = nullptr;
-        void* ctx_ = nullptr;
+            std::byte* data_ = nullptr;
+            size_t size_ = 0;
+            Deleter deleter_ = nullptr;
+            void* ctx_ = nullptr;
     };
 
     static_assert(!std::is_copy_constructible_v<OwnedBuffer>);
