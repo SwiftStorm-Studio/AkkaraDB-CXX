@@ -1,489 +1,317 @@
-/*
- * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
- * Copyright (C) 2026 Swift Storm Studio
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as
- * published by the Free Software Foundation, either version 3 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+// internal/src/net/TlsStream.cpp
 
-// akkara/internal/src/core/net/TlsStream.cpp
 #include "core/net/TlsStream.hpp"
 
-#include <stdexcept>
-#include <cstring>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/error.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
 
 #ifdef _WIN32
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  ifndef NOMINMAX
-#    define NOMINMAX
-#  endif
-#  include <winsock2.h>
+#include <BaseTsd.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SSIZE_T ssize_t;
+#pragma comment(lib, "ws2_32.lib")
+typedef SOCKET socket_t;
 #else
-#  include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cerrno>
+typedef int socket_t;
 #endif
 
-#ifdef AKKARADB_TLS_ENABLED
-#  ifdef _MSC_VER
-#    pragma warning(push)
-#    pragma warning(disable: 4061 4062 4100 4127 4200 4244 4245 4267 4389 4456 4701 4706 4996)
-#  endif
-#  include <mbedtls/ssl.h>
-#  include <mbedtls/entropy.h>
-#  include <mbedtls/ctr_drbg.h>
-#  include <mbedtls/x509_crt.h>
-#  include <mbedtls/pk.h>
-#  include <mbedtls/error.h>
-#  ifdef _MSC_VER
-#    pragma warning(pop)
-#  endif
-#endif
+#include <cerrno>
 
-namespace akkaradb::core {
+namespace akkaradb::net {
+    // ==================== Error Helper ====================
 
-// ============================================================================
-// Bio callbacks for mbedTLS — use akk_sock_t* directly (safe for Windows SOCKET)
-// ============================================================================
+    class mbedtls_category_t : public std::error_category {
+        public:
+            const char* name() const noexcept override { return "mbedtls"; }
 
-#ifdef AKKARADB_TLS_ENABLED
+            std::string message(int ev) const override {
+                char buf[256];
+                mbedtls_strerror(-ev, buf, sizeof(buf));
+                return buf;
+            }
+    };
 
-static int tls_bio_send(void* ctx, const unsigned char* buf, size_t len) {
-    akk_sock_t fd = *static_cast<akk_sock_t*>(ctx);
-    int chunk = len > 65536 ? 65536 : static_cast<int>(len);
-#ifdef _WIN32
-    int n = ::send(fd, reinterpret_cast<const char*>(buf), chunk, 0);
-#else
-    int n = static_cast<int>(::send(fd, buf, static_cast<size_t>(chunk), 0));
-#endif
-    return n <= 0 ? MBEDTLS_ERR_NET_SEND_FAILED : n;
-}
-
-static int tls_bio_recv(void* ctx, unsigned char* buf, size_t len) {
-    akk_sock_t fd = *static_cast<akk_sock_t*>(ctx);
-    int chunk = len > 65536 ? 65536 : static_cast<int>(len);
-#ifdef _WIN32
-    int n = ::recv(fd, reinterpret_cast<char*>(buf), chunk, 0);
-#else
-    int n = static_cast<int>(::recv(fd, buf, static_cast<size_t>(chunk), 0));
-#endif
-    return n <= 0 ? MBEDTLS_ERR_NET_RECV_FAILED : n;
-}
-
-#endif // AKKARADB_TLS_ENABLED
-
-// ============================================================================
-// TlsContext::Impl
-// ============================================================================
-
-struct TlsContext::Impl {
-#ifdef AKKARADB_TLS_ENABLED
-    mbedtls_entropy_context  entropy_;
-    mbedtls_ctr_drbg_context drbg_;
-    mbedtls_ssl_config        ssl_cfg_;
-    mbedtls_x509_crt          cert_;
-    mbedtls_pk_context        pk_;
-    bool                      is_server_ = false;
-
-    Impl() {
-        mbedtls_entropy_init (&entropy_);
-        mbedtls_ctr_drbg_init(&drbg_);
-        mbedtls_ssl_config_init(&ssl_cfg_);
-        mbedtls_x509_crt_init(&cert_);
-        mbedtls_pk_init(&pk_);
+    const std::error_category& mbedtls_category() {
+        static mbedtls_category_t instance;
+        return instance;
     }
 
-    ~Impl() {
-        mbedtls_pk_free         (&pk_);
-        mbedtls_x509_crt_free   (&cert_);
-        mbedtls_ssl_config_free (&ssl_cfg_);
-        mbedtls_ctr_drbg_free   (&drbg_);
-        mbedtls_entropy_free    (&entropy_);
+    static std::error_code make_error(int ret) { return {-ret, mbedtls_category()}; }
+
+    static std::string mbedtls_error_string(int ret) {
+        char buf[256];
+        mbedtls_strerror(ret, buf, sizeof(buf));
+        return {buf};
     }
 
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-#endif
-};
+    // ==================== Context Impl ====================
 
-// ============================================================================
-// TlsContext::make_server / make_client
-// ============================================================================
+    struct TlsContext::Impl {
+        mbedtls_ssl_config ssl_cfg{};
+        mbedtls_x509_crt ca_cert{};
+        mbedtls_x509_crt cert{};
+        mbedtls_pk_context key{};
+        mbedtls_entropy_context entropy{};
+        mbedtls_ctr_drbg_context drbg{};
 
-std::unique_ptr<TlsContext> TlsContext::make_server(const TlsConfig& cfg) {
-    if (!cfg.enabled) return nullptr;
+        Impl() {
+            mbedtls_ssl_config_init(&ssl_cfg);
+            mbedtls_x509_crt_init(&ca_cert);
+            mbedtls_x509_crt_init(&cert);
+            mbedtls_pk_init(&key);
+            mbedtls_entropy_init(&entropy);
+            mbedtls_ctr_drbg_init(&drbg);
+        }
 
-#ifndef AKKARADB_TLS_ENABLED
-    throw std::runtime_error(
-        "AkkaraDB: TLS support not compiled in (AKKARADB_ENABLE_TLS=OFF)");
-#else
-    auto impl = std::make_unique<Impl>();
-    impl->is_server_ = true;
-
-    // Seed DRBG
-    const char* pers = "akkaradb_server";
-    int ret = mbedtls_ctr_drbg_seed(&impl->drbg_, mbedtls_entropy_func,
-                                     &impl->entropy_,
-                                     reinterpret_cast<const unsigned char*>(pers),
-                                     std::strlen(pers));
-    if (ret != 0) throw std::runtime_error("AkkaraDB TLS: mbedtls_ctr_drbg_seed failed");
-
-    // Load certificate
-    if (!cfg.cert_path.empty()) {
-        ret = mbedtls_x509_crt_parse_file(&impl->cert_, cfg.cert_path.c_str());
-        if (ret != 0) throw std::runtime_error("AkkaraDB TLS: failed to load cert: " + cfg.cert_path);
-    }
-
-    // Load private key
-    if (!cfg.key_path.empty()) {
-#if MBEDTLS_VERSION_MAJOR >= 3
-        ret = mbedtls_pk_parse_keyfile(&impl->pk_, cfg.key_path.c_str(), nullptr,
-                                        mbedtls_ctr_drbg_random, &impl->drbg_);
-#else
-        ret = mbedtls_pk_parse_keyfile(&impl->pk_, cfg.key_path.c_str(), nullptr);
-#endif
-        if (ret != 0) throw std::runtime_error("AkkaraDB TLS: failed to load key: " + cfg.key_path);
-    }
-
-    // Load CA for mTLS peer verification
-    mbedtls_x509_crt ca_cert;
-    mbedtls_x509_crt_init(&ca_cert);
-    bool ca_loaded = false;
-    if (!cfg.ca_path.empty()) {
-        ret = mbedtls_x509_crt_parse_file(&ca_cert, cfg.ca_path.c_str());
-        if (ret != 0) {
+        ~Impl() {
+            mbedtls_ssl_config_free(&ssl_cfg);
             mbedtls_x509_crt_free(&ca_cert);
-            throw std::runtime_error("AkkaraDB TLS: failed to load CA: " + cfg.ca_path);
+            mbedtls_x509_crt_free(&cert);
+            mbedtls_pk_free(&key);
+            mbedtls_ctr_drbg_free(&drbg);
+            mbedtls_entropy_free(&entropy);
         }
-        ca_loaded = true;
-    }
+    };
 
-    // Configure SSL defaults for server
-    ret = mbedtls_ssl_config_defaults(&impl->ssl_cfg_,
-                                       MBEDTLS_SSL_IS_SERVER,
-                                       MBEDTLS_SSL_TRANSPORT_STREAM,
-                                       MBEDTLS_SSL_PRESET_DEFAULT);
-    if (ret != 0) {
-        if (ca_loaded) mbedtls_x509_crt_free(&ca_cert);
-        throw std::runtime_error("AkkaraDB TLS: mbedtls_ssl_config_defaults failed");
-    }
-
-    mbedtls_ssl_conf_rng(&impl->ssl_cfg_, mbedtls_ctr_drbg_random, &impl->drbg_);
-
-    // Attach cert+key
-    if (!cfg.cert_path.empty() && !cfg.key_path.empty()) {
-        ret = mbedtls_ssl_conf_own_cert(&impl->ssl_cfg_, &impl->cert_, &impl->pk_);
-        if (ret != 0) {
-            if (ca_loaded) mbedtls_x509_crt_free(&ca_cert);
-            throw std::runtime_error("AkkaraDB TLS: mbedtls_ssl_conf_own_cert failed");
+    static int to_mbed_verify(TlsVerifyMode m) {
+        switch (m) {
+            case TlsVerifyMode::None: return MBEDTLS_SSL_VERIFY_NONE;
+            case TlsVerifyMode::Optional: return MBEDTLS_SSL_VERIFY_OPTIONAL;
+            case TlsVerifyMode::Required: return MBEDTLS_SSL_VERIFY_REQUIRED;
         }
+        return MBEDTLS_SSL_VERIFY_REQUIRED;
     }
 
-    // Peer verification (mTLS)
-    if (cfg.verify_peer && ca_loaded) {
-        mbedtls_ssl_conf_ca_chain(&impl->ssl_cfg_, &ca_cert, nullptr);
-        mbedtls_ssl_conf_authmode(&impl->ssl_cfg_, MBEDTLS_SSL_VERIFY_REQUIRED);
-    } else {
-        mbedtls_ssl_conf_authmode(&impl->ssl_cfg_, MBEDTLS_SSL_VERIFY_NONE);
-        if (ca_loaded) mbedtls_x509_crt_free(&ca_cert);
-    }
+    // ==================== TlsContext ====================
 
-    return std::unique_ptr<TlsContext>(new TlsContext(std::move(impl)));
-#endif
-}
+    TlsContext::TlsContext(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 
-std::unique_ptr<TlsContext> TlsContext::make_client(const TlsConfig& cfg) {
-    if (!cfg.enabled) return nullptr;
+    TlsContext::~TlsContext() = default;
 
-#ifndef AKKARADB_TLS_ENABLED
-    throw std::runtime_error(
-        "AkkaraDB: TLS support not compiled in (AKKARADB_ENABLE_TLS=OFF)");
-#else
-    auto impl = std::make_unique<Impl>();
-    impl->is_server_ = false;
+    std::shared_ptr<TlsContext> TlsContext::create_server(
+        const std::string& cert_pem,
+        const std::string& key_pem,
+        const std::string& ca_pem,
+        TlsVerifyMode verify_mode
+    ) {
+        auto impl = std::make_unique<Impl>();
 
-    // Seed DRBG
-    const char* pers = "akkaradb_client";
-    int ret = mbedtls_ctr_drbg_seed(&impl->drbg_, mbedtls_entropy_func,
-                                     &impl->entropy_,
-                                     reinterpret_cast<const unsigned char*>(pers),
-                                     std::strlen(pers));
-    if (ret != 0) throw std::runtime_error("AkkaraDB TLS: mbedtls_ctr_drbg_seed failed");
+        int ret = mbedtls_ctr_drbg_seed(&impl->drbg, mbedtls_entropy_func, &impl->entropy, nullptr, 0);
+        if (ret != 0) throw std::runtime_error(mbedtls_error_string(ret));
 
-    // Load CA cert for peer verification
-    if (!cfg.ca_path.empty()) {
-        ret = mbedtls_x509_crt_parse_file(&impl->cert_, cfg.ca_path.c_str());
-        if (ret != 0) throw std::runtime_error("AkkaraDB TLS: failed to load CA: " + cfg.ca_path);
-    }
+        if ((ret = mbedtls_x509_crt_parse(&impl->cert, reinterpret_cast<const unsigned char*>(cert_pem.c_str()), cert_pem.size() + 1)) != 0) throw
+            std::runtime_error(mbedtls_error_string(ret));
 
-    // Load client cert+key for mTLS
-    mbedtls_x509_crt client_cert;
-    mbedtls_x509_crt_init(&client_cert);
-    mbedtls_pk_context client_pk;
-    mbedtls_pk_init(&client_pk);
+        if ((ret = mbedtls_pk_parse_key(
+            &impl->key,
+            reinterpret_cast<const unsigned char*>(key_pem.c_str()),
+            key_pem.size() + 1,
+            nullptr,
+            0,
+            mbedtls_ctr_drbg_random,
+            &impl->drbg
+        )) != 0) throw std::runtime_error(mbedtls_error_string(ret));
 
-    bool client_cert_loaded = false;
-    if (!cfg.cert_path.empty() && !cfg.key_path.empty()) {
-        ret = mbedtls_x509_crt_parse_file(&client_cert, cfg.cert_path.c_str());
-        if (ret == 0) {
-#if MBEDTLS_VERSION_MAJOR >= 3
-            ret = mbedtls_pk_parse_keyfile(&client_pk, cfg.key_path.c_str(), nullptr,
-                                            mbedtls_ctr_drbg_random, &impl->drbg_);
-#else
-            ret = mbedtls_pk_parse_keyfile(&client_pk, cfg.key_path.c_str(), nullptr);
-#endif
-        }
-        if (ret == 0) client_cert_loaded = true;
-    }
-
-    // Configure SSL defaults for client
-    ret = mbedtls_ssl_config_defaults(&impl->ssl_cfg_,
-                                       MBEDTLS_SSL_IS_CLIENT,
-                                       MBEDTLS_SSL_TRANSPORT_STREAM,
-                                       MBEDTLS_SSL_PRESET_DEFAULT);
-    if (ret != 0) {
-        if (client_cert_loaded) {
-            mbedtls_x509_crt_free(&client_cert);
-            mbedtls_pk_free(&client_pk);
-        }
-        throw std::runtime_error("AkkaraDB TLS: mbedtls_ssl_config_defaults failed");
-    }
-
-    mbedtls_ssl_conf_rng(&impl->ssl_cfg_, mbedtls_ctr_drbg_random, &impl->drbg_);
-
-    // Peer verification
-    if (cfg.verify_peer && !cfg.ca_path.empty()) {
-        mbedtls_ssl_conf_ca_chain(&impl->ssl_cfg_, &impl->cert_, nullptr);
-        mbedtls_ssl_conf_authmode(&impl->ssl_cfg_, MBEDTLS_SSL_VERIFY_REQUIRED);
-    } else {
-        mbedtls_ssl_conf_authmode(&impl->ssl_cfg_, MBEDTLS_SSL_VERIFY_NONE);
-    }
-
-    // Client cert for mTLS
-    if (client_cert_loaded) {
-        ret = mbedtls_ssl_conf_own_cert(&impl->ssl_cfg_, &client_cert, &client_pk);
-        if (ret != 0) {
-            mbedtls_x509_crt_free(&client_cert);
-            mbedtls_pk_free(&client_pk);
-            throw std::runtime_error("AkkaraDB TLS: mbedtls_ssl_conf_own_cert failed");
-        }
-    }
-
-    return std::unique_ptr<TlsContext>(new TlsContext(std::move(impl)));
-#endif
-}
-
-TlsContext::TlsContext(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
-
-TlsContext::~TlsContext() = default;
-
-// ============================================================================
-// TlsStream::Impl
-// ============================================================================
-
-struct TlsStream::Impl {
-    akk_sock_t fd_  = {};
-    bool       tls_ = false;
-
-#ifdef AKKARADB_TLS_ENABLED
-    mbedtls_ssl_context ssl_;
-    bool ssl_inited_ = false;
-#endif
-
-    Impl() = default;
-
-    ~Impl() {
-#ifdef AKKARADB_TLS_ENABLED
-        if (ssl_inited_) {
-            mbedtls_ssl_free(&ssl_);
-        }
-#endif
-    }
-
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-};
-
-// ============================================================================
-// TlsStream factory
-// ============================================================================
-
-std::unique_ptr<TlsStream> TlsStream::server_wrap(akk_sock_t fd, TlsContext* ctx) {
-    auto impl  = std::make_unique<Impl>();
-    impl->fd_  = fd;
-    impl->tls_ = (ctx != nullptr);
-
-#ifdef AKKARADB_TLS_ENABLED
-    if (ctx != nullptr) {
-        mbedtls_ssl_init(&impl->ssl_);
-        impl->ssl_inited_ = true;
-
-        int ret = mbedtls_ssl_setup(&impl->ssl_, &ctx->impl()->ssl_cfg_);
-        if (ret != 0) throw std::runtime_error("AkkaraDB TLS: mbedtls_ssl_setup failed (server)");
-
-        mbedtls_ssl_set_bio(&impl->ssl_, &impl->fd_, tls_bio_send, tls_bio_recv, nullptr);
-
-        // Handshake loop
-        do {
-            ret = mbedtls_ssl_handshake(&impl->ssl_);
-        } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
-
-        if (ret != 0) throw std::runtime_error("AkkaraDB TLS: server handshake failed");
-    }
-#else
-    (void)ctx;
-#endif
-
-    return std::unique_ptr<TlsStream>(new TlsStream(std::move(impl)));
-}
-
-std::unique_ptr<TlsStream> TlsStream::client_wrap(akk_sock_t fd, const char* hostname, TlsContext* ctx) {
-    auto impl  = std::make_unique<Impl>();
-    impl->fd_  = fd;
-    impl->tls_ = (ctx != nullptr);
-
-#ifdef AKKARADB_TLS_ENABLED
-    if (ctx != nullptr) {
-        mbedtls_ssl_init(&impl->ssl_);
-        impl->ssl_inited_ = true;
-
-        int ret = mbedtls_ssl_setup(&impl->ssl_, &ctx->impl()->ssl_cfg_);
-        if (ret != 0) throw std::runtime_error("AkkaraDB TLS: mbedtls_ssl_setup failed (client)");
-
-        if (hostname != nullptr && hostname[0] != '\0') {
-            ret = mbedtls_ssl_set_hostname(&impl->ssl_, hostname);
-            if (ret != 0) throw std::runtime_error("AkkaraDB TLS: mbedtls_ssl_set_hostname failed");
+        if (!ca_pem.empty()) {
+            if ((ret = mbedtls_x509_crt_parse(&impl->ca_cert, reinterpret_cast<const unsigned char*>(ca_pem.c_str()), ca_pem.size() + 1)) != 0) throw
+                std::runtime_error(mbedtls_error_string(ret));
         }
 
-        mbedtls_ssl_set_bio(&impl->ssl_, &impl->fd_, tls_bio_send, tls_bio_recv, nullptr);
+        if ((ret = mbedtls_ssl_config_defaults(&impl->ssl_cfg, MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT)) != 0) throw
+            std::runtime_error(mbedtls_error_string(ret));
 
-        // Handshake loop
-        do {
-            ret = mbedtls_ssl_handshake(&impl->ssl_);
-        } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+        mbedtls_ssl_conf_rng(&impl->ssl_cfg, mbedtls_ctr_drbg_random, &impl->drbg);
+        mbedtls_ssl_conf_authmode(&impl->ssl_cfg, to_mbed_verify(verify_mode));
 
-        if (ret != 0) throw std::runtime_error("AkkaraDB TLS: client handshake failed");
+        if (!ca_pem.empty()) { mbedtls_ssl_conf_ca_chain(&impl->ssl_cfg, &impl->ca_cert, nullptr); }
+
+        if ((ret = mbedtls_ssl_conf_own_cert(&impl->ssl_cfg, &impl->cert, &impl->key)) != 0) throw std::runtime_error(mbedtls_error_string(ret));
+
+        return std::shared_ptr<TlsContext>(new TlsContext(std::move(impl)));
     }
-#else
-    (void)hostname;
-    (void)ctx;
-#endif
 
-    return std::unique_ptr<TlsStream>(new TlsStream(std::move(impl)));
-}
+    std::shared_ptr<TlsContext> TlsContext::create_client(const std::string& ca_pem, TlsVerifyMode verify_mode) {
+        auto impl = std::make_unique<Impl>();
 
-// ============================================================================
-// TlsStream I/O
-// ============================================================================
+        int ret = mbedtls_ctr_drbg_seed(&impl->drbg, mbedtls_entropy_func, &impl->entropy, nullptr, 0);
+        if (ret != 0) throw std::runtime_error(mbedtls_error_string(ret));
 
-bool TlsStream::send_all(const uint8_t* data, size_t len) noexcept {
-    if (!impl_->tls_) {
-        // Plain TCP path
-        while (len > 0) {
-            int chunk = len > 65536 ? 65536 : static_cast<int>(len);
-#ifdef _WIN32
-            int n = ::send(impl_->fd_, reinterpret_cast<const char*>(data), chunk, 0);
-#else
-            int n = static_cast<int>(::send(impl_->fd_, data, static_cast<size_t>(chunk), 0));
-#endif
-            if (n <= 0) return false;
-            data += n;
-            len  -= static_cast<size_t>(n);
+        if (!ca_pem.empty()) {
+            if ((ret = mbedtls_x509_crt_parse(&impl->ca_cert, reinterpret_cast<const unsigned char*>(ca_pem.c_str()), ca_pem.size() + 1)) != 0) throw
+                std::runtime_error(mbedtls_error_string(ret));
         }
-        return true;
+
+        if ((ret = mbedtls_ssl_config_defaults(&impl->ssl_cfg, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT)) != 0) throw
+            std::runtime_error(mbedtls_error_string(ret));
+
+        mbedtls_ssl_conf_rng(&impl->ssl_cfg, mbedtls_ctr_drbg_random, &impl->drbg);
+        mbedtls_ssl_conf_authmode(&impl->ssl_cfg, to_mbed_verify(verify_mode));
+
+        if (!ca_pem.empty()) { mbedtls_ssl_conf_ca_chain(&impl->ssl_cfg, &impl->ca_cert, nullptr); }
+
+        return std::shared_ptr<TlsContext>(new TlsContext(std::move(impl)));
     }
 
-#ifdef AKKARADB_TLS_ENABLED
-    while (len > 0) {
-        int n = mbedtls_ssl_write(&impl_->ssl_, data, len);
-        if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-        if (n <= 0) return false;
-        data += n;
-        len  -= static_cast<size_t>(n);
-    }
-    return true;
-#else
-    return false;
-#endif
-}
+    // ==================== Stream Impl ====================
 
-bool TlsStream::recv_all(uint8_t* data, size_t len) noexcept {
-    if (!impl_->tls_) {
-        // Plain TCP path
-        while (len > 0) {
-            int chunk = len > 65536 ? 65536 : static_cast<int>(len);
-#ifdef _WIN32
-            int n = ::recv(impl_->fd_, reinterpret_cast<char*>(data), chunk, 0);
-#else
-            int n = static_cast<int>(::recv(impl_->fd_, data, static_cast<size_t>(chunk), 0));
-#endif
-            if (n <= 0) return false;
-            data += n;
-            len  -= static_cast<size_t>(n);
+    struct TlsStream::Impl {
+        mbedtls_ssl_context ssl{};
+        Impl() { mbedtls_ssl_init(&ssl); }
+        ~Impl() { mbedtls_ssl_free(&ssl); }
+    };
+
+    // ==================== BIO ====================
+
+    int TlsStream::bio_send(void* ctx, const unsigned char* buf, size_t len) {
+        socket_t fd = *static_cast<socket_t*>(ctx);
+
+        for (;;) {
+            #ifdef _WIN32
+            int n = send(fd, reinterpret_cast<const char*>(buf), static_cast<int>(len), 0);
+            if (n >= 0) return n;
+
+            int err = WSAGetLastError();
+            if (err == WSAEINTR) continue;
+            if (err == WSAEWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_WRITE;
+            #else
+            ssize_t n = send(fd, buf, len, 0); if (n >= 0) return static_cast<int>(n); if (errno == EINTR) continue; if (errno == EAGAIN || errno ==
+                EWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_WRITE;
+            #endif
+            return MBEDTLS_ERR_NET_SEND_FAILED;
         }
-        return true;
     }
 
-#ifdef AKKARADB_TLS_ENABLED
-    while (len > 0) {
-        int n = mbedtls_ssl_read(&impl_->ssl_, data, len);
-        if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-        if (n <= 0) return false;
-        data += n;
-        len  -= static_cast<size_t>(n);
+    int TlsStream::bio_recv(void* ctx, unsigned char* buf, size_t len) {
+        socket_t fd = *static_cast<socket_t*>(ctx);
+
+        for (;;) {
+            #ifdef _WIN32
+            int n = recv(fd, reinterpret_cast<char*>(buf), static_cast<int>(len), 0);
+            if (n > 0) return n;
+            if (n == 0) return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+
+            int err = WSAGetLastError();
+            if (err == WSAEINTR) continue;
+            if (err == WSAEWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_READ;
+            #else
+            ssize_t n = recv(fd, buf, len, 0); if (n > 0) return static_cast<int>(n); if (n == 0) return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY; if (errno ==
+                EINTR) continue; if (errno == EAGAIN || errno == EWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_READ;
+            #endif
+            return MBEDTLS_ERR_NET_RECV_FAILED;
+        }
     }
-    return true;
-#else
-    return false;
-#endif
-}
 
-size_t TlsStream::recv_some(uint8_t* data, size_t max_len) noexcept {
-    if (max_len == 0) return 0;
-    if (!impl_->tls_) {
-        // Plain TCP: single ::recv call — returns whatever the kernel has buffered.
-        const int chunk = max_len > 65536u ? 65536 : static_cast<int>(max_len);
-        #ifdef _WIN32
-        const int n = ::recv(impl_->fd_, reinterpret_cast<char*>(data), chunk, 0);
-        #else
-        const int n = static_cast<int>(::recv(impl_->fd_, data, static_cast<size_t>(chunk), 0));
-        #endif
-        return n > 0 ? static_cast<size_t>(n) : 0;
+    // ==================== TlsStream ====================
+
+    TlsStream::TlsStream(socket_t fd, std::shared_ptr<TlsContext> ctx, bool is_server)
+        : fd_(fd), ctx_(std::move(ctx)), is_server_(is_server) {
+        if (!ctx_) return;
+
+        ssl_ = std::make_unique<Impl>();
+
+        int ret = mbedtls_ssl_setup(&ssl_->ssl, &ctx_->impl_->ssl_cfg);
+        if (ret != 0) throw std::runtime_error(mbedtls_error_string(ret));
+
+        mbedtls_ssl_set_bio(&ssl_->ssl, &fd_, bio_send, bio_recv, nullptr);
     }
-    #ifdef AKKARADB_TLS_ENABLED
-    for (;;) {
-        const int n = mbedtls_ssl_read(&impl_->ssl_, data, max_len);
-        if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-        return n > 0 ? static_cast<size_t>(n) : 0;
+
+    TlsStream::~TlsStream() = default;
+
+    TlsStream::TlsStream(TlsStream&&) noexcept = default;
+    TlsStream& TlsStream::operator=(TlsStream&&) noexcept = default;
+
+    std::error_code TlsStream::handshake() noexcept {
+        if (!ssl_) return {};
+
+        for (;;) {
+            int ret = mbedtls_ssl_handshake(&ssl_->ssl);
+            if (ret == 0) return {};
+
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+
+            return make_error(ret);
+        }
     }
-    #else
-    return 0;
-    #endif
-}
 
-void TlsStream::shutdown() noexcept {
-#ifdef AKKARADB_TLS_ENABLED
-    if (impl_->tls_ && impl_->ssl_inited_) {
-        // Best-effort close_notify; ignore return value
-        int ret;
-        do {
-            ret = mbedtls_ssl_close_notify(&impl_->ssl_);
-        } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+    std::error_code TlsStream::read_some(void* buf, size_t len, size_t& out_read) noexcept {
+        out_read = 0;
+
+        if (!ssl_) {
+            #ifdef _WIN32
+            int n = recv(fd_, static_cast<char*>(buf), static_cast<int>(len), 0);
+            #else
+            ssize_t n = recv(fd_, buf, len, 0);
+            #endif
+            if (n >= 0) {
+                out_read = static_cast<size_t>(n);
+                return {};
+            }
+            #ifdef _WIN32
+            return {WSAGetLastError(), std::system_category()};
+            #else
+            return {errno, std::generic_category()};
+            #endif
+        }
+
+        for (;;) {
+            int ret = mbedtls_ssl_read(&ssl_->ssl, static_cast<unsigned char*>(buf), len);
+
+            if (ret > 0) {
+                out_read = static_cast<size_t>(ret);
+                return {};
+            }
+
+            if (ret == 0) return {};
+
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+
+            return make_error(ret);
+        }
     }
-#endif
-}
 
-TlsStream::TlsStream(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+    std::error_code TlsStream::write_some(const void* buf, size_t len, size_t& out_written) noexcept {
+        out_written = 0;
 
-TlsStream::~TlsStream() = default;
+        if (!ssl_) {
+            #ifdef _WIN32
+            int n = send(fd_, static_cast<const char*>(buf), static_cast<int>(len), 0);
+            #else
+            ssize_t n = send(fd_, buf, len, 0);
+            #endif
+            if (n >= 0) {
+                out_written = static_cast<size_t>(n);
+                return {};
+            }
+            #ifdef _WIN32
+            return {WSAGetLastError(), std::system_category()};
+            #else
+            return {errno, std::generic_category()};
+            #endif
+        }
 
-} // namespace akkaradb::core
+        for (;;) {
+            int ret = mbedtls_ssl_write(&ssl_->ssl, static_cast<const unsigned char*>(buf), len);
+
+            if (ret > 0) {
+                out_written = static_cast<size_t>(ret);
+                return {};
+            }
+
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+
+            return make_error(ret);
+        }
+    }
+
+    void TlsStream::shutdown() noexcept { if (ssl_) { mbedtls_ssl_close_notify(&ssl_->ssl); } }
+} // namespace akkaradb::net
