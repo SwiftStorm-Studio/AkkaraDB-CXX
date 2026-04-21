@@ -17,7 +17,6 @@
  */
 
 // internal/src/core/buffer/OwnedBuffer.cpp
-
 #include "core/buffer/OwnedBuffer.hpp"
 #include "core/buffer/BufferView.hpp"
 

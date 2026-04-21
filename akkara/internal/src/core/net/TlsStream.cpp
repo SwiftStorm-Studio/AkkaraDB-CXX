@@ -1,5 +1,22 @@
-// internal/src/net/TlsStream.cpp
+/*
+ * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
+ * Copyright (C) 2026 Swift Storm Studio
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
+// internal/src/net/TlsStream.cpp
 #include "core/net/TlsStream.hpp"
 
 #include <mbedtls/ctr_drbg.h>
@@ -52,6 +69,14 @@ namespace akkaradb::net {
         char buf[256];
         mbedtls_strerror(ret, buf, sizeof(buf));
         return {buf};
+    }
+
+    static std::error_code map_mbedtls_error(int ret) {
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) { return std::make_error_code(std::errc::operation_would_block); }
+
+        if (ret == 0) { return {}; }
+
+        return std::error_code{-ret, mbedtls_category()};
     }
 
     // ==================== Context Impl ====================
@@ -246,71 +271,84 @@ namespace akkaradb::net {
     std::error_code TlsStream::read_some(void* buf, size_t len, size_t& out_read) noexcept {
         out_read = 0;
 
+        // ===== Plain socket path =====
         if (!ssl_) {
             #ifdef _WIN32
             int n = recv(fd_, static_cast<char*>(buf), static_cast<int>(len), 0);
-            #else
-            ssize_t n = recv(fd_, buf, len, 0);
-            #endif
             if (n >= 0) {
                 out_read = static_cast<size_t>(n);
                 return {};
             }
-            #ifdef _WIN32
-            return {WSAGetLastError(), std::system_category()};
+
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) { return std::make_error_code(std::errc::operation_would_block); }
+            return {err, std::system_category()};
             #else
-            return {errno, std::generic_category()};
+            ssize_t n = recv(fd_, buf, len, 0); if (n >= 0) {
+                out_read = static_cast<size_t>(n);
+                return {};
+            } if (errno == EAGAIN || errno == EWOULDBLOCK) { return std::make_error_code(std::errc::operation_would_block); } return {
+                errno,
+                std::generic_category()
+            };
             #endif
         }
 
-        for (;;) {
-            int ret = mbedtls_ssl_read(&ssl_->ssl, static_cast<unsigned char*>(buf), len);
+        // ===== TLS path =====
+        int ret = mbedtls_ssl_read(&ssl_->ssl, static_cast<unsigned char*>(buf), len);
 
-            if (ret > 0) {
-                out_read = static_cast<size_t>(ret);
-                return {};
-            }
-
-            if (ret == 0) return {};
-
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-
-            return make_error(ret);
+        if (ret > 0) {
+            out_read = static_cast<size_t>(ret);
+            return {};
         }
+
+        if (ret == 0) {
+            // orderly shutdown
+            return std::make_error_code(std::errc::connection_reset);
+        }
+
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) { return std::make_error_code(std::errc::operation_would_block); }
+
+        return make_error(ret);
     }
 
     std::error_code TlsStream::write_some(const void* buf, size_t len, size_t& out_written) noexcept {
         out_written = 0;
 
+        // ===== Plain socket path =====
         if (!ssl_) {
             #ifdef _WIN32
             int n = send(fd_, static_cast<const char*>(buf), static_cast<int>(len), 0);
-            #else
-            ssize_t n = send(fd_, buf, len, 0);
-            #endif
             if (n >= 0) {
                 out_written = static_cast<size_t>(n);
                 return {};
             }
-            #ifdef _WIN32
-            return {WSAGetLastError(), std::system_category()};
+
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) { return std::make_error_code(std::errc::operation_would_block); }
+            return {err, std::system_category()};
             #else
-            return {errno, std::generic_category()};
+            ssize_t n = send(fd_, buf, len, 0); if (n >= 0) {
+                out_written = static_cast<size_t>(n);
+                return {};
+            } if (errno == EAGAIN || errno == EWOULDBLOCK) { return std::make_error_code(std::errc::operation_would_block); } return {
+                errno,
+                std::generic_category()
+            };
             #endif
         }
 
-        for (;;) {
-            int ret = mbedtls_ssl_write(&ssl_->ssl, static_cast<const unsigned char*>(buf), len);
+        // ===== TLS path =====
+        int ret = mbedtls_ssl_write(&ssl_->ssl, static_cast<const unsigned char*>(buf), len);
 
-            if (ret > 0) {
-                out_written = static_cast<size_t>(ret);
-                return {};
-            }
-
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-
-            return make_error(ret);
+        if (ret > 0) {
+            out_written = static_cast<size_t>(ret);
+            return {};
         }
+
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) { return std::make_error_code(std::errc::operation_would_block); }
+
+        return make_error(ret);
     }
 
     void TlsStream::shutdown() noexcept { if (ssl_) { mbedtls_ssl_close_notify(&ssl_->ssl); } }
