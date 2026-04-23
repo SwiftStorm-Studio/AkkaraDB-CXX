@@ -17,8 +17,6 @@
  */
 
 // internal/include/cpu/crc32c/CRC32CX86SSE42.cpp
-#include "cpu/CRC32C.hpp"
-
 #if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
 
 #include <cstddef>
@@ -27,7 +25,6 @@
 #include <nmmintrin.h> // _mm_crc32_*
 
 namespace akkaradb::cpu {
-
     uint32_t CRC32C_X86_SSE42(const std::byte* data, size_t length) noexcept {
         uint64_t crc = 0xFFFFFFFFu;
 
@@ -60,7 +57,6 @@ namespace akkaradb::cpu {
 
         return static_cast<uint32_t>(~crc);
     }
-
 } // namespace akkaradb::cpu
 
 #endif

@@ -27,7 +27,6 @@
 #include <cstring>
 
 namespace akkaradb::cpu {
-
     uint32_t CRC32C_ARM_CRC(const std::byte* data, size_t length) noexcept {
         uint32_t crc = 0xFFFFFFFFu;
 
@@ -60,7 +59,6 @@ namespace akkaradb::cpu {
 
         return ~crc;
     }
-
 } // namespace akkaradb::cpu
 
 #endif

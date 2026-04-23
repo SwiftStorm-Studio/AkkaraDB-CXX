@@ -20,9 +20,7 @@
 #include <array>
 
 namespace akkaradb::cpu {
-
     namespace {
-
         constexpr uint32_t Polynomial = 0x82F63B78u;
 
         constexpr std::array<uint32_t, 256> GenerateTable() {
@@ -30,9 +28,7 @@ namespace akkaradb::cpu {
 
             for (uint32_t i = 0; i < 256; ++i) {
                 uint32_t crc = i;
-                for (int j = 0; j < 8; ++j) {
-                    crc = (crc & 1) ? (crc >> 1) ^ Polynomial : (crc >> 1);
-                }
+                for (int j = 0; j < 8; ++j) { crc = (crc & 1) ? (crc >> 1) ^ Polynomial : (crc >> 1); }
                 table[i] = crc;
             }
 
@@ -40,7 +36,6 @@ namespace akkaradb::cpu {
         }
 
         constinit const auto Table = GenerateTable();
-
     } // namespace
 
     // fallback implementation
@@ -56,5 +51,4 @@ namespace akkaradb::cpu {
 
         return ~crc;
     }
-
 } // namespace akkaradb::cpu

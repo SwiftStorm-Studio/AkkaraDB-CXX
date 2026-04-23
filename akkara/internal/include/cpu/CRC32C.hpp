@@ -23,7 +23,6 @@
 #include <cstdint>
 
 namespace akkaradb::cpu {
-
     /**
      * @brief Compute CRC32C (Castagnoli) checksum.
      *
@@ -34,7 +33,5 @@ namespace akkaradb::cpu {
      * @param length Size of input data in bytes
      * @return CRC32C checksum
      */
-    [[nodiscard]]
-    uint32_t CRC32C(const std::byte* data, size_t length) noexcept;
-
+    [[nodiscard]] uint32_t CRC32C(const std::byte* data, size_t length) noexcept;
 }

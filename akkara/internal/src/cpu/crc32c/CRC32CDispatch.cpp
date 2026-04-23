@@ -33,7 +33,6 @@
 #endif
 
 namespace akkaradb::cpu {
-
     // ---- external implementations ----
 
     uint32_t CRC32C_Ref(const std::byte*, size_t) noexcept;
@@ -47,10 +46,9 @@ namespace akkaradb::cpu {
     #endif
 
     namespace {
-
         // ---- function pointer ----
 
-        typedef uint32_t(*Fn)(const std::byte*, size_t) noexcept;
+        typedef uint32_t (*Fn)(const std::byte*, size_t) noexcept;
 
         // ---- CPU feature detection ----
 
@@ -73,11 +71,11 @@ namespace akkaradb::cpu {
         #if defined(__aarch64__)
 
         bool SupportsARMCRC() noexcept {
-            #if defined(__linux__)
-            return (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0;
-            #else
-            return true;
-            #endif
+        #if defined(__linux__)
+        return (getauxval(AT_HWCAP) &HWCAP_CRC32) != 0;
+        #else
+        return true;
+        #endif
         }
 
         #endif
@@ -85,22 +83,16 @@ namespace akkaradb::cpu {
         // ---- resolver ----
 
         Fn Resolve() noexcept {
-
             #if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
-            if (SupportsSSE42()) {
-                return &CRC32C_X86_SSE42;
-            }
+            if (SupportsSSE42()) { return &CRC32C_X86_SSE42; }
             #endif
 
             #if defined(__aarch64__)
-            if (SupportsARMCRC()) {
-                return &CRC32C_ARM_CRC;
-            }
+            if (SupportsARMCRC()) { return &CRC32C_ARM_CRC; }
             #endif
 
             return &CRC32C_Ref;
         }
-
     } // namespace
 
     // ---- public entry ----
@@ -109,5 +101,4 @@ namespace akkaradb::cpu {
         static Fn fn = Resolve();
         return fn(data, length);
     }
-
 } // namespace akkaradb::cpu
