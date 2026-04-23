@@ -16,31 +16,25 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/src/core/buffer/OwnedBuffer.cpp
-#include "core/buffer/OwnedBuffer.hpp"
-#include "core/buffer/BufferView.hpp"
+// internal/include/cpu/CRC32C.hpp
+#pragma once
 
-#include <new>
+#include <cstddef>
+#include <cstdint>
 
-namespace akkaradb::core {
-    namespace {
-        // ==================== Heap Deleter ====================
+namespace akkaradb::cpu {
 
-        void heap_deleter(void* ptr, size_t /*size*/, void* /*ctx*/) { operator delete(ptr); }
-    }
+    /**
+     * @brief Compute CRC32C (Castagnoli) checksum.
+     *
+     * This function selects the fastest available implementation at runtime
+     * based on CPU capabilities (e.g., SSE4.2 on x86, CRC instructions on ARM).
+     *
+     * @param data   Pointer to input data
+     * @param length Size of input data in bytes
+     * @return CRC32C checksum
+     */
+    [[nodiscard]]
+    uint32_t CRC32C(const std::byte* data, size_t length) noexcept;
 
-    // ==================== Factory ====================
-
-    OwnedBuffer OwnedBuffer::allocate(size_t size) {
-        if (size == 0) { return OwnedBuffer{}; }
-
-        void* ptr = operator new(size);
-
-        return {static_cast<std::byte*>(ptr), size, &heap_deleter, nullptr};
-    }
-
-    // ==================== View ====================
-
-    BufferView OwnedBuffer::as_view() const noexcept { return BufferView{data_, size_}; }
-
-} // namespace akkaradb::core
+}
