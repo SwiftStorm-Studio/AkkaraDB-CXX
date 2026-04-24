@@ -57,12 +57,28 @@ namespace akkaradb::core {
 
             // ==================== Basic Accessors ====================
 
+            /**
+             * @brief Returns the start address of the viewed byte sequence.
+             *
+             * @return Pointer to the first byte, or nullptr when the view is empty.
+             */
             [[nodiscard]] constexpr const std::byte* data() const noexcept { return data_; }
 
+            /**
+             * @brief Returns the number of bytes in the view.
+             */
             [[nodiscard]] constexpr size_t size() const noexcept { return size_; }
 
+            /**
+             * @brief Reports whether the view contains no bytes.
+             */
             [[nodiscard]] constexpr bool empty() const noexcept { return size_ == 0; }
 
+            /**
+             * @brief Returns the contents as a byte span.
+             *
+             * @return A span referencing the same underlying storage.
+             */
             [[nodiscard]] constexpr std::span<const std::byte> as_span() const noexcept { return {data_, size_}; }
 
             /**
@@ -79,80 +95,129 @@ namespace akkaradb::core {
 
             // ==================== Slicing ====================
 
+            /**
+             * @brief Creates a sub-view from a byte range.
+             *
+             * @param offset Starting byte offset.
+             * @param length Number of bytes to include.
+             * @return A view over the requested sub-range.
+             * @throws std::out_of_range If the requested range exceeds the current view.
+             */
             [[nodiscard]] BufferView slice(size_t offset, size_t length) const;
 
+            /**
+             * @brief Creates a sub-view from @p offset to the end of the view.
+             *
+             * @param offset Starting byte offset.
+             * @return A view over the suffix starting at @p offset.
+             * @throws std::out_of_range If @p offset exceeds the current view.
+             */
             [[nodiscard]] BufferView slice(size_t offset) const;
 
             // ==================== Ownership ====================
 
             /**
-             * @brief Creates an owning copy of this buffer.
+             * @brief Creates an owning copy of this view.
              *
              * Performs a deep copy of the underlying byte sequence.
              *
-             * @note O(n) operation.
+             * @return A newly allocated buffer containing the same bytes.
              */
             [[nodiscard]] OwnedBuffer to_owned() const;
 
             // ==================== Little-Endian Reads ====================
 
-            [[nodiscard]] uint8_t read_u8(size_t offset) const noexcept {
-                check_bounds_inline(offset, 1);
-                return static_cast<uint8_t>(data_[offset]);
-            }
+            /**
+             * @brief Reads an unsigned 8-bit value at the given offset.
+             *
+             * @param offset Byte offset within the view.
+             * @return The byte value at @p offset.
+             * @throws std::out_of_range If the read would exceed the view.
+             */
+            [[nodiscard]] uint8_t read_u8(size_t offset) const;
 
-            [[nodiscard]] uint16_t read_u16_le(size_t offset) const noexcept {
-                check_bounds_inline(offset, 2);
-                uint16_t v;
-                std::memcpy(&v, data_ + offset, 2);
-                return v;
-            }
+            /**
+             * @brief Reads an unsigned 16-bit little-endian value at the given offset.
+             *
+             * @param offset Byte offset within the view.
+             * @return A 16-bit little-endian integer decoded from the buffer.
+             * @throws std::out_of_range If the read would exceed the view.
+             */
+            [[nodiscard]] uint16_t read_u16_le(size_t offset) const;
 
-            [[nodiscard]] uint32_t read_u32_le(size_t offset) const noexcept {
-                check_bounds_inline(offset, 4);
-                uint32_t v;
-                std::memcpy(&v, data_ + offset, 4);
-                return v;
-            }
+            /**
+             * @brief Reads an unsigned 32-bit little-endian value at the given offset.
+             *
+             * @param offset Byte offset within the view.
+             * @return A 32-bit little-endian integer decoded from the buffer.
+             * @throws std::out_of_range If the read would exceed the view.
+             */
+            [[nodiscard]] uint32_t read_u32_le(size_t offset) const;
 
-            [[nodiscard]] uint64_t read_u64_le(size_t offset) const noexcept {
-                check_bounds_inline(offset, 8);
-                uint64_t v;
-                std::memcpy(&v, data_ + offset, 8);
-                return v;
-            }
+            /**
+             * @brief Reads an unsigned 64-bit little-endian value at the given offset.
+             *
+             * @param offset Byte offset within the view.
+             * @return A 64-bit little-endian integer decoded from the buffer.
+             * @throws std::out_of_range If the read would exceed the view.
+             */
+            [[nodiscard]] uint64_t read_u64_le(size_t offset) const;
 
             // ==================== CRC ====================
 
+            /**
+             * @brief Computes the CRC32C checksum of a sub-range.
+             *
+             * @param offset Starting byte offset.
+             * @param length Number of bytes to include.
+             * @return CRC32C checksum of the requested range.
+             * @throws std::out_of_range If the requested range exceeds the current view.
+             */
             [[nodiscard]] uint32_t crc32c(size_t offset, size_t length) const;
 
+            /**
+             * @brief Computes the CRC32C checksum of the entire view.
+             */
             [[nodiscard]] uint32_t crc32c() const noexcept { return crc32c(0, size_); }
 
             // ==================== String ====================
 
             /**
-             * @brief Creates a string_view over a region.
+             * @brief Creates a string_view over a sub-range of the buffer.
              *
-             * @warning Not null-terminated. Lifetime follows BufferView.
+             * @param offset Starting byte offset.
+             * @param length Number of bytes to include.
+             * @return A non-owning string view referencing the same storage.
+             * @throws std::out_of_range If the requested range exceeds the current view.
              */
             [[nodiscard]] std::string_view as_string_view(size_t offset, size_t length) const;
 
+            /**
+             * @brief Creates a string_view over the entire buffer.
+             *
+             * @warning Not null-terminated. Lifetime follows BufferView.
+             */
             [[nodiscard]] std::string_view as_string_view() const noexcept { return {reinterpret_cast<const char*>(data_), size_}; }
 
         private:
             const std::byte* data_;
             size_t size_;
 
+            /**
+             * @brief Validates that a range is fully contained in the view.
+             *
+             * @param offset Starting byte offset.
+             * @param length Number of bytes to cover.
+             * @throws std::out_of_range If the range exceeds the current view.
+             */
             void check_bounds(size_t offset, size_t length) const;
 
-            void check_bounds_inline(size_t offset, size_t length) const noexcept {
-                #ifndef NDEBUG
-                if (offset > size_ || length > size_ - offset) [[unlikely]] { check_bounds(offset, length); }
-                #else
-                (void)offset;
-                (void)length;
-                #endif
-            }
+            /**
+             * @brief Fast path wrapper around @ref check_bounds.
+             *
+             * The validation is always enforced, including release builds.
+             */
+            void check_bounds_inline(size_t offset, size_t length) const { check_bounds(offset, length); }
     };
 
     static_assert(std::is_trivially_copyable_v<BufferView>);

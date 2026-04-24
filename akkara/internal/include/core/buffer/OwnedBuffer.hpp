@@ -67,7 +67,7 @@ namespace akkaradb::core {
              * @param size Size of buffer
              * @param ctx User-defined context (allocator / pool / arena)
              */
-            using Deleter = void(*)(void* ptr, size_t size, void* ctx);
+            typedef void (*Deleter)(void* ptr, size_t size, void* ctx);
 
             // ==================== Constructors ====================
 
