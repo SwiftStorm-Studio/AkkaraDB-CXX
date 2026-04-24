@@ -25,6 +25,7 @@
 #include <mbedtls/x509_crt.h>
 
 #include <stdexcept>
+#include <system_error>
 
 #include "mbedtls/net_sockets.h"
 
@@ -60,15 +61,29 @@ namespace akkaradb::net::tls {
     // ==================== BIO ====================
 
     static int bio_send(void* ctx, const unsigned char* buf, size_t len) {
-        auto* sock = static_cast<platform::Socket*>(ctx);
-        try { return static_cast<int>(sock->send(buf, len)); }
-        catch (...) { return MBEDTLS_ERR_NET_SEND_FAILED; }
+        platform::Socket* sock = static_cast<platform::Socket*>(ctx);
+
+        std::size_t sent = 0;
+        std::error_code ec = sock->send_some(buf, len, sent);
+
+        if (!ec) { return static_cast<int>(sent); }
+
+        if (ec == std::errc::operation_would_block) { return MBEDTLS_ERR_SSL_WANT_WRITE; }
+
+        return MBEDTLS_ERR_NET_SEND_FAILED;
     }
 
     static int bio_recv(void* ctx, unsigned char* buf, size_t len) {
-        auto* sock = static_cast<platform::Socket*>(ctx);
-        try { return static_cast<int>(sock->recv(buf, len)); }
-        catch (...) { return MBEDTLS_ERR_NET_RECV_FAILED; }
+        platform::Socket* sock = static_cast<platform::Socket*>(ctx);
+
+        std::size_t recvd = 0;
+        std::error_code ec = sock->recv_some(buf, len, recvd);
+
+        if (!ec) { return static_cast<int>(recvd); }
+
+        if (ec == std::errc::operation_would_block) { return MBEDTLS_ERR_SSL_WANT_READ; }
+
+        return MBEDTLS_ERR_NET_RECV_FAILED;
     }
 
     // ==================== lifecycle ====================
@@ -108,31 +123,45 @@ namespace akkaradb::net::tls {
 
         mbedtls_ssl_set_bio(&impl_->ssl, impl_->sock, bio_send, bio_recv, nullptr);
 
-        // handshake
+        // ==================== handshake ====================
+
         for (;;) {
             ret = mbedtls_ssl_handshake(&impl_->ssl);
+
             if (ret == 0) break;
 
-            if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) { throw std::runtime_error("mbedtls_ssl_handshake failed"); }
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) { continue; }
+
+            throw std::runtime_error("mbedtls_ssl_handshake failed");
         }
     }
 
     // ==================== IO ====================
 
     std::size_t TlsStream::send(const void* data, std::size_t size) {
-        int ret = mbedtls_ssl_write(&impl_->ssl, static_cast<const unsigned char*>(data), size);
+        for (;;) {
+            int ret = mbedtls_ssl_write(&impl_->ssl, static_cast<const unsigned char*>(data), size);
 
-        if (ret < 0) { throw std::runtime_error("tls send failed"); }
+            if (ret > 0) { return static_cast<std::size_t>(ret); }
 
-        return static_cast<std::size_t>(ret);
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) { continue; }
+
+            throw std::runtime_error("tls send failed");
+        }
     }
 
     std::size_t TlsStream::recv(void* data, std::size_t size) {
-        int ret = mbedtls_ssl_read(&impl_->ssl, static_cast<unsigned char*>(data), size);
+        for (;;) {
+            int ret = mbedtls_ssl_read(&impl_->ssl, static_cast<unsigned char*>(data), size);
 
-        if (ret < 0) { throw std::runtime_error("tls recv failed"); }
+            if (ret > 0) { return static_cast<std::size_t>(ret); }
 
-        return static_cast<std::size_t>(ret);
+            if (ret == 0) { throw std::runtime_error("tls connection closed"); }
+
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) { continue; }
+
+            throw std::runtime_error("tls recv failed");
+        }
     }
 
     // ==================== state ====================

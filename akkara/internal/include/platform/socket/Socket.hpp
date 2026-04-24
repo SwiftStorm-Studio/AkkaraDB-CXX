@@ -21,17 +21,25 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <system_error>
 
 namespace akkaradb::platform {
     /**
-     * @brief Minimal cross-platform TCP socket wrapper.
+     * @brief Minimal TCP socket wrapper.
      *
-     * Provides blocking connect/send/recv operations.
-     * Platform-specific implementations are hidden in source files.
+     * The socket is configured for non-blocking I/O after connection establishment.
+     * send_some() and recv_some() never block; they report would-block via std::error_code.
      */
     class Socket {
         public:
+            /**
+             * @brief Construct an invalid socket.
+             */
             Socket() noexcept;
+
+            /**
+             * @brief Destroy the socket and close the underlying handle if needed.
+             */
             ~Socket();
 
             Socket(Socket&& other) noexcept;
@@ -41,7 +49,18 @@ namespace akkaradb::platform {
             Socket& operator=(const Socket&) = delete;
 
             /**
-             * @brief Check if the socket is valid.
+             * @brief Create a TCP connection and leave the socket in non-blocking mode.
+             *
+             * @param host Hostname or IP address.
+             * @param port TCP port.
+             * @return Connected socket.
+             *
+             * @throws std::runtime_error on failure.
+             */
+            static Socket connect(const char* host, uint16_t port);
+
+            /**
+             * @brief Check whether the socket is valid.
              */
             [[nodiscard]] bool valid() const noexcept;
 
@@ -51,35 +70,28 @@ namespace akkaradb::platform {
             void close() noexcept;
 
             /**
-             * @brief Create and connect a TCP socket.
+             * @brief Send up to @p size bytes without blocking.
              *
-             * @param host Hostname or IP address
-             * @param port TCP port
-             * @return Connected socket
-             *
-             * @throws std::runtime_error on failure
+             * @param data Input buffer.
+             * @param size Maximum number of bytes to send.
+             * @param out_sent Number of bytes sent on success.
+             * @return std::error_code{} on success, operation_would_block if the socket would block.
              */
-            static Socket connect(const char* host, uint16_t port);
+            std::error_code send_some(const void* data, std::size_t size, std::size_t& out_sent) noexcept;
 
             /**
-             * @brief Send data.
+             * @brief Receive up to @p size bytes without blocking.
              *
-             * @return Number of bytes sent
-             *
-             * @throws std::runtime_error on failure
+             * @param data Output buffer.
+             * @param size Maximum number of bytes to receive.
+             * @param out_recv Number of bytes received on success.
+             * @return std::error_code{} on success, operation_would_block if the socket would block.
              */
-            std::size_t send(const void* data, std::size_t size);
-
-            /**
-             * @brief Receive data.
-             *
-             * @return Number of bytes received
-             *
-             * @throws std::runtime_error on failure
-             */
-            std::size_t recv(void* data, std::size_t size);
+            std::error_code recv_some(void* data, std::size_t size, std::size_t& out_recv) noexcept;
 
         private:
-            int fd_;
+            typedef std::uintptr_t native_handle_t;
+
+            native_handle_t handle_;
     };
 }

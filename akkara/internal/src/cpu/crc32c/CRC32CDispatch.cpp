@@ -32,31 +32,34 @@
 #  endif
 #endif
 
-namespace akkaradb::cpu {
-    // ---- external implementations ----
+#if defined(__aarch64__) && defined(__linux__)
+#  include <sys/auxv.h>
+#  include <asm/hwcap.h>
+#endif
 
-    uint32_t CRC32C_Ref(const std::byte*, size_t) noexcept;
+namespace akkaradb::cpu {
+    uint32_t CRC32C_Ref(const std::byte* data, size_t length) noexcept;
 
     #if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
-    uint32_t CRC32C_X86_SSE42(const std::byte*, size_t) noexcept;
+    uint32_t CRC32C_X86_SSE42(const std::byte* data, size_t length) noexcept;
     #endif
 
-    #if defined(__aarch64__)
-    uint32_t CRC32C_ARM_CRC(const std::byte*, size_t) noexcept;
+    #if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
+    uint32_t CRC32C_ARM_CRC(const std::byte* data, size_t length) noexcept;
     #endif
 
     namespace {
-        // ---- function pointer ----
-
-        typedef uint32_t (*Fn)(const std::byte*, size_t) noexcept;
-
-        // ---- CPU feature detection ----
+        using Fn = uint32_t (*)(const std::byte*, size_t) noexcept;
 
         #if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
-
-        bool SupportsSSE42() noexcept {
+        /**
+         * @brief Checks whether SSE4.2 CRC instructions are available.
+         *
+         * @return true if SSE4.2 CRC instructions can be used.
+         */
+        [[nodiscard]] bool SupportsSSE42() noexcept {
             #if defined(__GNUC__) || defined(__clang__)
-            return __builtin_cpu_supports("sse4.2");
+            __builtin_cpu_init(); return __builtin_cpu_supports("sse4.2");
             #elif defined(_MSC_VER)
             int regs[4]{};
             __cpuid(regs, 1);
@@ -65,29 +68,34 @@ namespace akkaradb::cpu {
             return false;
             #endif
         }
-
         #endif
 
-        #if defined(__aarch64__)
-
-        bool SupportsARMCRC() noexcept {
+        #if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
+        /**
+         * @brief Checks whether AArch64 CRC instructions are available.
+         *
+         * @return true if CRC instructions can be used.
+         */
+        [[nodiscard]] bool SupportsARMCRC() noexcept {
         #if defined(__linux__)
         return (getauxval(AT_HWCAP) &HWCAP_CRC32) != 0;
         #else
         return true;
         #endif
         }
-
         #endif
 
-        // ---- resolver ----
-
-        Fn Resolve() noexcept {
+        /**
+         * @brief Resolves the best available CRC32C implementation.
+         *
+         * @return Function pointer to the selected implementation.
+         */
+        [[nodiscard]] Fn Resolve() noexcept {
             #if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
             if (SupportsSSE42()) { return &CRC32C_X86_SSE42; }
             #endif
 
-            #if defined(__aarch64__)
+            #if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
             if (SupportsARMCRC()) { return &CRC32C_ARM_CRC; }
             #endif
 
@@ -95,10 +103,17 @@ namespace akkaradb::cpu {
         }
     } // namespace
 
-    // ---- public entry ----
-
-    uint32_t CRC32C(const std::byte* data, size_t length) noexcept {
-        static Fn fn = Resolve();
+    /**
+     * @brief Public CRC32C entry point.
+     *
+     * The selected implementation is cached after the first call.
+     *
+     * @param data Pointer to the input bytes.
+     * @param length Number of bytes to process.
+     * @return CRC32C checksum for the input.
+     */
+    [[nodiscard]] uint32_t CRC32C(const std::byte* data, size_t length) noexcept {
+        static const Fn fn = Resolve();
         return fn(data, length);
     }
 } // namespace akkaradb::cpu

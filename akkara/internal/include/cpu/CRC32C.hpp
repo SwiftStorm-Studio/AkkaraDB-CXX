@@ -26,12 +26,15 @@ namespace akkaradb::cpu {
     /**
      * @brief Compute CRC32C (Castagnoli) checksum.
      *
-     * This function selects the fastest available implementation at runtime
-     * based on CPU capabilities (e.g., SSE4.2 on x86, CRC instructions on ARM).
+     * The dispatcher selects the fastest available implementation at runtime:
+     * - x86 / x64 SSE4.2 CRC instructions
+     * - AArch64 CRC instructions
+     * - portable slicing-by-8 fallback
      *
-     * @param data   Pointer to input data
-     * @param length Size of input data in bytes
-     * @return CRC32C checksum
+     * @param data Pointer to the input bytes.
+     *             May be null only when @p length is 0.
+     * @param length Number of bytes to process.
+     * @return CRC32C checksum for the input.
      */
     [[nodiscard]] uint32_t CRC32C(const std::byte* data, size_t length) noexcept;
-}
+} // namespace akkaradb::cpu
