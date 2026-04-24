@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 
 namespace akkaradb::core {
     class BufferView;

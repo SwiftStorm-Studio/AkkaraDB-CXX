@@ -101,10 +101,13 @@ namespace akkaradb::platform {
         [[nodiscard]] int wait_connect_complete(SOCKET s) noexcept {
             for (;;) {
                 fd_set wfds;
+                fd_set efds;
                 FD_ZERO(&wfds);
+                FD_ZERO(&efds);
                 FD_SET(s, &wfds);
+                FD_SET(s, &efds);
 
-                const int rc = select(0, nullptr, &wfds, nullptr, nullptr);
+                const int rc = select(0, nullptr, &wfds, &efds, nullptr);
                 if (rc == SOCKET_ERROR) {
                     const int err = WSAGetLastError();
                     if (err == WSAEINTR) { continue; }
@@ -171,8 +174,8 @@ namespace akkaradb::platform {
     /**
      * @brief Resolves a host and establishes a TCP connection.
      *
-     * The socket is switched to non-blocking mode only during connect, then
-     * restored to blocking mode before returning.
+     * The socket is configured as non-blocking for connect and remains
+     * non-blocking after this function returns.
      *
      * @param host Host name or numeric address.
      * @param port TCP port.
@@ -229,12 +232,6 @@ namespace akkaradb::platform {
 
             const int rc = connect(s, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
             if (rc == 0) {
-                if (!set_nonblocking(s, false)) {
-                    last_error = WSAGetLastError();
-                    closesocket(s);
-                    continue;
-                }
-
                 connected = from_socket(s);
                 break;
             }
@@ -243,12 +240,6 @@ namespace akkaradb::platform {
             if (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS || err == WSAEALREADY) {
                 const int wait_rc = wait_connect_complete(s);
                 if (wait_rc == 0) {
-                    if (!set_nonblocking(s, false)) {
-                        last_error = WSAGetLastError();
-                        closesocket(s);
-                        continue;
-                    }
-
                     connected = from_socket(s);
                     break;
                 }

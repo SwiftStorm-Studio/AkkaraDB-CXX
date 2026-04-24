@@ -204,8 +204,8 @@ void Socket::close() noexcept {
 /**
  * @brief Resolves host and establishes a TCP connection.
  *
- * The socket is temporarily switched to non-blocking mode to complete connect
- * cleanly, then restored to blocking mode before returning.
+ * The socket is configured as non-blocking for connect and remains
+ * non-blocking after this function returns.
  *
  * @param host Host name or numeric address.
  * @param port TCP port.
@@ -265,12 +265,6 @@ native_handle_t connected = invalid_handle(); int last_error = 0;for (struct add
 #endif
 
 const int rc = ::connect(fd, rp->ai_addr, rp->ai_addrlen);if (rc== 0) {
-            if (!set_nonblocking(fd, false)) {
-                last_error = errno;
-                ::close(fd);
-                continue;
-            }
-
             connected = from_fd(fd);
             break;
         }
@@ -278,12 +272,6 @@ const int rc = ::connect(fd, rp->ai_addr, rp->ai_addrlen);if (rc== 0) {
         if (errno== EINPROGRESS || errno== EALREADY || errno== EWOULDBLOCK) {
             const int wait_rc = wait_connect_complete(fd);
             if (wait_rc == 0) {
-                if (!set_nonblocking(fd, false)) {
-                    last_error = errno;
-                    ::close(fd);
-                    continue;
-                }
-
                 connected = from_fd(fd);
                 break;
             }
