@@ -17,7 +17,6 @@
  */
 
 // internal/src/core/record/MemHdr16.cpp
-
 #include "core/record/MemHdr16.hpp"
 
 #include <cassert>
