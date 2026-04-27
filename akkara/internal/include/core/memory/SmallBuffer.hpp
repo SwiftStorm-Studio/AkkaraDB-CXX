@@ -167,47 +167,45 @@ namespace akkaradb::core {
 
         /**
          * Move constructor.
-         *
-         * Arena case:
-         *   - Pointer is transferred (cheap)
-         *
-         * Inline case:
-         *   - Bytes are copied
+         * * For arena-backed buffers, this transfers the pointer (O(1)).
+         * For inline buffers, this performs a small physical copy to the new object's
+         * internal storage and resets the source to maintain SSO invariants.
          */
         SmallBuffer(SmallBuffer&& o) noexcept
             : meta_{o.meta_} {
 
-            if (o.active_ptr_ != o.inl_) {
-                // Arena-backed → steal pointer
+            if (o.is_arena()) {
+                // Arena-backed: steal the external pointer
                 active_ptr_ = o.active_ptr_;
-
-                // Reset source to safe empty inline state
-                o.active_ptr_ = o.inl_;
-                o.meta_ = 0;
             } else {
-                // Inline → copy bytes
+                // Inline: copy bytes to our own 'inl_' and point active_ptr_ here
                 active_ptr_ = inl_;
-                std::memcpy(inl_, o.inl_, meta_);
+                if (meta_ > 0) {
+                    std::memcpy(inl_, o.inl_, meta_);
+                }
             }
+
+            // Ensure the source is left in a valid, empty inline state
+            o.reset_to_empty();
         }
 
         /**
-         * Move assignment.
+         * Move assignment operator.
          */
         SmallBuffer& operator=(SmallBuffer&& o) noexcept {
             if (this == &o) return *this;
 
             meta_ = o.meta_;
-
-            if (o.active_ptr_ != o.inl_) {
+            if (o.is_arena()) {
                 active_ptr_ = o.active_ptr_;
-                o.active_ptr_ = o.inl_;
-                o.meta_ = 0;
             } else {
                 active_ptr_ = inl_;
-                std::memcpy(inl_, o.inl_, meta_);
+                if (meta_ > 0) {
+                    std::memcpy(inl_, o.inl_, meta_);
+                }
             }
 
+            o.reset_to_empty();
             return *this;
         }
 
@@ -222,6 +220,16 @@ namespace akkaradb::core {
          */
         SmallBuffer(const SmallBuffer&) = delete;
         SmallBuffer& operator=(const SmallBuffer&) = delete;
+
+        private:
+            /**
+             * Resets the buffer to an empty inline state.
+             * Internal helper to ensure SSO invariants after move operations.
+             */
+            void reset_to_empty() noexcept {
+                active_ptr_ = inl_;
+                meta_ = 0;
+            }
     };
 
     // Enforce strict layout guarantee (critical for MemRecord = 64B)
