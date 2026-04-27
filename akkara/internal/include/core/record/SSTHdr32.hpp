@@ -79,16 +79,12 @@ namespace akkaradb::core {
         /**
          * Checks if this record is a tombstone (deleted).
          */
-        [[nodiscard]] constexpr bool is_tombstone() const noexcept {
-            return (flags & FLAG_TOMBSTONE) != 0;
-        }
+        [[nodiscard]] constexpr bool is_tombstone() const noexcept { return (flags & FLAG_TOMBSTONE) != 0; }
 
         /**
          * Returns the total size of the record (header + key + value).
          */
-        [[nodiscard]] constexpr size_t total_size() const noexcept {
-            return sizeof(SSTHdr32) + k_len + v_len;
-        }
+        [[nodiscard]] constexpr size_t total_size() const noexcept { return sizeof(SSTHdr32) + k_len + v_len; }
 
         /**
          * Computes SipHash-2-4 fingerprint of a key.
@@ -122,13 +118,7 @@ namespace akkaradb::core {
          * @param flags Flags (FLAG_NORMAL or FLAG_TOMBSTONE)
          * @return Initialized header
          */
-        [[nodiscard]] static SSTHdr32 create(
-            const uint8_t* key,
-            size_t key_len,
-            size_t value_len,
-            uint64_t seq,
-            uint8_t flags = FLAG_NORMAL
-        ) noexcept;
+        [[nodiscard]] static SSTHdr32 create(const uint8_t* key, size_t key_len, size_t value_len, uint64_t seq, uint8_t flags = FLAG_NORMAL) noexcept;
     };
 
     static_assert(sizeof(SSTHdr32) == 32, "SSTHdr32 must be exactly 32 bytes");

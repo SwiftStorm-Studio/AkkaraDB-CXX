@@ -24,7 +24,7 @@ namespace akkaradb::core {
     /**
      * MemHdr16 - 16-byte fixed-size in-memory record header for MemTable.
      *
-     * This header is used exclusively for in-memory records (MemRecord) and is
+     * This header is used exclusively for in-memory records (OwnedRecord) and is
      * intentionally minimal. It contains only the essential metadata required
      * to interpret a record (key/value boundaries, versioning, and flags),
      * excluding any I/O or comparison-specific optimizations.
@@ -64,7 +64,7 @@ namespace akkaradb::core {
 
         uint8_t flags; ///< Flags (see FLAG_* constants)
 
-        uint8_t version;  ///< Header layout version; must be checked before interpreting fields
+        uint8_t version; ///< Header layout version; must be checked before interpreting fields
 
         uint16_t reserved; ///< Reserved for future use; must be zero on write, ignored on read
 
@@ -79,16 +79,12 @@ namespace akkaradb::core {
         /**
          * Checks if this record is a tombstone (deleted).
          */
-        [[nodiscard]] constexpr bool is_tombstone() const noexcept {
-            return (flags & FLAG_TOMBSTONE) != 0;
-        }
+        [[nodiscard]] constexpr bool is_tombstone() const noexcept { return (flags & FLAG_TOMBSTONE) != 0; }
 
         /**
          * Returns the total size of the record (header + key + value).
          */
-        [[nodiscard]] constexpr size_t total_size() const noexcept {
-            return sizeof(MemHdr16) + k_len + v_len;
-        }
+        [[nodiscard]] constexpr size_t total_size() const noexcept { return sizeof(MemHdr16) + k_len + v_len; }
 
         /**
          * Creates a MemHdr16 from key/value metadata.

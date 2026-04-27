@@ -42,5 +42,4 @@ namespace akkaradb::core {
     // ==================== View ====================
 
     BufferView OwnedBuffer::as_view() const noexcept { return BufferView{data_, size_}; }
-
 } // namespace akkaradb::core

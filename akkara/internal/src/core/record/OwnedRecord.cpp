@@ -16,14 +16,14 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/src/core/record/MemRecord.cpp
-#include "core/record/MemRecord.hpp"
+// internal/src/core/record/OwnedRecord.cpp
+#include "core/record/OwnedRecord.hpp"
 
 namespace akkaradb::core {
 
     // ==================== Factory ====================
 
-    MemRecord MemRecord::create(
+    OwnedRecord OwnedRecord::create(
         std::span<const uint8_t> key,
         std::span<const uint8_t> value,
         uint64_t seq,
@@ -32,7 +32,7 @@ namespace akkaradb::core {
         uint64_t fp64,
         uint64_t mk
     ) {
-        MemRecord r;
+        OwnedRecord r;
 
         r.hdr.k_len = static_cast<uint16_t>(key.size());
         r.hdr.v_len = static_cast<uint16_t>(value.size());
@@ -41,7 +41,6 @@ namespace akkaradb::core {
 
         r.key_fp64 = fp64;
 
-        // mini_key生成（≤8B）
         if (mk != 0) {
             r.mini_key = mk;
         } else {
@@ -61,7 +60,7 @@ namespace akkaradb::core {
         return r;
     }
 
-    MemRecord MemRecord::create(
+    OwnedRecord OwnedRecord::create(
         std::string_view key,
         std::string_view value,
         uint64_t seq,
@@ -77,7 +76,7 @@ namespace akkaradb::core {
         );
     }
 
-    MemRecord MemRecord::tombstone(
+    OwnedRecord OwnedRecord::tombstone(
         std::span<const uint8_t> key,
         uint64_t seq,
         BufferArena& arena,

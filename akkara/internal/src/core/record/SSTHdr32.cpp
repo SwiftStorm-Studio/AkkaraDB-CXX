@@ -27,81 +27,77 @@
 namespace akkaradb::core {
     namespace {
         class SipHash24 {
-        public:
-            explicit SipHash24(uint64_t seed = 0x5AD6DCD676D23C25) noexcept {
-                const uint64_t k0 = seed;
-                const uint64_t k1 = seed ^ 0x9E3779B97F4A7C15ULL;
+            public:
+                explicit SipHash24(uint64_t seed = 0x5AD6DCD676D23C25) noexcept {
+                    const uint64_t k0 = seed;
+                    const uint64_t k1 = seed ^ 0x9E3779B97F4A7C15ULL;
 
-                v0_ = 0x736f6d6570736575ULL ^ k0;
-                v1_ = 0x646f72616e646f6dULL ^ k1;
-                v2_ = 0x6c7967656e657261ULL ^ k0;
-                v3_ = 0x7465646279746573ULL ^ k1;
-            }
-
-            void update(const uint8_t* data, size_t len) noexcept {
-                const auto* ptr = data;
-                const auto* end = data + len;
-
-                while (ptr + 8 <= end) {
-                    uint64_t m;
-                    std::memcpy(&m, ptr, 8);
-                    compress(m);
-                    ptr += 8;
+                    v0_ = 0x736f6d6570736575ULL ^ k0;
+                    v1_ = 0x646f72616e646f6dULL ^ k1;
+                    v2_ = 0x6c7967656e657261ULL ^ k0;
+                    v3_ = 0x7465646279746573ULL ^ k1;
                 }
 
-                tail_len_ = static_cast<size_t>(end - ptr);
-                std::memcpy(tail_.data(), ptr, tail_len_);
-            }
+                void update(const uint8_t* data, size_t len) noexcept {
+                    const auto* ptr = data;
+                    const auto* end = data + len;
 
-            [[nodiscard]] uint64_t finalize(size_t total_len) noexcept {
-                uint64_t b = static_cast<uint64_t>(total_len) << 56;
+                    while (ptr + 8 <= end) {
+                        uint64_t m;
+                        std::memcpy(&m, ptr, 8);
+                        compress(m);
+                        ptr += 8;
+                    }
 
-                for (size_t i = 0; i < tail_len_; ++i) {
-                    b |= static_cast<uint64_t>(tail_[i]) << (i * 8);
+                    tail_len_ = static_cast<size_t>(end - ptr);
+                    std::memcpy(tail_.data(), ptr, tail_len_);
                 }
 
-                compress(b);
+                [[nodiscard]] uint64_t finalize(size_t total_len) noexcept {
+                    uint64_t b = static_cast<uint64_t>(total_len) << 56;
 
-                v2_ ^= 0xff;
-                for (int i = 0; i < 4; ++i) { round(); }
+                    for (size_t i = 0; i < tail_len_; ++i) { b |= static_cast<uint64_t>(tail_[i]) << (i * 8); }
 
-                return v0_ ^ v1_ ^ v2_ ^ v3_;
-            }
+                    compress(b);
 
-        private:
-            void compress(uint64_t m) noexcept {
-                v3_ ^= m;
-                for (int i = 0; i < 2; ++i) { round(); }
-                v0_ ^= m;
-            }
+                    v2_ ^= 0xff;
+                    for (int i = 0; i < 4; ++i) { round(); }
 
-            void round() noexcept {
-                v0_ += v1_;
-                v1_ = rotl(v1_, 13);
-                v1_ ^= v0_;
-                v0_ = rotl(v0_, 32);
+                    return v0_ ^ v1_ ^ v2_ ^ v3_;
+                }
 
-                v2_ += v3_;
-                v3_ = rotl(v3_, 16);
-                v3_ ^= v2_;
+            private:
+                void compress(uint64_t m) noexcept {
+                    v3_ ^= m;
+                    for (int i = 0; i < 2; ++i) { round(); }
+                    v0_ ^= m;
+                }
 
-                v0_ += v3_;
-                v3_ = rotl(v3_, 21);
-                v3_ ^= v0_;
+                void round() noexcept {
+                    v0_ += v1_;
+                    v1_ = rotl(v1_, 13);
+                    v1_ ^= v0_;
+                    v0_ = rotl(v0_, 32);
 
-                v2_ += v1_;
-                v1_ = rotl(v1_, 17);
-                v1_ ^= v2_;
-                v2_ = rotl(v2_, 32);
-            }
+                    v2_ += v3_;
+                    v3_ = rotl(v3_, 16);
+                    v3_ ^= v2_;
 
-            static constexpr uint64_t rotl(uint64_t x, int b) noexcept {
-                return (x << b) | (x >> (64 - b));
-            }
+                    v0_ += v3_;
+                    v3_ = rotl(v3_, 21);
+                    v3_ ^= v0_;
 
-            uint64_t v0_, v1_, v2_, v3_;
-            std::array<uint8_t, 8> tail_{};
-            size_t tail_len_{0};
+                    v2_ += v1_;
+                    v1_ = rotl(v1_, 17);
+                    v1_ ^= v2_;
+                    v2_ = rotl(v2_, 32);
+                }
+
+                static constexpr uint64_t rotl(uint64_t x, int b) noexcept { return (x << b) | (x >> (64 - b)); }
+
+                uint64_t v0_, v1_, v2_, v3_;
+                std::array<uint8_t, 8> tail_{};
+                size_t tail_len_{0};
         };
     } // anonymous namespace
 
@@ -117,20 +113,12 @@ namespace akkaradb::core {
         uint64_t mini = 0;
         const size_t copy_len = std::min<size_t>(key_len, 8);
 
-        for (size_t i = 0; i < copy_len; ++i) {
-            mini |= static_cast<uint64_t>(key[i]) << (i * 8);
-        }
+        for (size_t i = 0; i < copy_len; ++i) { mini |= static_cast<uint64_t>(key[i]) << (i * 8); }
 
         return mini;
     }
 
-    SSTHdr32 SSTHdr32::create(
-        const uint8_t* key,
-        size_t key_len,
-        size_t value_len,
-        uint64_t seq,
-        uint8_t flags
-    ) noexcept {
+    SSTHdr32 SSTHdr32::create(const uint8_t* key, size_t key_len, size_t value_len, uint64_t seq, uint8_t flags) noexcept {
         assert(key_len <= 0xFFFFu && "SSTHdr32::create: key_len exceeds u16 range");
         assert(value_len <= 0xFFFFu && "SSTHdr32::create: value_len exceeds u16 range");
         assert((flags & ~(FLAG_TOMBSTONE | FLAG_BLOB)) == 0 && "SSTHdr32::create: invalid flags");
@@ -146,5 +134,4 @@ namespace akkaradb::core {
             .mini_key = build_mini_key(key, key_len)
         };
     }
-
 } // namespace akkaradb::core

@@ -39,9 +39,7 @@ namespace akkaradb::core {
         if (align == 0) { align = 1; }
         if (!is_power_of_two(align)) { throw std::invalid_argument("BufferArena::allocate: alignment must be power-of-two"); }
 
-        if (current_ != nullptr) {
-            if (auto* ptr = try_allocate_from_block(current_, size, align); ptr != nullptr) { return ptr; }
-        }
+        if (current_ != nullptr) { if (auto* ptr = try_allocate_from_block(current_, size, align); ptr != nullptr) { return ptr; } }
 
         if (size > (static_cast<size_t>(-1) - (align - 1))) { throw std::bad_alloc(); }
         const size_t min_capacity = size + (align - 1);

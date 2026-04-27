@@ -148,7 +148,7 @@ namespace akkaradb::core {
             meta_ = static_cast<uint16_t>(n);
 
             // Select storage (branch happens once at construction)
-            active_ptr_ = (n <= INLINE_CAP)
+            active_ptr_ = n <= INLINE_CAP
                 ? inl_
                 : reinterpret_cast<uint8_t*>(arena.allocate(n));
 
@@ -232,7 +232,7 @@ namespace akkaradb::core {
             }
     };
 
-    // Enforce strict layout guarantee (critical for MemRecord = 64B)
+    // Enforce strict layout guarantee (critical for OwnedRecord = 64B)
     static_assert(sizeof(SmallBuffer) == 32, "SmallBuffer must be 32 bytes");
 
 } // namespace akkaradb::core
