@@ -45,7 +45,7 @@ namespace akkaradb::platform {
          *
          * @return Sentinel value representing an invalid socket.
          */
-        [[nodiscard]] native_handle_t invalid_handle() noexcept { return static_cast<native_handle_t>(INVALID_SOCKET); }
+        [[nodiscard]] native_handle_t invalid_handle() noexcept { return INVALID_SOCKET; }
 
         /**
          * @brief Converts the native handle to a SOCKET.
@@ -53,7 +53,7 @@ namespace akkaradb::platform {
          * @param handle Native socket handle.
          * @return SOCKET value.
          */
-        [[nodiscard]] SOCKET to_socket(native_handle_t handle) noexcept { return static_cast<SOCKET>(handle); }
+        [[nodiscard]] SOCKET to_socket(native_handle_t handle) noexcept { return handle; }
 
         /**
          * @brief Converts a SOCKET to the native handle type.
@@ -61,7 +61,7 @@ namespace akkaradb::platform {
          * @param s SOCKET value.
          * @return Native socket handle.
          */
-        [[nodiscard]] native_handle_t from_socket(SOCKET s) noexcept { return static_cast<native_handle_t>(s); }
+        [[nodiscard]] native_handle_t from_socket(SOCKET s) noexcept { return s; }
 
         /**
          * @brief Ensures Winsock is initialized exactly once.
@@ -74,7 +74,7 @@ namespace akkaradb::platform {
                 once,
                 [] {
                     WSADATA wsa{};
-                    const int rc = ::WSAStartup(MAKEWORD(2, 2), &wsa);
+                    const int rc = WSAStartup(MAKEWORD(2, 2), &wsa);
                     if (rc != 0) { throw std::runtime_error("WSAStartup failed: " + std::to_string(rc)); }
                 }
             );
@@ -230,7 +230,7 @@ namespace akkaradb::platform {
                 continue;
             }
 
-            const int rc = connect(s, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
+            const int rc = ::connect(s, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
             if (rc == 0) {
                 connected = from_socket(s);
                 break;
@@ -283,17 +283,17 @@ namespace akkaradb::platform {
         if (data == nullptr) { return std::make_error_code(std::errc::invalid_argument); }
 
         const auto* ptr = static_cast<const char*>(data);
-        const std::size_t chunk_size = std::min<std::size_t>(size, static_cast<std::size_t>(INT_MAX));
+        const std::size_t chunk_size = std::min<std::size_t>(size, INT_MAX);
 
         for (;;) {
-            const int n = ::send(to_socket(handle_), ptr, static_cast<int>(chunk_size), 0);
+            const int n = send(to_socket(handle_), ptr, static_cast<int>(chunk_size), 0);
 
             if (n >= 0) {
                 out_sent = static_cast<std::size_t>(n);
                 return {};
             }
 
-            const int err = ::WSAGetLastError();
+            const int err = WSAGetLastError();
             if (err == WSAEINTR) { continue; }
             if (err == WSAEWOULDBLOCK) { return would_block(); }
             if (err == WSAECONNRESET || err == WSAECONNABORTED || err == WSAENOTCONN) { return std::make_error_code(std::errc::connection_reset); }
@@ -320,10 +320,10 @@ namespace akkaradb::platform {
         if (data == nullptr) { return std::make_error_code(std::errc::invalid_argument); }
 
         auto* ptr = static_cast<char*>(data);
-        const std::size_t chunk_size = std::min<std::size_t>(size, static_cast<std::size_t>(INT_MAX));
+        const std::size_t chunk_size = std::min<std::size_t>(size, INT_MAX);
 
         for (;;) {
-            const int n = ::recv(to_socket(handle_), ptr, static_cast<int>(chunk_size), 0);
+            const int n = recv(to_socket(handle_), ptr, static_cast<int>(chunk_size), 0);
 
             if (n > 0) {
                 out_recv = static_cast<std::size_t>(n);
@@ -332,7 +332,7 @@ namespace akkaradb::platform {
 
             if (n == 0) { return std::make_error_code(std::errc::connection_reset); }
 
-            const int err = ::WSAGetLastError();
+            const int err = WSAGetLastError();
             if (err == WSAEINTR) { continue; }
             if (err == WSAEWOULDBLOCK) { return would_block(); }
             if (err == WSAECONNRESET || err == WSAECONNABORTED || err == WSAENOTCONN) { return std::make_error_code(std::errc::connection_reset); }

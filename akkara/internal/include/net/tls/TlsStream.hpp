@@ -24,7 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace akkaradb::net::tls {
+namespace akkaradb::net {
     /**
      * @brief TLS stream over a TCP socket.
      *
@@ -83,4 +83,4 @@ namespace akkaradb::net::tls {
             struct Impl;
             Impl* impl_ = nullptr;
     };
-}
+} //akkaradb::net

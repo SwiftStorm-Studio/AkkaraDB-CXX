@@ -23,8 +23,9 @@
 #include <cstring>
 #include <string_view>
 #include "core/buffer/BufferArena.hpp"
+#include "core/utils/StringUtil.hpp"
 
-namespace akkardb::core {
+namespace akkaradb::core {
     /**
      * @brief Lightweight status object used across AkkaraDB core and storage layers.
      *
@@ -92,7 +93,7 @@ namespace akkardb::core {
              * @param msg   Message to copy into Arena.
              * @param arena Arena used for allocation.
              */
-            static Status Error(Code code, std::string_view msg, akkaradb::core::BufferArena* arena);
+            static Status Error(Code code, std::string_view msg, BufferArena* arena);
 
             /**
              * @brief Check if status is OK.
@@ -121,16 +122,6 @@ namespace akkardb::core {
             const char* msg_; // non-owning pointer (static or Arena-backed)
 
             constexpr Status(Code code, const char* msg) noexcept : code_(code), msg_(msg) {}
-
-            static const char* copyString(std::string_view sv, akkaradb::core::BufferArena* arena) {
-                auto* mem = arena->allocate(sv.size() + 1);
-
-                std::memcpy(mem, sv.data(), sv.size());
-
-                reinterpret_cast<char*>(mem)[sv.size()] = '\0';
-
-                return reinterpret_cast<const char*>(mem);
-            }
     };
 
     /**
@@ -143,10 +134,10 @@ namespace akkardb::core {
      * @param arena Arena allocator.
      * @return Status with Arena-owned message pointer.
      */
-    inline Status Status::Error(Code code, std::string_view msg, akkaradb::core::BufferArena* arena) {
+    inline Status Status::Error(Code code, std::string_view msg, BufferArena* arena) {
         if (!arena || msg.empty()) { return {code, nullptr}; }
 
         const char* copied = copyString(msg, arena);
         return {code, copied};
     }
-} // namespace akkardb::core
+} // namespace akkaradb::core

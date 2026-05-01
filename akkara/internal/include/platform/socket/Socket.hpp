@@ -94,4 +94,4 @@ namespace akkaradb::platform {
 
             native_handle_t handle_;
     };
-}
+} //akkaradb::socket

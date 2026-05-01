@@ -29,7 +29,7 @@
 
 #include "mbedtls/net_sockets.h"
 
-namespace akkaradb::net::tls {
+namespace akkaradb::net {
     // ==================== Impl ====================
 
     struct TlsStream::Impl {
@@ -176,4 +176,4 @@ namespace akkaradb::net::tls {
     }
 
     bool TlsStream::valid() const noexcept { return socket_.valid(); }
-}
+} //akkaradb::net

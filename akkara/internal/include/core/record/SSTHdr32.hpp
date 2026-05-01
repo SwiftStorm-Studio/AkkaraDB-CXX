@@ -125,4 +125,4 @@ namespace akkaradb::core {
     static_assert(alignof(SSTHdr32) == 8, "SSTHdr32 must be 8-byte aligned");
     static_assert(std::is_standard_layout_v<SSTHdr32>);
     static_assert(std::is_trivially_copyable_v<SSTHdr32>);
-}
+} // namespace akkaradb::core

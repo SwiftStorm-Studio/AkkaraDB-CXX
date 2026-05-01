@@ -222,4 +222,4 @@ namespace akkaradb::core {
 
     static_assert(std::is_trivially_copyable_v<BufferView>);
     static_assert(std::is_trivially_destructible_v<BufferView>);
-} // namespace
+} // namespace akkaradb::core

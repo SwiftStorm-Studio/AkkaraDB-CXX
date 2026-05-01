@@ -100,4 +100,4 @@ namespace akkaradb::core {
 
     static_assert(sizeof(MemHdr16) == 16);
     static_assert(alignof(MemHdr16) == 8);
-}
+} // namespace akkaradb::core
