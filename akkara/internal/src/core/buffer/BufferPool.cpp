@@ -203,10 +203,10 @@ namespace akkaradb::core {
                 size_t spill = tls_cache_limit_ / 2;
                 if (spill == 0) { spill = 1; }
                 while (spill-- > 0 && bin.count > 0) {
-                    auto& [raw, payload] = bin.entries[--bin.count];
-                    auto* spill_node = reinterpret_cast<FreeNode*>(payload);
+                    auto& [raw, spill_payload] = bin.entries[--bin.count];
+                    auto* spill_node = reinterpret_cast<FreeNode*>(spill_payload);
                     raw = nullptr;
-                    payload = nullptr;
+                    spill_payload = nullptr;
                     push_global(idx, spill_node);
                 }
 

@@ -20,6 +20,7 @@
 #include "core/record/MemHdr16.hpp"
 
 #include <cassert>
+#include <limits>
 
 namespace akkaradb::core {
     MemHdr16 MemHdr16::create(size_t key_len, size_t value_len, uint64_t seq, uint8_t flags) noexcept {

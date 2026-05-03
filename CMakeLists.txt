@@ -29,10 +29,10 @@ set(INTERNAL_SRC_DIR ${INTERNAL_DIR}/src)
 
 # ==================== Compiler Settings ====================
 if (MSVC)
-    add_compile_options(/W4 /WX /permissive- /utf-8)
+    add_compile_options(/W4 /permissive- /utf-8)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else ()
-    add_compile_options(-Wall -Wextra -Werror -pedantic)
+    add_compile_options(-Wall -Wextra -pedantic)
 endif ()
 
 # Always enable SIMD optimizations (SSE4.2 + AVX2)
@@ -93,6 +93,11 @@ set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 # ==================== Main Library ====================
 add_library(akkaradb)
 
+if (MSVC)
+    target_compile_options(akkaradb PRIVATE /WX)
+else ()
+    target_compile_options(akkaradb PRIVATE -Werror)
+endif ()
 # ====================== Public Headers ======================
 file(GLOB_RECURSE PUBLIC_HEADERS
         "${AKKARADB_INCLUDE_DIR}/akkaradb/*.hpp"
@@ -162,7 +167,8 @@ if (BUILD_SHARED_LIBS)
     )
     if (WIN32)
         set_target_properties(akkaradb PROPERTIES
-                WINDOWS_EXPORT_ALL_SYMBOLS OFF
+                WINDOWS_EXPORT_ALL_SYMBOLS ON
+                ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
                 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
         )
     endif ()
@@ -265,6 +271,28 @@ target_include_directories(akkaradb_api_server_test
 )
 
 set_target_properties(akkaradb_api_server_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# ==================== MemTable Smoke Test ====================
+add_executable(akkaradb_memtable_smoke_test
+        benchmarks/memtable_smoke_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_memtable_smoke_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_memtable_smoke_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_memtable_smoke_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_memtable_smoke_test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 

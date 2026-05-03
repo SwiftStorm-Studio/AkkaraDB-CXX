@@ -19,18 +19,17 @@
 // internal/include/engine/memtable/IMemTable.hpp
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include <memory>
 
 #include "core/Status.hpp"
 #include "core/record/RecordView.hpp"
 #include "core/types/ByteView.hpp"
+#include "core/utils/ArenaGenerator.hpp"
 
 using namespace akkaradb::core;
 
 namespace akkaradb::engine {
-    class IMemTableIterator;
-
     /**
      * @brief Abstract interface for pluggable MemTable implementations.
      *
@@ -93,12 +92,12 @@ namespace akkaradb::engine {
             /**
              * @brief Create ordered iterator for snapshot view.
              *
-             * Iterator traversal order must be lexicographically ordered.
+             * Iteration order must be lexicographically ordered by key.
              *
              * @param snapshot_seq Snapshot sequence boundary.
-             * @return Iterator instance.
+             * @return Generator of visible records.
              */
-            [[nodiscard]] virtual std::unique_ptr<IMemTableIterator> iterator(uint64_t snapshot_seq) const = 0;
+            [[nodiscard]] virtual ArenaGenerator<RecordView> iterator(uint64_t snapshot_seq) const = 0;
 
             /**
              * @brief Freeze the MemTable into immutable state.
