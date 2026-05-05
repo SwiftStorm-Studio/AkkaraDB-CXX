@@ -20,6 +20,7 @@
 #pragma once
 
 #include <coroutine>
+#include <array>
 #include <cstddef>
 #include <exception>
 #include <iterator>
@@ -206,9 +207,7 @@ namespace akkaradb::core {
                 ArenaGenerator first,
                 ArenaGenerator second
             ) {
-                return with_arena(arena, [first = std::move(first), second = std::move(second)]() mutable {
-                    return yield_all_impl(std::move(first), std::move(second));
-                });
+                return yieldAll(arena, std::move(first), std::move(second));
             }
 
             [[nodiscard]] static ArenaGenerator yieldAll(
@@ -216,7 +215,35 @@ namespace akkaradb::core {
                 ArenaGenerator first,
                 ArenaGenerator second
             ) {
-                return yield_all(arena, std::move(first), std::move(second));
+                return with_arena(arena, [first = std::move(first), second = std::move(second)]() mutable {
+                    return yield_all_impl(std::move(first), std::move(second));
+                });
+            }
+
+            [[nodiscard]] static ArenaGenerator yieldAll(
+                BufferArena& arena,
+                ArenaGenerator first
+            ) {
+                return with_arena(arena, [first = std::move(first)]() mutable {
+                    return yield_all_impl(std::move(first), ArenaGenerator{});
+                });
+            }
+
+            template <typename... Rest>
+            [[nodiscard]] static ArenaGenerator yieldAll(
+                BufferArena& arena,
+                ArenaGenerator first,
+                ArenaGenerator second,
+                Rest... rest
+            ) {
+                static_assert((std::is_same_v<ArenaGenerator, std::remove_cvref_t<Rest>> && ...),
+                    "yieldAll rest arguments must be ArenaGenerator<T>");
+
+                return with_arena(arena, [first = std::move(first),
+                                          second = std::move(second),
+                                          tail = std::array<ArenaGenerator, sizeof...(Rest)>{std::move(rest)...}]() mutable {
+                    return yield_all_many_impl(std::move(first), std::move(second), std::move(tail));
+                });
             }
 
         private:
@@ -226,6 +253,25 @@ namespace akkaradb::core {
                 }
                 for (auto&& value : second) {
                     co_yield value;
+                }
+            }
+
+            template <size_t N>
+            [[nodiscard]] static ArenaGenerator yield_all_many_impl(
+                ArenaGenerator first,
+                ArenaGenerator second,
+                std::array<ArenaGenerator, N> tail
+            ) {
+                for (auto&& value : first) {
+                    co_yield value;
+                }
+                for (auto&& value : second) {
+                    co_yield value;
+                }
+                for (auto& gen : tail) {
+                    for (auto&& value : gen) {
+                        co_yield value;
+                    }
                 }
             }
 

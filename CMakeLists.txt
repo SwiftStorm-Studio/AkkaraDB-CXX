@@ -99,7 +99,7 @@ else ()
     target_compile_options(akkaradb PRIVATE -Werror)
 endif ()
 # ====================== Public Headers ======================
-file(GLOB_RECURSE PUBLIC_HEADERS
+file(GLOB_RECURSE PUBLIC_HEADERS CONFIGURE_DEPENDS
         "${AKKARADB_INCLUDE_DIR}/akkaradb/*.hpp"
         "${AKKARADB_INCLUDE_DIR}/akkaradb/*.h"
 )
@@ -110,7 +110,7 @@ target_sources(akkaradb PUBLIC FILE_SET HEADERS
 )
 
 # ====================== Internal Headers ======================
-file(GLOB_RECURSE INTERNAL_HEADERS
+file(GLOB_RECURSE INTERNAL_HEADERS CONFIGURE_DEPENDS
         "${INTERNAL_INCLUDE_DIR}/*.hpp"
         "${INTERNAL_INCLUDE_DIR}/*.h"
 )
@@ -121,11 +121,11 @@ target_sources(akkaradb PUBLIC FILE_SET internal_headers TYPE HEADERS
 )
 
 # ====================== Source Files ======================
-file(GLOB_RECURSE AKKARADB_SOURCES
+file(GLOB_RECURSE AKKARADB_SOURCES CONFIGURE_DEPENDS
         "${AKKARADB_SRC_DIR}/*.cpp"
 )
 
-file(GLOB_RECURSE INTERNAL_SOURCES
+file(GLOB_RECURSE INTERNAL_SOURCES CONFIGURE_DEPENDS
         "${INTERNAL_SRC_DIR}/*.cpp"
 )
 
@@ -252,28 +252,6 @@ set_target_properties(akkaradb_benchmark PROPERTIES
 
 install(TARGETS akkaradb_benchmark RUNTIME DESTINATION bin)
 
-# ── API Server Test ───────────────────────────────────────────────────────────
-add_executable(akkaradb_api_server_test
-        benchmarks/api_server_test.cpp
-)
-
-if(MSVC)
-    target_compile_options(akkaradb_api_server_test PRIVATE /WX-)
-endif()
-
-target_link_libraries(akkaradb_api_server_test PRIVATE akkaradb)
-
-target_include_directories(akkaradb_api_server_test
-        PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
-        ${AKKARADB_INCLUDE_DIR}
-        ${INTERNAL_INCLUDE_DIR}
-)
-
-set_target_properties(akkaradb_api_server_test PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
 # ==================== MemTable Smoke Test ====================
 add_executable(akkaradb_memtable_smoke_test
         benchmarks/memtable_smoke_test.cpp
@@ -293,6 +271,28 @@ target_include_directories(akkaradb_memtable_smoke_test
 )
 
 set_target_properties(akkaradb_memtable_smoke_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# ==================== MemTable Throughput Benchmark ====================
+add_executable(akkaradb_memtable_throughput_benchmark
+        benchmarks/memtable_throughput_benchmark.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_memtable_throughput_benchmark PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_memtable_throughput_benchmark PRIVATE akkaradb)
+
+target_include_directories(akkaradb_memtable_throughput_benchmark
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_memtable_throughput_benchmark PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 

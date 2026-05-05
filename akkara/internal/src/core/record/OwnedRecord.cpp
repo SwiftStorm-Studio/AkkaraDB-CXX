@@ -20,8 +20,43 @@
 #include "core/record/OwnedRecord.hpp"
 
 namespace akkaradb::core {
+    namespace {
+        [[nodiscard]] uint64_t build_mini_key(std::span<const uint8_t> key) noexcept {
+            uint64_t mini = 0;
+            const size_t n = std::min<size_t>(key.size(), 8);
+            for (size_t i = 0; i < n; ++i) {
+                mini |= static_cast<uint64_t>(key[i]) << (i * 8);
+            }
+            return mini;
+        }
+    } // namespace
 
     // ==================== Factory ====================
+
+    void OwnedRecord::create_inplace(
+        OwnedRecord& dst,
+        std::span<const uint8_t> key,
+        std::span<const uint8_t> value,
+        uint64_t seq,
+        uint8_t flags,
+        BufferArena& arena,
+        uint64_t fp64,
+        uint64_t mk
+    ) {
+        dst.hdr.k_len = static_cast<uint16_t>(key.size());
+        dst.hdr.v_len = static_cast<uint16_t>(value.size());
+        dst.hdr.seq   = seq;
+        dst.hdr.flags = flags;
+
+        dst.key_fp64 = fp64;
+        dst.mini_key = (mk != 0) ? mk : build_mini_key(key);
+
+        dst.data = SmallBuffer(
+            key.data(), key.size(),
+            value.data(), value.size(),
+            arena
+        );
+    }
 
     OwnedRecord OwnedRecord::create(
         std::span<const uint8_t> key,
@@ -33,30 +68,7 @@ namespace akkaradb::core {
         uint64_t mk
     ) {
         OwnedRecord r;
-
-        r.hdr.k_len = static_cast<uint16_t>(key.size());
-        r.hdr.v_len = static_cast<uint16_t>(value.size());
-        r.hdr.seq   = seq;
-        r.hdr.flags = flags;
-
-        r.key_fp64 = fp64;
-
-        if (mk != 0) {
-            r.mini_key = mk;
-        } else {
-            r.mini_key = 0;
-            const size_t n = std::min<size_t>(key.size(), 8);
-            for (size_t i = 0; i < n; ++i) {
-                r.mini_key |= static_cast<uint64_t>(key[i]) << (i * 8);
-            }
-        }
-
-        r.data = SmallBuffer(
-            key.data(), key.size(),
-            value.data(), value.size(),
-            arena
-        );
-
+        create_inplace(r, key, value, seq, flags, arena, fp64, mk);
         return r;
     }
 

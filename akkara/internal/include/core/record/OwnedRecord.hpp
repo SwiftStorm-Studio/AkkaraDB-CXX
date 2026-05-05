@@ -66,6 +66,16 @@ namespace akkaradb::core {
             uint64_t fp64 = 0,
             uint64_t mk = 0
         );
+        static void create_inplace(
+            OwnedRecord& dst,
+            std::span<const uint8_t> key,
+            std::span<const uint8_t> value,
+            uint64_t seq,
+            uint8_t flags,
+            BufferArena& arena,
+            uint64_t fp64 = 0,
+            uint64_t mk = 0
+        );
 
         [[nodiscard]] static OwnedRecord create(std::string_view key, std::string_view value, uint64_t seq, uint8_t flags, BufferArena& arena);
 

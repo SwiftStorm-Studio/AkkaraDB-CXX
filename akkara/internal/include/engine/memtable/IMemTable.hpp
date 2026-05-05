@@ -44,7 +44,7 @@ namespace akkaradb::engine {
      *
      * Intended backend implementations include:
      * - Skip List
-     * - B+ Tree
+     * - BPTree
      * - Red-Black Tree
      *
      * Design constraints:
@@ -72,7 +72,14 @@ namespace akkaradb::engine {
              *
              * @return Operation result.
              */
-            [[nodiscard]] virtual Status put(ByteView key, ByteView value, uint64_t seq, uint8_t flags) = 0;
+            [[nodiscard]] virtual Status put(
+                ByteView key,
+                ByteView value,
+                uint64_t seq,
+                uint8_t flags,
+                uint64_t precomputed_fp64 = 0,
+                uint64_t precomputed_mk = 0
+            ) = 0;
 
             /**
              * @brief Retrieve the visible version for a snapshot.

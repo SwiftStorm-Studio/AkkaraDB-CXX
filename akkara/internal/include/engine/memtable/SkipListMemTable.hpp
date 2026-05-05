@@ -42,7 +42,14 @@ namespace akkaradb::engine {
                 size_t generator_arena_max_block_size = 2 * 1024 * 1024
             );
 
-            [[nodiscard]] Status put(ByteView key, ByteView value, uint64_t seq, uint8_t flags) override;
+            [[nodiscard]] Status put(
+                ByteView key,
+                ByteView value,
+                uint64_t seq,
+                uint8_t flags,
+                uint64_t precomputed_fp64 = 0,
+                uint64_t precomputed_mk = 0
+            ) override;
             [[nodiscard]] bool get(ByteView key, uint64_t snapshot_seq, RecordView* out) const override;
             [[nodiscard]] ArenaGenerator<RecordView> iterator(uint64_t snapshot_seq) const override;
             void freeze() override;
@@ -71,6 +78,7 @@ namespace akkaradb::engine {
             std::atomic<bool> frozen_{false};
             std::atomic<size_t> bytes_{0};
             std::atomic<size_t> entries_{0};
+            std::atomic<uint8_t> current_max_level_{1};
             uint64_t rng_state_{0x9e3779b97f4a7c15ULL};
             mutable std::mutex generator_arena_mutex_;
 
@@ -79,12 +87,20 @@ namespace akkaradb::engine {
             [[nodiscard]] uint8_t random_level() noexcept;
 
             [[nodiscard]] Node* new_node(const core::OwnedRecord* initial_record, uint8_t level);
-            [[nodiscard]] core::OwnedRecord* make_record(ByteView key, ByteView value, uint64_t seq, uint8_t flags);
+            [[nodiscard]] core::OwnedRecord* make_record(
+                ByteView key,
+                ByteView value,
+                uint64_t seq,
+                uint8_t flags,
+                uint64_t precomputed_fp64,
+                uint64_t precomputed_mk
+            );
 
             [[nodiscard]] static int compare_node_key(const Node* node, std::span<const uint8_t> key) noexcept;
             [[nodiscard]] Node* find_node(
                 std::span<const uint8_t> key,
-                std::array<Node*, MAX_LEVEL>* update
+                std::array<Node*, MAX_LEVEL>* update,
+                bool writer_fast_path
             ) const noexcept;
 
             [[nodiscard]] bool visible_record(const Node* node, uint64_t snapshot_seq, RecordView* out) const noexcept;
@@ -93,4 +109,3 @@ namespace akkaradb::engine {
             [[nodiscard]] ArenaGenerator<RecordView> iterate_snapshot(uint64_t snapshot_seq) const;
     };
 } // namespace akkaradb::engine
-
