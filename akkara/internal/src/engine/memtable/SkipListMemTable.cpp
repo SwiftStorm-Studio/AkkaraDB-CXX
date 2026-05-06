@@ -83,34 +83,31 @@ namespace akkaradb::engine {
         node->count.store(1, std::memory_order_relaxed);
         node->version.store(0, std::memory_order_relaxed);
 
-        node->ring[0].record.store(initial_record, std::memory_order_release);
+        node->ring[0].record.store(initial_record, std::memory_order_relaxed);
         return node;
     }
 
     core::OwnedRecord* SkipListMemTable::make_record(
-        ByteView key,
-        ByteView value,
+        std::span<const uint8_t> key,
+        std::span<const uint8_t> value,
         uint64_t seq,
         uint8_t flags,
         uint64_t precomputed_fp64,
         uint64_t precomputed_mk
     ) {
-        const auto key_u8 = as_u8(key);
-        const auto value_u8 = as_u8(value);
-
         const uint64_t fp64 = precomputed_fp64 != 0
             ? precomputed_fp64
-            : (key_u8.empty()
+            : (key.empty()
             ? 0
-            : core::SSTHdr32::compute_key_fp64(key_u8.data(), key_u8.size()));
+            : core::SSTHdr32::compute_key_fp64(key.data(), key.size()));
         const uint64_t mini = precomputed_mk != 0
             ? precomputed_mk
-            : (key_u8.empty()
+            : (key.empty()
             ? 0
-            : core::SSTHdr32::build_mini_key(key_u8.data(), key_u8.size()));
+            : core::SSTHdr32::build_mini_key(key.data(), key.size()));
 
         core::OwnedRecord* record = arena_new<core::OwnedRecord>(data_arena_);
-        core::OwnedRecord::create_inplace(*record, key_u8, value_u8, seq, flags, data_arena_, fp64, mini);
+        core::OwnedRecord::create_inplace(*record, key, value, seq, flags, data_arena_, fp64, mini);
         return record;
     }
 
@@ -123,9 +120,7 @@ namespace akkaradb::engine {
         std::array<Node*, MAX_LEVEL>* update,
         bool writer_fast_path
     ) const noexcept {
-        const uint8_t top_level = writer_fast_path
-            ? current_max_level_.load(std::memory_order_relaxed)
-            : current_max_level_.load(std::memory_order_acquire);
+        const uint8_t top_level = current_max_level_.load(std::memory_order_relaxed);
         const int start_level = static_cast<int>(top_level > 0 ? top_level - 1 : 0);
 
         if (writer_fast_path) {
@@ -180,21 +175,21 @@ namespace akkaradb::engine {
                 continue;
             }
 
-            const uint8_t head = node->head.load(std::memory_order_acquire);
-            const uint8_t count = node->count.load(std::memory_order_acquire);
+            const uint8_t count = node->count.load(std::memory_order_relaxed);
+            const uint8_t head_local = node->head.load(std::memory_order_relaxed);
 
             const core::OwnedRecord* selected = nullptr;
 
             if (count > 0) {
                 // Common case: latest snapshot reads. Check the newest slot first
                 // and skip ring scan when it is visible.
-                const core::OwnedRecord* newest = node->ring[head].record.load(std::memory_order_acquire);
+                const core::OwnedRecord* newest = node->ring[head_local].record.load(std::memory_order_relaxed);
                 if (newest != nullptr && newest->seq() <= snapshot_seq) {
                     selected = newest;
                 } else {
                     for (uint8_t i = 1; i < count; ++i) {
-                        const uint8_t index = static_cast<uint8_t>((head - i) & (MAX_VERSIONS_PER_KEY - 1));
-                        const core::OwnedRecord* candidate = node->ring[index].record.load(std::memory_order_acquire);
+                        const uint8_t index = static_cast<uint8_t>((head_local - i) & (MAX_VERSIONS_PER_KEY - 1));
+                        const core::OwnedRecord* candidate = node->ring[index].record.load(std::memory_order_relaxed);
                         if (candidate != nullptr && candidate->seq() <= snapshot_seq) {
                             selected = candidate;
                             break;
@@ -247,10 +242,11 @@ namespace akkaradb::engine {
         }
 
         const auto key_u8 = as_u8(key);
+        const auto value_u8 = as_u8(value);
         std::array<Node*, MAX_LEVEL> update;
         Node* candidate = find_node(key_u8, &update, true);
 
-        const core::OwnedRecord* record = make_record(key, value, seq, flags, precomputed_fp64, precomputed_mk);
+        const core::OwnedRecord* record = make_record(key_u8, value_u8, seq, flags, precomputed_fp64, precomputed_mk);
         bytes_.fetch_add(sizeof(core::OwnedRecord) + key.size() + value.size(), std::memory_order_relaxed);
 
         if (candidate != nullptr && compare_node_key(candidate, key_u8) == 0) {

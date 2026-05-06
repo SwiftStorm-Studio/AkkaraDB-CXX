@@ -66,7 +66,7 @@ namespace akkaradb::engine {
             std::atomic<uint8_t> count{0};
             std::array<std::atomic<const core::OwnedRecord*>, MAX_VERSIONS_PER_KEY> ring{};
 
-            VersionChain() noexcept;
+            VersionChain() noexcept = default;
         };
 
         struct Node {
@@ -80,7 +80,7 @@ namespace akkaradb::engine {
 
             std::atomic<Node*> next_leaf{nullptr};
 
-            explicit Node(bool leaf) noexcept;
+            explicit Node(bool leaf) noexcept : is_leaf{leaf} {}
         };
 
         struct SplitResult {
@@ -122,6 +122,11 @@ namespace akkaradb::engine {
         [[nodiscard]] static int compare_record_key(const core::OwnedRecord* record, std::span<const uint8_t> key) noexcept;
         [[nodiscard]] static int compare_record_record(const core::OwnedRecord* lhs, const core::OwnedRecord* rhs) noexcept;
         [[nodiscard]] static uint16_t find_leaf_position(const Node* leaf, std::span<const uint8_t> key) noexcept;
+        [[nodiscard]] static uint16_t find_leaf_position(
+            const Node* leaf,
+            std::span<const uint8_t> key,
+            uint16_t key_count
+        ) noexcept;
         [[nodiscard]] static uint16_t find_child_index(const Node* internal, std::span<const uint8_t> key) noexcept;
 
         static void append_version(VersionChain* chain, const core::OwnedRecord* record, std::atomic<size_t>& entries) noexcept;
@@ -130,7 +135,6 @@ namespace akkaradb::engine {
 
         [[nodiscard]] std::optional<SplitResult> insert_recursive(Node* node, const core::OwnedRecord* record);
         [[nodiscard]] Node* descend_to_candidate_leaf(std::span<const uint8_t> key) const noexcept;
-        [[nodiscard]] static const core::OwnedRecord* leaf_max_key(Node* leaf) noexcept;
         [[nodiscard]] ArenaGenerator<RecordView> iterate_snapshot(uint64_t snapshot_seq) const;
     };
 } // namespace akkaradb::engine

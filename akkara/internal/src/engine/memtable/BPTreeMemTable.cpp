@@ -19,7 +19,6 @@
 #include "engine/memtable/BPTreeMemTable.hpp"
 
 #include <algorithm>
-#include <cstring>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -28,25 +27,6 @@
 #include "core/record/SSTHdr32.hpp"
 
 namespace akkaradb::engine {
-    BPTreeMemTable::VersionChain::VersionChain() noexcept {
-        for (auto& slot : ring) {
-            slot.store(nullptr, std::memory_order_relaxed);
-        }
-    }
-
-    BPTreeMemTable::Node::Node(bool leaf) noexcept
-        : is_leaf{leaf} {
-        for (auto& key : keys) {
-            key.store(nullptr, std::memory_order_relaxed);
-        }
-        for (auto& chain : chains) {
-            chain.store(nullptr, std::memory_order_relaxed);
-        }
-        for (auto& child : children) {
-            child.store(nullptr, std::memory_order_relaxed);
-        }
-    }
-
     BPTreeMemTable::BPTreeMemTable(
         size_t data_arena_initial_block_size,
         size_t data_arena_max_block_size,
@@ -71,9 +51,9 @@ namespace akkaradb::engine {
 
     BPTreeMemTable::VersionChain* BPTreeMemTable::make_chain(const core::OwnedRecord* initial) {
         VersionChain* chain = arena_new<VersionChain>();
-        chain->ring[0].store(initial, std::memory_order_release);
-        chain->head.store(0, std::memory_order_release);
-        chain->count.store(1, std::memory_order_release);
+        chain->ring[0].store(initial, std::memory_order_relaxed);
+        chain->head.store(0, std::memory_order_relaxed);
+        chain->count.store(1, std::memory_order_relaxed);
         entries_.fetch_add(1, std::memory_order_relaxed);
         bytes_.fetch_add(sizeof(VersionChain), std::memory_order_relaxed);
         return chain;
@@ -117,12 +97,20 @@ namespace akkaradb::engine {
     }
 
     uint16_t BPTreeMemTable::find_leaf_position(const Node* leaf, std::span<const uint8_t> key) noexcept {
-        const uint16_t key_count = leaf->key_count.load(std::memory_order_acquire);
+        const uint16_t key_count = leaf->key_count.load(std::memory_order_relaxed);
+        return find_leaf_position(leaf, key, key_count);
+    }
+
+    uint16_t BPTreeMemTable::find_leaf_position(
+        const Node* leaf,
+        std::span<const uint8_t> key,
+        uint16_t key_count
+    ) noexcept {
         uint16_t lo = 0;
         uint16_t hi = key_count;
         while (lo < hi) {
             const uint16_t mid = static_cast<uint16_t>(lo + (hi - lo) / 2);
-            const core::OwnedRecord* pivot = leaf->keys[mid].load(std::memory_order_acquire);
+            const core::OwnedRecord* pivot = leaf->keys[mid].load(std::memory_order_relaxed);
             const int cmp = compare_record_key(pivot, key);
             if (cmp < 0) {
                 lo = static_cast<uint16_t>(mid + 1);
@@ -134,12 +122,12 @@ namespace akkaradb::engine {
     }
 
     uint16_t BPTreeMemTable::find_child_index(const Node* internal, std::span<const uint8_t> key) noexcept {
-        const uint16_t key_count = internal->key_count.load(std::memory_order_acquire);
+        const uint16_t key_count = internal->key_count.load(std::memory_order_relaxed);
         uint16_t lo = 0;
         uint16_t hi = key_count;
         while (lo < hi) {
             const uint16_t mid = static_cast<uint16_t>(lo + (hi - lo) / 2);
-            const core::OwnedRecord* pivot = internal->keys[mid].load(std::memory_order_acquire);
+            const core::OwnedRecord* pivot = internal->keys[mid].load(std::memory_order_relaxed);
             const int cmp = compare_record_key(pivot, key);
             if (cmp <= 0) {
                 lo = static_cast<uint16_t>(mid + 1);
@@ -183,16 +171,23 @@ namespace akkaradb::engine {
                 continue;
             }
 
-            const uint8_t head = chain->head.load(std::memory_order_acquire);
-            const uint8_t count = chain->count.load(std::memory_order_acquire);
+            const uint8_t head = chain->head.load(std::memory_order_relaxed);
+            const uint8_t count = chain->count.load(std::memory_order_relaxed);
 
             const core::OwnedRecord* selected = nullptr;
-            for (uint8_t i = 0; i < count; ++i) {
-                const uint8_t index = static_cast<uint8_t>((head - i) & (MAX_VERSIONS_PER_KEY - 1));
-                const core::OwnedRecord* candidate = chain->ring[index].load(std::memory_order_acquire);
-                if (candidate != nullptr && candidate->seq() <= snapshot_seq) {
-                    selected = candidate;
-                    break;
+            if (count > 0) {
+                const core::OwnedRecord* newest = chain->ring[head].load(std::memory_order_relaxed);
+                if (newest != nullptr && newest->seq() <= snapshot_seq) {
+                    selected = newest;
+                } else {
+                    for (uint8_t i = 1; i < count; ++i) {
+                        const uint8_t index = static_cast<uint8_t>((head - i) & (MAX_VERSIONS_PER_KEY - 1));
+                        const core::OwnedRecord* candidate = chain->ring[index].load(std::memory_order_relaxed);
+                        if (candidate != nullptr && candidate->seq() <= snapshot_seq) {
+                            selected = candidate;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -227,12 +222,12 @@ namespace akkaradb::engine {
 
         if (node->is_leaf) {
             const uint16_t pos = find_leaf_position(node, key);
-            const uint16_t key_count = node->key_count.load(std::memory_order_acquire);
+            const uint16_t key_count = node->key_count.load(std::memory_order_relaxed);
 
             if (pos < key_count) {
-                const core::OwnedRecord* existing = node->keys[pos].load(std::memory_order_acquire);
+                const core::OwnedRecord* existing = node->keys[pos].load(std::memory_order_relaxed);
                 if (compare_record_key(existing, key) == 0) {
-                    append_version(node->chains[pos].load(std::memory_order_acquire), record, entries_);
+                    append_version(node->chains[pos].load(std::memory_order_relaxed), record, entries_);
                     return std::nullopt;
                 }
             }
@@ -279,7 +274,6 @@ namespace akkaradb::engine {
             const uint16_t right_count = static_cast<uint16_t>(total - left_count);
 
             begin_write(node);
-            begin_write(right);
 
             for (uint16_t i = 0; i < left_count; ++i) {
                 node->keys[i].store(all_keys[i], std::memory_order_relaxed);
@@ -305,17 +299,16 @@ namespace akkaradb::engine {
             right->next_leaf.store(old_next, std::memory_order_release);
             node->next_leaf.store(right, std::memory_order_release);
 
-            end_write(right);
             end_write(node);
 
             SplitResult split;
-            split.separator = right->keys[0].load(std::memory_order_acquire);
+            split.separator = right->keys[0].load(std::memory_order_relaxed);
             split.right = right;
             return split;
         }
 
         const uint16_t child_index = find_child_index(node, key);
-        Node* child = node->children[child_index].load(std::memory_order_acquire);
+        Node* child = node->children[child_index].load(std::memory_order_relaxed);
         if (child == nullptr) {
             return std::nullopt;
         }
@@ -325,7 +318,7 @@ namespace akkaradb::engine {
             return std::nullopt;
         }
 
-        const uint16_t key_count = node->key_count.load(std::memory_order_acquire);
+        const uint16_t key_count = node->key_count.load(std::memory_order_relaxed);
         const uint16_t insert_pos = child_index;
 
         if (key_count < MAX_KEYS) {
@@ -369,7 +362,6 @@ namespace akkaradb::engine {
         Node* right = make_node(false);
 
         begin_write(node);
-        begin_write(right);
 
         for (uint16_t i = 0; i < mid; ++i) {
             node->keys[i].store(all_keys[i], std::memory_order_relaxed);
@@ -400,7 +392,6 @@ namespace akkaradb::engine {
 
         const core::OwnedRecord* promoted = all_keys[mid];
 
-        end_write(right);
         end_write(node);
 
         SplitResult split;
@@ -412,32 +403,22 @@ namespace akkaradb::engine {
     BPTreeMemTable::Node* BPTreeMemTable::descend_to_candidate_leaf(std::span<const uint8_t> key) const noexcept {
         Node* current = root_.load(std::memory_order_acquire);
         while (current != nullptr && !current->is_leaf) {
-            uint16_t child_index = 0;
+            Node* next_child = nullptr;
             for (;;) {
                 const uint64_t begin = current->version.load(std::memory_order_acquire);
                 if ((begin & 1ULL) != 0ULL) {
                     continue;
                 }
-                child_index = find_child_index(current, key);
+                const uint16_t child_index = find_child_index(current, key);
+                next_child = current->children[child_index].load(std::memory_order_acquire);
                 const uint64_t end = current->version.load(std::memory_order_acquire);
                 if (begin == end && (end & 1ULL) == 0ULL) {
                     break;
                 }
             }
-            current = current->children[child_index].load(std::memory_order_acquire);
+            current = next_child;
         }
         return current;
-    }
-
-    const core::OwnedRecord* BPTreeMemTable::leaf_max_key(Node* leaf) noexcept {
-        if (leaf == nullptr) {
-            return nullptr;
-        }
-        const uint16_t key_count = leaf->key_count.load(std::memory_order_acquire);
-        if (key_count == 0) {
-            return nullptr;
-        }
-        return leaf->keys[key_count - 1].load(std::memory_order_acquire);
     }
 
     Status BPTreeMemTable::put(
@@ -467,12 +448,10 @@ namespace akkaradb::engine {
         }
 
         Node* new_root = make_node(false);
-        begin_write(new_root);
-        new_root->keys[0].store(split->separator, std::memory_order_release);
-        new_root->children[0].store(current_root, std::memory_order_release);
-        new_root->children[1].store(split->right, std::memory_order_release);
-        new_root->key_count.store(1, std::memory_order_release);
-        end_write(new_root);
+        new_root->keys[0].store(split->separator, std::memory_order_relaxed);
+        new_root->children[0].store(current_root, std::memory_order_relaxed);
+        new_root->children[1].store(split->right, std::memory_order_relaxed);
+        new_root->key_count.store(1, std::memory_order_relaxed);
 
         root_.store(new_root, std::memory_order_release);
         return Status::OK();
@@ -489,13 +468,25 @@ namespace akkaradb::engine {
         while (leaf != nullptr) {
             uint16_t pos = 0;
             uint16_t key_count = 0;
+            int cmp = 1;
+            VersionChain* chain = nullptr;
+
             for (;;) {
                 const uint64_t begin = leaf->version.load(std::memory_order_acquire);
                 if ((begin & 1ULL) != 0ULL) {
                     continue;
                 }
                 key_count = leaf->key_count.load(std::memory_order_acquire);
-                pos = find_leaf_position(leaf, target);
+                pos = find_leaf_position(leaf, target, key_count);
+                cmp = 1;
+                chain = nullptr;
+                if (pos < key_count) {
+                    const core::OwnedRecord* candidate_key = leaf->keys[pos].load(std::memory_order_relaxed);
+                    cmp = compare_record_key(candidate_key, target);
+                    if (cmp == 0) {
+                        chain = leaf->chains[pos].load(std::memory_order_relaxed);
+                    }
+                }
                 const uint64_t end = leaf->version.load(std::memory_order_acquire);
                 if (begin == end && (end & 1ULL) == 0ULL) {
                     break;
@@ -503,10 +494,7 @@ namespace akkaradb::engine {
             }
 
             if (pos < key_count) {
-                const core::OwnedRecord* candidate_key = leaf->keys[pos].load(std::memory_order_acquire);
-                const int cmp = compare_record_key(candidate_key, target);
                 if (cmp == 0) {
-                    VersionChain* chain = leaf->chains[pos].load(std::memory_order_acquire);
                     return visible_record(chain, snapshot_seq, out);
                 }
                 if (cmp > 0) {
@@ -514,10 +502,6 @@ namespace akkaradb::engine {
                 }
             }
 
-            const core::OwnedRecord* max_key = leaf_max_key(leaf);
-            if (max_key == nullptr || compare_record_key(max_key, target) >= 0) {
-                return false;
-            }
             leaf = leaf->next_leaf.load(std::memory_order_acquire);
         }
 
@@ -527,6 +511,9 @@ namespace akkaradb::engine {
     ArenaGenerator<RecordView> BPTreeMemTable::iterate_snapshot(uint64_t snapshot_seq) const {
         std::vector<RecordView> visible_records;
         visible_records.reserve(entryCount());
+        bool ordered_unique = true;
+        bool has_prev = false;
+        RecordView prev;
 
         Node* node = root_.load(std::memory_order_acquire);
         while (node != nullptr && !node->is_leaf) {
@@ -554,11 +541,25 @@ namespace akkaradb::engine {
             for (uint16_t i = 0; i < key_count; ++i) {
                 RecordView visible;
                 if (visible_record(chains[i], snapshot_seq, &visible)) {
+                    if (has_prev) {
+                        if (prev.compare_key(visible) >= 0) {
+                            ordered_unique = false;
+                        }
+                    }
+                    prev = visible;
+                    has_prev = true;
                     visible_records.push_back(visible);
                 }
             }
 
             node = node->next_leaf.load(std::memory_order_acquire);
+        }
+
+        if (ordered_unique) {
+            for (const RecordView& rec : visible_records) {
+                co_yield rec;
+            }
+            co_return;
         }
 
         std::sort(visible_records.begin(), visible_records.end(), [](const RecordView& a, const RecordView& b) {

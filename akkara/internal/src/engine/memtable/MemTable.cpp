@@ -313,6 +313,7 @@ namespace akkaradb::engine::memtable {
                 return false;
             }
 
+            const core::ByteView key_view = to_byte_view(key);
             const uint64_t fp64 = compute_fp64(key, 0);
             const uint32_t shard_index = shard_for(fp64, shard_count_);
             const auto& shard = *shards_[shard_index];
@@ -321,12 +322,12 @@ namespace akkaradb::engine::memtable {
                 return false;
             }
 
-            if (published->active && published->active->get(to_byte_view(key), snapshot_seq, out)) {
+            if (published->active && published->active->get(key_view, snapshot_seq, out)) {
                 return true;
             }
 
             for (const auto& immutable : published->immutables) {
-                if (immutable && immutable->get(to_byte_view(key), snapshot_seq, out)) {
+                if (immutable && immutable->get(key_view, snapshot_seq, out)) {
                     return true;
                 }
             }
@@ -380,34 +381,98 @@ namespace akkaradb::engine::memtable {
             const std::span<const uint8_t> start{range.start.data(), range.start.size()};
             const std::span<const uint8_t> end{range.end.data(), range.end.size()};
 
-            std::vector<RecordView> all;
-            for (const auto& table : sources) {
-                for (const RecordView& rec : table->iterator(snapshot_seq)) {
+            std::vector<RecordView> deduped;
+
+            struct SourceCursor {
+                core::ArenaGenerator<RecordView> generator;
+                core::ArenaGenerator<RecordView>::iterator it{};
+                RecordView current{};
+            };
+
+            auto advance_filtered = [&](SourceCursor& cursor, bool consume_current) -> bool {
+                if (consume_current) {
+                    ++cursor.it;
+                }
+                while (cursor.it != cursor.generator.end()) {
+                    const RecordView rec = *cursor.it;
                     if (!start.empty() && rec.compare_key(start) < 0) {
+                        ++cursor.it;
                         continue;
                     }
                     if (!end.empty() && rec.compare_key(end) >= 0) {
-                        continue;
+                        return false;
                     }
-                    all.push_back(rec);
+                    cursor.current = rec;
+                    return true;
                 }
-            }
+                return false;
+            };
 
-            std::sort(all.begin(), all.end(), [](const RecordView& a, const RecordView& b) {
-                const int cmp = a.compare_key(b);
-                if (cmp != 0) {
-                    return cmp < 0;
-                }
-                return a.seq() > b.seq();
-            });
+            std::vector<SourceCursor> cursors;
+            cursors.reserve(sources.size());
 
-            std::vector<RecordView> deduped;
-            deduped.reserve(all.size());
-            for (const RecordView& rec : all) {
-                if (!deduped.empty() && deduped.back().compare_key(rec) == 0) {
+            for (const auto& table : sources) {
+                SourceCursor cursor;
+                cursor.generator = table->iterator(snapshot_seq);
+                cursor.it = cursor.generator.begin();
+                if (cursor.it == cursor.generator.end()) {
                     continue;
                 }
-                deduped.push_back(rec);
+                if (!advance_filtered(cursor, false)) {
+                    continue;
+                }
+                cursors.push_back(std::move(cursor));
+            }
+
+            if (!cursors.empty()) {
+                auto min_key_cmp = [&](size_t lhs, size_t rhs) {
+                    const RecordView& a = cursors[lhs].current;
+                    const RecordView& b = cursors[rhs].current;
+                    const int key_cmp = a.compare_key(b);
+                    if (key_cmp != 0) {
+                        return key_cmp > 0;
+                    }
+                    return a.seq() < b.seq();
+                };
+
+                std::priority_queue<size_t, std::vector<size_t>, decltype(min_key_cmp)> heap(min_key_cmp);
+                for (size_t i = 0; i < cursors.size(); ++i) {
+                    heap.push(i);
+                }
+
+                std::vector<size_t> same_key_indices;
+                same_key_indices.reserve(cursors.size());
+
+                while (!heap.empty()) {
+                    same_key_indices.clear();
+
+                    const size_t first_idx = heap.top();
+                    heap.pop();
+
+                    RecordView best = cursors[first_idx].current;
+                    same_key_indices.push_back(first_idx);
+
+                    while (!heap.empty()) {
+                        const size_t idx = heap.top();
+                        if (cursors[idx].current.compare_key(best) != 0) {
+                            break;
+                        }
+                        heap.pop();
+                        const RecordView candidate = cursors[idx].current;
+                        if (candidate.seq() > best.seq()) {
+                            best = candidate;
+                        }
+                        same_key_indices.push_back(idx);
+                    }
+
+                    deduped.push_back(best);
+
+                    for (const size_t idx : same_key_indices) {
+                        if (advance_filtered(cursors[idx], true)) {
+                            heap.push(idx);
+                        }
+                    }
+                }
             }
 
             return RangeIterator{std::make_unique<RangeIterator::Impl>(std::move(deduped), std::move(sources))};

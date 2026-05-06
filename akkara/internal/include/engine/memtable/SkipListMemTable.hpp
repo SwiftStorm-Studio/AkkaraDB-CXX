@@ -88,8 +88,8 @@ namespace akkaradb::engine {
 
             [[nodiscard]] Node* new_node(const core::OwnedRecord* initial_record, uint8_t level);
             [[nodiscard]] core::OwnedRecord* make_record(
-                ByteView key,
-                ByteView value,
+                std::span<const uint8_t> key,
+                std::span<const uint8_t> value,
                 uint64_t seq,
                 uint8_t flags,
                 uint64_t precomputed_fp64,
