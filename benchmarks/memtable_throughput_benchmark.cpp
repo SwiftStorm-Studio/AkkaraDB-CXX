@@ -39,14 +39,26 @@ using namespace akkaradb::engine;
 using namespace akkaradb::core;
 
 namespace {
+    constexpr uint32_t kLatencySampleMask = 0x3F; // sample 1 / 64 ops to reduce benchmark perturbation
+
     struct CaseSpec {
         int key_size;
         int value_size;
     };
 
+    struct LatencyPercentiles {
+        double p50_us = 0.0;
+        double p90_us = 0.0;
+        double p99_us = 0.0;
+        double p999_us = 0.0;
+        uint32_t sample_count = 0;
+    };
+
     struct ThroughputResult {
         double put_ops_per_sec;
         double get_ops_per_sec;
+        LatencyPercentiles put_latency;
+        LatencyPercentiles get_latency;
     };
 
     enum class BackendKind {
@@ -93,6 +105,35 @@ namespace {
         return {reinterpret_cast<const uint8_t*>(s.data()), s.size()};
     }
 
+    [[nodiscard]] static double quantile_from_sorted(
+        const std::vector<uint32_t>& sorted_ns,
+        double q
+    ) {
+        if (sorted_ns.empty()) {
+            return 0.0;
+        }
+        const double q_clamped = std::clamp(q, 0.0, 1.0);
+        const size_t idx = static_cast<size_t>(
+            q_clamped * static_cast<double>(sorted_ns.size() - 1)
+        );
+        return static_cast<double>(sorted_ns[idx]) / 1000.0;
+    }
+
+    [[nodiscard]] static LatencyPercentiles build_percentiles(std::vector<uint32_t>& samples_ns) {
+        LatencyPercentiles out{};
+        if (samples_ns.empty()) {
+            return out;
+        }
+
+        std::sort(samples_ns.begin(), samples_ns.end());
+        out.sample_count = static_cast<uint32_t>(samples_ns.size());
+        out.p50_us = quantile_from_sorted(samples_ns, 0.50);
+        out.p90_us = quantile_from_sorted(samples_ns, 0.90);
+        out.p99_us = quantile_from_sorted(samples_ns, 0.99);
+        out.p999_us = quantile_from_sorted(samples_ns, 0.999);
+        return out;
+    }
+
     static std::string make_fixed_bytes(int size, uint64_t seed) {
         std::string out;
         out.resize(static_cast<size_t>(size));
@@ -128,10 +169,20 @@ namespace {
         const std::string& value,
         const std::vector<uint64_t>* key_fp64,
         const std::vector<uint64_t>* key_mk,
-        int writer_threads
+        int writer_threads,
+        std::vector<uint32_t>* latency_samples_ns
     ) {
+        if (latency_samples_ns) {
+            latency_samples_ns->clear();
+        }
+
         if (writer_threads <= 1) {
+            if (latency_samples_ns) {
+                latency_samples_ns->reserve((keys.size() + kLatencySampleMask) / (kLatencySampleMask + 1));
+            }
             for (size_t i = 0; i < keys.size(); ++i) {
+                const bool do_sample = ((static_cast<uint32_t>(i) & kLatencySampleMask) == 0);
+                const auto t0 = do_sample ? Clock::now() : Clock::time_point{};
                 const uint64_t seq = memtable.next_seq();
                 memtable.put(
                     as_u8(keys[i]),
@@ -141,16 +192,27 @@ namespace {
                     key_fp64 ? (*key_fp64)[i] : 0ULL,
                     key_mk ? (*key_mk)[i] : 0ULL
                 );
+                if (do_sample && latency_samples_ns) {
+                    const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+                    latency_samples_ns->push_back(static_cast<uint32_t>(std::min<int64_t>(dt, INT32_MAX)));
+                }
             }
             return;
         }
 
         std::vector<std::thread> threads;
         threads.reserve(static_cast<size_t>(writer_threads));
+        std::vector<std::vector<uint32_t>> local_samples(static_cast<size_t>(writer_threads));
+        for (auto& v : local_samples) {
+            v.reserve((keys.size() / static_cast<size_t>(writer_threads) + kLatencySampleMask) / (kLatencySampleMask + 1));
+        }
 
         for (int tid = 0; tid < writer_threads; ++tid) {
             threads.emplace_back([&, tid]() {
+                auto& samples = local_samples[static_cast<size_t>(tid)];
                 for (size_t i = static_cast<size_t>(tid); i < keys.size(); i += static_cast<size_t>(writer_threads)) {
+                    const bool do_sample = ((static_cast<uint32_t>(i) & kLatencySampleMask) == 0);
+                    const auto t0 = do_sample ? Clock::now() : Clock::time_point{};
                     const uint64_t seq = memtable.next_seq();
                     memtable.put(
                         as_u8(keys[i]),
@@ -160,42 +222,9 @@ namespace {
                         key_fp64 ? (*key_fp64)[i] : 0ULL,
                         key_mk ? (*key_mk)[i] : 0ULL
                     );
-                }
-            });
-        }
-
-        for (auto& th : threads) {
-            th.join();
-        }
-    }
-
-    static void run_get_parallel(
-        memtable::MemTable& memtable,
-        const std::vector<std::string>& keys,
-        uint64_t snapshot,
-        int reader_threads
-    ) {
-        if (reader_threads <= 1) {
-            RecordView out;
-            for (size_t i = 0; i < keys.size(); ++i) {
-                if (!memtable.get(as_u8(keys[i]), snapshot, &out)) {
-                    std::fprintf(stderr, "GET miss at i=%zu\n", i);
-                    std::exit(3);
-                }
-            }
-            return;
-        }
-
-        std::vector<std::thread> threads;
-        threads.reserve(static_cast<size_t>(reader_threads));
-
-        for (int tid = 0; tid < reader_threads; ++tid) {
-            threads.emplace_back([&, tid]() {
-                RecordView out;
-                for (size_t i = static_cast<size_t>(tid); i < keys.size(); i += static_cast<size_t>(reader_threads)) {
-                    if (!memtable.get(as_u8(keys[i]), snapshot, &out)) {
-                        std::fprintf(stderr, "GET miss at i=%zu (tid=%d)\n", i, tid);
-                        std::exit(3);
+                    if (do_sample) {
+                        const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+                        samples.push_back(static_cast<uint32_t>(std::min<int64_t>(dt, INT32_MAX)));
                     }
                 }
             });
@@ -203,6 +232,90 @@ namespace {
 
         for (auto& th : threads) {
             th.join();
+        }
+
+        if (latency_samples_ns) {
+            size_t total = 0;
+            for (const auto& v : local_samples) {
+                total += v.size();
+            }
+            latency_samples_ns->reserve(total);
+            for (auto& v : local_samples) {
+                latency_samples_ns->insert(latency_samples_ns->end(), v.begin(), v.end());
+            }
+        }
+    }
+
+    static void run_get_parallel(
+        memtable::MemTable& memtable,
+        const std::vector<std::string>& keys,
+        uint64_t snapshot,
+        int reader_threads,
+        std::vector<uint32_t>* latency_samples_ns
+    ) {
+        if (latency_samples_ns) {
+            latency_samples_ns->clear();
+        }
+
+        if (reader_threads <= 1) {
+            RecordView out;
+            if (latency_samples_ns) {
+                latency_samples_ns->reserve((keys.size() + kLatencySampleMask) / (kLatencySampleMask + 1));
+            }
+            for (size_t i = 0; i < keys.size(); ++i) {
+                const bool do_sample = ((static_cast<uint32_t>(i) & kLatencySampleMask) == 0);
+                const auto t0 = do_sample ? Clock::now() : Clock::time_point{};
+                if (!memtable.get(as_u8(keys[i]), snapshot, &out)) {
+                    std::fprintf(stderr, "GET miss at i=%zu\n", i);
+                    std::exit(3);
+                }
+                if (do_sample && latency_samples_ns) {
+                    const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+                    latency_samples_ns->push_back(static_cast<uint32_t>(std::min<int64_t>(dt, INT32_MAX)));
+                }
+            }
+            return;
+        }
+
+        std::vector<std::thread> threads;
+        threads.reserve(static_cast<size_t>(reader_threads));
+        std::vector<std::vector<uint32_t>> local_samples(static_cast<size_t>(reader_threads));
+        for (auto& v : local_samples) {
+            v.reserve((keys.size() / static_cast<size_t>(reader_threads) + kLatencySampleMask) / (kLatencySampleMask + 1));
+        }
+
+        for (int tid = 0; tid < reader_threads; ++tid) {
+            threads.emplace_back([&, tid]() {
+                RecordView out;
+                auto& samples = local_samples[static_cast<size_t>(tid)];
+                for (size_t i = static_cast<size_t>(tid); i < keys.size(); i += static_cast<size_t>(reader_threads)) {
+                    const bool do_sample = ((static_cast<uint32_t>(i) & kLatencySampleMask) == 0);
+                    const auto t0 = do_sample ? Clock::now() : Clock::time_point{};
+                    if (!memtable.get(as_u8(keys[i]), snapshot, &out)) {
+                        std::fprintf(stderr, "GET miss at i=%zu (tid=%d)\n", i, tid);
+                        std::exit(3);
+                    }
+                    if (do_sample) {
+                        const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+                        samples.push_back(static_cast<uint32_t>(std::min<int64_t>(dt, INT32_MAX)));
+                    }
+                }
+            });
+        }
+
+        for (auto& th : threads) {
+            th.join();
+        }
+
+        if (latency_samples_ns) {
+            size_t total = 0;
+            for (const auto& v : local_samples) {
+                total += v.size();
+            }
+            latency_samples_ns->reserve(total);
+            for (auto& v : local_samples) {
+                latency_samples_ns->insert(latency_samples_ns->end(), v.begin(), v.end());
+            }
         }
     }
 
@@ -251,7 +364,7 @@ namespace {
         {
             auto warmup = memtable::MemTable::create(make_options(shard_count, backend));
             const std::vector<std::string> warmup_keys(keys.begin(), keys.begin() + warmup_ops);
-            run_put_parallel(*warmup, warmup_keys, value, fp_ptr, mk_ptr, writer_threads);
+            run_put_parallel(*warmup, warmup_keys, value, fp_ptr, mk_ptr, writer_threads, nullptr);
 
             const uint64_t snapshot = warmup->last_seq();
             RecordView out;
@@ -264,19 +377,23 @@ namespace {
         }
 
         auto memtable = memtable::MemTable::create(make_options(shard_count, backend));
+        std::vector<uint32_t> put_latency_ns;
+        std::vector<uint32_t> get_latency_ns;
 
         const auto put_t0 = Clock::now();
-        run_put_parallel(*memtable, keys, value, fp_ptr, mk_ptr, writer_threads);
+        run_put_parallel(*memtable, keys, value, fp_ptr, mk_ptr, writer_threads, &put_latency_ns);
         const auto put_ms = std::chrono::duration<double, std::milli>(Clock::now() - put_t0).count();
 
         const uint64_t snapshot = memtable->last_seq();
         const auto get_t0 = Clock::now();
-        run_get_parallel(*memtable, keys, snapshot, writer_threads);
+        run_get_parallel(*memtable, keys, snapshot, writer_threads, &get_latency_ns);
         const auto get_ms = std::chrono::duration<double, std::milli>(Clock::now() - get_t0).count();
 
         return {
             .put_ops_per_sec = static_cast<double>(ops_per_case) * 1000.0 / put_ms,
-            .get_ops_per_sec = static_cast<double>(ops_per_case) * 1000.0 / get_ms
+            .get_ops_per_sec = static_cast<double>(ops_per_case) * 1000.0 / get_ms,
+            .put_latency = build_percentiles(put_latency_ns),
+            .get_latency = build_percentiles(get_latency_ns)
         };
     }
 } // namespace
@@ -336,19 +453,33 @@ int main(int argc, char** argv) {
     std::printf("resolved_shards = %u (MemTable same heuristic)\n\n", shard_count);
     std::printf("warmup_ops   = %d\n\n", std::min(ops_per_case, 50000));
     std::printf("prehash_mode = %s\n\n", use_prehash ? "ON (fp64/mk precomputed)" : "OFF (hash inside put)");
-    std::printf("%-10s %-12s %-8s %-8s %-14s %-14s\n",
-                "key", "value", "shards", "writers", "put(ops/s)", "get(ops/s)");
+    std::printf("%-10s %-12s %-8s %-8s %-14s %-14s %-10s %-10s\n",
+                "key", "value", "shards", "writers", "put(ops/s)", "get(ops/s)", "put_smp", "get_smp");
+    std::printf("%-10s %-12s %-8s %-8s %-14s %-14s %-10s %-10s\n",
+                "", "", "", "", "", "", "P50/P90/P99/P999(us)", "P50/P90/P99/P999(us)");
     std::printf("------------------------------------------------------------------------------------------------\n");
 
     for (const auto& spec : cases) {
         const ThroughputResult result = run_case(spec, ops_per_case, use_prehash, shard_count, effective_writers, backend);
-        std::printf("%-10d %-12d %-8u %-8d %-14.0f %-14.0f\n",
+        std::printf("%-10d %-12d %-8u %-8d %-14.0f %-14.0f %-10u %-10u\n",
                     spec.key_size,
                     spec.value_size,
                     shard_count,
                     effective_writers,
                     result.put_ops_per_sec,
-                    result.get_ops_per_sec);
+                    result.get_ops_per_sec,
+                    result.put_latency.sample_count,
+                    result.get_latency.sample_count);
+        std::printf("%-10s %-12s %-8s %-8s %-14s %-14s %4.2f/%4.2f/%4.2f/%4.2f %4.2f/%4.2f/%4.2f/%4.2f\n",
+                    "", "", "", "", "", "",
+                    result.put_latency.p50_us,
+                    result.put_latency.p90_us,
+                    result.put_latency.p99_us,
+                    result.put_latency.p999_us,
+                    result.get_latency.p50_us,
+                    result.get_latency.p90_us,
+                    result.get_latency.p99_us,
+                    result.get_latency.p999_us);
         std::printf("------------------------------------------------------------------------------------------------\n");
         std::fflush(stdout);
     }
