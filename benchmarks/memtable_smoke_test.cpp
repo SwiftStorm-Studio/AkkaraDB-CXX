@@ -5,6 +5,7 @@
 #include "core/record/RecordView.hpp"
 #include "core/types/ByteView.hpp"
 #include "core/utils/ArenaGenerator.hpp"
+#include "engine/memtable/ARTMemTable.hpp"
 #include "engine/memtable/BPTreeMemTable.hpp"
 #include "engine/memtable/MemTable.hpp"
 #include "engine/memtable/SkipListMemTable.hpp"
@@ -201,6 +202,52 @@ namespace {
         assert(iter_steps.load(std::memory_order_relaxed) > 0);
     }
 
+    static std::vector<std::string> collect_range_keys(
+        IMemTable& memtable,
+        std::string_view start,
+        std::string_view end,
+        uint64_t snapshot_seq
+    ) {
+        std::vector<std::string> keys;
+        for (const RecordView& rec : memtable.iterator(as_bv(start), as_bv(end), snapshot_seq)) {
+            keys.emplace_back(reinterpret_cast<const char*>(rec.key().data()), rec.key().size());
+        }
+        return keys;
+    }
+
+    static void run_range_boundary_tests_for_backend(const BackendFactory& make_backend) {
+        auto memtable = make_backend();
+        assert(memtable->put(as_bv("a"), as_bv("v1"), 1, 0).ok());
+        assert(memtable->put(as_bv("ab"), as_bv("v2"), 2, 0).ok());
+        assert(memtable->put(as_bv("ac"), as_bv("v3"), 3, 0).ok());
+        assert(memtable->put(as_bv("b"), as_bv("v4"), 4, 0).ok());
+
+        {
+            const auto keys = collect_range_keys(*memtable, "", "", 4);
+            assert((keys == std::vector<std::string>{"a", "ab", "ac", "b"}));
+        }
+        {
+            const auto keys = collect_range_keys(*memtable, "ab", "", 4);
+            assert((keys == std::vector<std::string>{"ab", "ac", "b"}));
+        }
+        {
+            const auto keys = collect_range_keys(*memtable, "", "ac", 4);
+            assert((keys == std::vector<std::string>{"a", "ab"}));
+        }
+        {
+            const auto keys = collect_range_keys(*memtable, "ab", "ab", 4);
+            assert(keys.empty());
+        }
+        {
+            const auto keys = collect_range_keys(*memtable, "ac", "ab", 4);
+            assert(keys.empty());
+        }
+        {
+            const auto keys = collect_range_keys(*memtable, "ab", "ac", 4);
+            assert((keys == std::vector<std::string>{"ab"}));
+        }
+    }
+
     void test_generator_yield_all() {
         BufferArena arena{16 * 1024, 128 * 1024};
 
@@ -250,13 +297,24 @@ namespace {
         run_contract_tests_for_backend([]() { return std::make_unique<BPTreeMemTable>(); });
     }
 
+    void test_backend_contracts_art() {
+        run_contract_tests_for_backend([]() { return std::make_unique<ARTMemTable>(); });
+    }
+
     void test_backend_single_writer_multi_reader_stress() {
         run_single_writer_multi_reader_get_stress([]() { return std::make_unique<SkipListMemTable>(); });
         run_single_writer_multi_reader_get_stress([]() { return std::make_unique<BPTreeMemTable>(); });
+        run_single_writer_multi_reader_get_stress([]() { return std::make_unique<ARTMemTable>(); });
     }
 
     void test_backend_writer_iterator_stress() {
         run_writer_iterator_stress([]() { return std::make_unique<BPTreeMemTable>(); });
+        run_writer_iterator_stress([]() { return std::make_unique<ARTMemTable>(); });
+    }
+
+    void test_backend_range_boundaries() {
+        run_range_boundary_tests_for_backend([]() { return std::make_unique<BPTreeMemTable>(); });
+        run_range_boundary_tests_for_backend([]() { return std::make_unique<ARTMemTable>(); });
     }
 
     void test_sharded_memtable_get_into_and_contains() {
@@ -456,47 +514,55 @@ namespace {
 } // namespace
 
 int main() {
-    std::puts("[1/11] backend contracts (skiplist)");
+    std::puts("[1/13] backend contracts (skiplist)");
     std::fflush(stdout);
     test_backend_contracts_skiplist();
 
-    std::puts("[2/11] backend contracts (bptree)");
+    std::puts("[2/13] backend contracts (bptree)");
     std::fflush(stdout);
     test_backend_contracts_bptree();
 
-    std::puts("[3/11] ArenaGenerator::yield_all");
+    std::puts("[3/13] backend contracts (art)");
+    std::fflush(stdout);
+    test_backend_contracts_art();
+
+    std::puts("[4/13] ArenaGenerator::yield_all");
     std::fflush(stdout);
     test_generator_yield_all();
 
-    std::puts("[4/11] backend single-writer/multi-reader get stress");
+    std::puts("[5/13] backend single-writer/multi-reader get stress");
     std::fflush(stdout);
     test_backend_single_writer_multi_reader_stress();
 
-    std::puts("[5/11] backend writer+iterator stress");
+    std::puts("[6/13] backend writer+iterator stress");
     std::fflush(stdout);
     test_backend_writer_iterator_stress();
 
-    std::puts("[6/11] sharded memtable get_into/contains");
+    std::puts("[7/13] backend range boundary iterator");
+    std::fflush(stdout);
+    test_backend_range_boundaries();
+
+    std::puts("[8/13] sharded memtable get_into/contains");
     std::fflush(stdout);
     test_sharded_memtable_get_into_and_contains();
 
-    std::puts("[7/11] sharded memtable force_flush (bptree)");
+    std::puts("[9/13] sharded memtable force_flush (bptree)");
     std::fflush(stdout);
     test_sharded_memtable_force_flush_and_callback();
 
-    std::puts("[8/11] sharded memtable range merge (bptree)");
+    std::puts("[10/13] sharded memtable range merge (bptree)");
     std::fflush(stdout);
     test_sharded_memtable_range_merge();
 
-    std::puts("[9/11] sharded memtable bptree flush/read/iterator safety");
+    std::puts("[11/13] sharded memtable bptree flush/read/iterator safety");
     std::fflush(stdout);
     test_sharded_memtable_bptree_flush_reader_iterator_safety();
 
-    std::puts("[10/11] sharded memtable concurrency");
+    std::puts("[12/13] sharded memtable concurrency");
     std::fflush(stdout);
     test_sharded_memtable_concurrency_smoke();
 
-    std::puts("[11/11] sharded memtable auto shard derivation");
+    std::puts("[13/13] sharded memtable auto shard derivation");
     std::fflush(stdout);
     test_sharded_memtable_auto_shard_derivation();
 

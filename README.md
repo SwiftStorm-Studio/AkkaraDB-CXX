@@ -123,7 +123,7 @@ put(key, value)
   │                          MemTable stores 20-byte BlobRef
   │
   └─ [value < 16 KiB]  →  WAL append (CRC32C, optional fdatasync)
-                           MemTable insert (BPTree or SkipList, per-shard)
+                           MemTable insert (BPTree / SkipList / ART, per-shard)
                                 │
                          [shard full] → flush to SST → compaction
 ```

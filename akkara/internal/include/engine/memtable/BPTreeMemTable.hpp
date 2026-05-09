@@ -26,6 +26,7 @@
 #include <optional>
 #include <span>
 #include <utility>
+#include <vector>
 
 #include "core/buffer/BufferArena.hpp"
 #include "core/record/OwnedRecord.hpp"

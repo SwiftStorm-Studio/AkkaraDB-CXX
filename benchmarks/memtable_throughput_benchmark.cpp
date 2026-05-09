@@ -8,7 +8,7 @@
  * Runs one backend with auto-resolved shard_count from writer count.
  *
  * Usage:
- *   akkaradb_memtable_throughput_benchmark [ops_per_case] [--writers=N] [--prehash] [--backend=skiplist|bptree]
+ *   akkaradb_memtable_throughput_benchmark [ops_per_case] [--writers=N] [--prehash] [--backend=skiplist|bptree|art]
  *
  * Default:
  *   ops_per_case = 200000
@@ -16,6 +16,7 @@
  */
 
 #include "engine/memtable/MemTable.hpp"
+#include "engine/memtable/ARTMemTable.hpp"
 #include "engine/memtable/BPTreeMemTable.hpp"
 #include "engine/memtable/SkipListMemTable.hpp"
 #include "core/record/SSTHdr32.hpp"
@@ -66,7 +67,8 @@ struct ThroughputResult {
 
     enum class BackendKind {
         SkipList,
-        BPTree
+        BPTree,
+        ART
     };
 
     [[nodiscard]] static uint32_t next_pow2_clamped(uint64_t n, uint32_t min_value, uint32_t max_value) {
@@ -157,6 +159,10 @@ struct ThroughputResult {
         if (backend == BackendKind::BPTree) {
             opts.backend_factory = []() {
                 return std::make_unique<BPTreeMemTable>();
+            };
+        } else if (backend == BackendKind::ART) {
+            opts.backend_factory = []() {
+                return std::make_unique<ARTMemTable>();
             };
         } else {
             opts.backend_factory = []() {
@@ -463,7 +469,7 @@ int main(int argc, char** argv) {
     int ops_per_case = 200000;
     int writer_threads = 16;
     bool use_prehash = false;
-    BackendKind backend = BackendKind::SkipList;
+    BackendKind backend = BackendKind::ART;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -481,7 +487,11 @@ int main(int argc, char** argv) {
                 backend = BackendKind::BPTree;
                 continue;
             }
-            std::fprintf(stderr, "Unknown backend: %s (use skiplist|bptree)\n", kind.c_str());
+            if (kind == "art") {
+                backend = BackendKind::ART;
+                continue;
+            }
+            std::fprintf(stderr, "Unknown backend: %s (use skiplist|bptree|art)\n", kind.c_str());
             return 2;
         }
         if (arg.rfind("--writers=", 0) == 0) {
@@ -505,7 +515,13 @@ int main(int argc, char** argv) {
 
     std::printf("Sharded MemTable throughput benchmark\n");
     std::printf("ops_per_case = %d\n", ops_per_case);
-    std::printf("backend = %s\n", backend == BackendKind::BPTree ? "bptree" : "skiplist");
+    const char* backend_name = "skiplist";
+    if (backend == BackendKind::BPTree) {
+        backend_name = "bptree";
+    } else if (backend == BackendKind::ART) {
+        backend_name = "art";
+    }
+    std::printf("backend = %s\n", backend_name);
     if (writer_threads == 0) {
         std::printf("writer_threads = auto (%d from hw_threads)\n", effective_writers);
     } else {

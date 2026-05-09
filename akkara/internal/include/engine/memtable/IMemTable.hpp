@@ -45,6 +45,7 @@ namespace akkaradb::engine {
      * Intended backend implementations include:
      * - Skip List
      * - BPTree
+     * - ART
      * - Red-Black Tree
      *
      * Design constraints:

@@ -290,6 +290,10 @@ Probabilistic ordered map with `p = 0.25`, `MAX_HEIGHT = 12`. Nodes allocated fr
 | Node size       | 64B (MemRecord) + 4B (height) + pointers |
 | PRNG            | `std::mt19937` seeded at construction    |
 
+#### ART
+
+Adaptive Radix Tree backend with path compression (`Node4/16/48/256`) and ordered range iteration.
+
 ### 5.3 Flush Lifecycle
 
 1. Shard accumulates writes into active `IMemMap`.
@@ -866,7 +870,7 @@ Individual options can be overridden via `AkkaraDB::Options::Overrides`.
 |-------------------------------|----------|-----------------------------------------------------------------------|
 | `shard_count`                 | auto     | Power-of-2, \[2, 256\]; 0 = derive from `expected_concurrent_writers` |
 | `threshold_bytes_per_shard`   | 64 MiB   | Flush trigger per shard                                               |
-| `backend`                     | `BPTree` | `BPTree` or `SkipList`                                                |
+| `backend`                     | `BPTree` | `BPTree`, `SkipList`, or `ART`                                        |
 | `expected_concurrent_writers` | 0        | Used to auto-derive shard count                                       |
 
 #### WAL
