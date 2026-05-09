@@ -69,6 +69,10 @@ namespace akkaradb::engine {
              * @param value Value payload bytes.
              * @param seq Monotonic sequence number.
              * @param flags Record metadata flags (e.g. tombstone).
+             * @param precomputed_fp64 Optional precomputed 64-bit fingerprint for
+             * fast backend insertion paths. Use 0 when unavailable.
+             * @param precomputed_mk Optional precomputed mixed key material derived
+             * from key for backend-specific indexing. Use 0 when unavailable.
              *
              * @return Operation result.
              */
@@ -97,14 +101,24 @@ namespace akkaradb::engine {
             [[nodiscard]] virtual bool get(ByteView key, uint64_t snapshot_seq, RecordView* out) const = 0;
 
             /**
-             * @brief Create ordered iterator for snapshot view.
+             * @brief Create ordered iterator for range + snapshot view.
              *
              * Iteration order must be lexicographically ordered by key.
+             * Range semantics are:
+             * - start_key: inclusive lower bound
+             * - end_key: exclusive upper bound
+             * - empty bound: unbounded on that side
              *
+             * @param start_key Inclusive range start key.
+             * @param end_key Exclusive range end key.
              * @param snapshot_seq Snapshot sequence boundary.
-             * @return Generator of visible records.
+             * @return Generator of visible records within range.
              */
-            [[nodiscard]] virtual ArenaGenerator<RecordView> iterator(uint64_t snapshot_seq) const = 0;
+            [[nodiscard]] virtual ArenaGenerator<RecordView> iterator(
+                ByteView start_key,
+                ByteView end_key,
+                uint64_t snapshot_seq
+            ) const = 0;
 
             /**
              * @brief Freeze the MemTable into immutable state.

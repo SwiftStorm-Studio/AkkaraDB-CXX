@@ -19,6 +19,7 @@
 #include "engine/memtable/BPTreeMemTable.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -27,6 +28,25 @@
 #include "core/record/SSTHdr32.hpp"
 
 namespace akkaradb::engine {
+    namespace {
+        [[nodiscard]] int compare_key_bytes(std::span<const uint8_t> lhs, std::span<const uint8_t> rhs) noexcept {
+            const size_t min_len = std::min(lhs.size(), rhs.size());
+            if (min_len > 0) {
+                const int cmp = std::memcmp(lhs.data(), rhs.data(), min_len);
+                if (cmp != 0) {
+                    return cmp < 0 ? -1 : 1;
+                }
+            }
+            if (lhs.size() < rhs.size()) {
+                return -1;
+            }
+            if (lhs.size() > rhs.size()) {
+                return 1;
+            }
+            return 0;
+        }
+    } // namespace
+
     BPTreeMemTable::BPTreeMemTable(
         size_t data_arena_initial_block_size,
         size_t data_arena_max_block_size,
@@ -578,11 +598,154 @@ namespace akkaradb::engine {
         }
     }
 
-    ArenaGenerator<RecordView> BPTreeMemTable::iterator(uint64_t snapshot_seq) const {
-        std::lock_guard<std::mutex> lock{generator_arena_mutex_};
-        return ArenaGenerator<RecordView>::with_arena(generator_arena_, [this, snapshot_seq]() {
-            return iterate_snapshot(snapshot_seq);
+    ArenaGenerator<RecordView> BPTreeMemTable::iterate_snapshot_range(
+        uint64_t snapshot_seq,
+        std::vector<uint8_t> start_key,
+        std::vector<uint8_t> end_key
+    ) const {
+        const std::span<const uint8_t> start{start_key.data(), start_key.size()};
+        const std::span<const uint8_t> end{end_key.data(), end_key.size()};
+        if (!start.empty() && !end.empty() && compare_key_bytes(start, end) >= 0) {
+            co_return;
+        }
+
+        std::vector<RecordView> visible_records;
+        visible_records.reserve(128);
+        bool ordered_unique = true;
+        bool has_prev = false;
+        RecordView prev;
+
+        Node* node = nullptr;
+        uint16_t first_pos = 0;
+        bool first_leaf = true;
+
+        if (start.empty()) {
+            node = root_.load(std::memory_order_acquire);
+            while (node != nullptr && !node->is_leaf) {
+                node = node->children[0].load(std::memory_order_acquire);
+            }
+        } else {
+            node = descend_to_candidate_leaf(start);
+            while (node != nullptr) {
+                Node* next_leaf = nullptr;
+                uint16_t key_count = 0;
+                for (;;) {
+                    const uint64_t begin = node->version.load(std::memory_order_acquire);
+                    if ((begin & 1ULL) != 0ULL) {
+                        continue;
+                    }
+                    key_count = node->key_count.load(std::memory_order_acquire);
+                    first_pos = find_leaf_position(node, start, key_count);
+                    next_leaf = node->next_leaf.load(std::memory_order_acquire);
+                    const uint64_t end_version = node->version.load(std::memory_order_acquire);
+                    if (begin == end_version && (end_version & 1ULL) == 0ULL) {
+                        break;
+                    }
+                }
+                if (first_pos < key_count) {
+                    break;
+                }
+                node = next_leaf;
+                first_pos = 0;
+            }
+        }
+
+        while (node != nullptr) {
+            std::array<const core::OwnedRecord*, MAX_KEYS> keys{};
+            std::array<VersionChain*, MAX_KEYS> chains{};
+            Node* next_leaf = nullptr;
+            uint16_t key_count = 0;
+
+            for (;;) {
+                const uint64_t begin = node->version.load(std::memory_order_acquire);
+                if ((begin & 1ULL) != 0ULL) {
+                    continue;
+                }
+                key_count = node->key_count.load(std::memory_order_acquire);
+                for (uint16_t i = 0; i < key_count; ++i) {
+                    keys[i] = node->keys[i].load(std::memory_order_acquire);
+                    chains[i] = node->chains[i].load(std::memory_order_acquire);
+                }
+                next_leaf = node->next_leaf.load(std::memory_order_acquire);
+                const uint64_t end_version = node->version.load(std::memory_order_acquire);
+                if (begin == end_version && (end_version & 1ULL) == 0ULL) {
+                    break;
+                }
+            }
+
+            const uint16_t start_pos = first_leaf ? first_pos : 0;
+            first_leaf = false;
+
+            for (uint16_t i = start_pos; i < key_count; ++i) {
+                const core::OwnedRecord* key_record = keys[i];
+                if (key_record == nullptr) {
+                    continue;
+                }
+                if (!start.empty() && compare_record_key(key_record, start) < 0) {
+                    continue;
+                }
+                if (!end.empty() && compare_record_key(key_record, end) >= 0) {
+                    node = nullptr;
+                    break;
+                }
+
+                RecordView visible;
+                if (!visible_record(chains[i], snapshot_seq, &visible)) {
+                    continue;
+                }
+                if (has_prev && prev.compare_key(visible) >= 0) {
+                    ordered_unique = false;
+                }
+                prev = visible;
+                has_prev = true;
+                visible_records.push_back(visible);
+            }
+
+            if (node != nullptr) {
+                node = next_leaf;
+            }
+        }
+
+        if (ordered_unique) {
+            for (const RecordView& rec : visible_records) {
+                co_yield rec;
+            }
+            co_return;
+        }
+
+        std::sort(visible_records.begin(), visible_records.end(), [](const RecordView& a, const RecordView& b) {
+            const int cmp = a.compare_key(b);
+            if (cmp != 0) {
+                return cmp < 0;
+            }
+            return a.seq() > b.seq();
         });
+
+        for (size_t i = 0; i < visible_records.size(); ++i) {
+            if (i > 0 && visible_records[i - 1].compare_key(visible_records[i]) == 0) {
+                continue;
+            }
+            co_yield visible_records[i];
+        }
+    }
+
+    ArenaGenerator<RecordView> BPTreeMemTable::iterator(
+        ByteView start_key,
+        ByteView end_key,
+        uint64_t snapshot_seq
+    ) const {
+        const std::span<const uint8_t> start = as_u8(start_key);
+        const std::span<const uint8_t> end = as_u8(end_key);
+        std::vector<uint8_t> start_owned(start.begin(), start.end());
+        std::vector<uint8_t> end_owned(end.begin(), end.end());
+
+        std::lock_guard<std::mutex> lock{generator_arena_mutex_};
+        return ArenaGenerator<RecordView>::with_arena(
+            generator_arena_,
+            [this, snapshot_seq, start_owned = std::move(start_owned), end_owned = std::move(end_owned)]() mutable {
+                return iterate_snapshot_range(snapshot_seq, std::move(start_owned), std::move(end_owned));
+            }
+        );
     }
 
     void BPTreeMemTable::freeze() {

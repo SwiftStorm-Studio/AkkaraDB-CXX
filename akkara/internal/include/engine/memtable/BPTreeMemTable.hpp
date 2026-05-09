@@ -53,7 +53,11 @@ namespace akkaradb::engine {
             uint64_t precomputed_mk = 0
         ) override;
         [[nodiscard]] bool get(ByteView key, uint64_t snapshot_seq, RecordView* out) const override;
-        [[nodiscard]] ArenaGenerator<RecordView> iterator(uint64_t snapshot_seq) const override;
+        [[nodiscard]] ArenaGenerator<RecordView> iterator(
+            ByteView start_key,
+            ByteView end_key,
+            uint64_t snapshot_seq
+        ) const override;
         void freeze() override;
 
         [[nodiscard]] size_t sizeBytes() const override;
@@ -136,5 +140,10 @@ namespace akkaradb::engine {
         [[nodiscard]] std::optional<SplitResult> insert_recursive(Node* node, const core::OwnedRecord* record);
         [[nodiscard]] Node* descend_to_candidate_leaf(std::span<const uint8_t> key) const noexcept;
         [[nodiscard]] ArenaGenerator<RecordView> iterate_snapshot(uint64_t snapshot_seq) const;
+        [[nodiscard]] ArenaGenerator<RecordView> iterate_snapshot_range(
+            uint64_t snapshot_seq,
+            std::vector<uint8_t> start_key,
+            std::vector<uint8_t> end_key
+        ) const;
     };
 } // namespace akkaradb::engine

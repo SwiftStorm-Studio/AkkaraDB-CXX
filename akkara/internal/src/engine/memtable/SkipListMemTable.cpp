@@ -19,9 +19,11 @@
 #include "engine/memtable/SkipListMemTable.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <utility>
+#include <vector>
 
 #include "core/record/MemHdr16.hpp"
 #include "core/record/SSTHdr32.hpp"
@@ -32,6 +34,23 @@ namespace akkaradb::engine {
         [[nodiscard]] T* arena_new(BufferArena& arena, Args&&... args) {
             std::byte* mem = arena.allocate(sizeof(T), alignof(T));
             return new (mem) T(std::forward<Args>(args)...);
+        }
+
+        [[nodiscard]] int compare_key_bytes(std::span<const uint8_t> lhs, std::span<const uint8_t> rhs) noexcept {
+            const size_t min_len = std::min(lhs.size(), rhs.size());
+            if (min_len > 0) {
+                const int cmp = std::memcmp(lhs.data(), rhs.data(), min_len);
+                if (cmp != 0) {
+                    return cmp < 0 ? -1 : 1;
+                }
+            }
+            if (lhs.size() < rhs.size()) {
+                return -1;
+            }
+            if (lhs.size() > rhs.size()) {
+                return 1;
+            }
+            return 0;
         }
     } // namespace
 
@@ -317,11 +336,58 @@ namespace akkaradb::engine {
         }
     }
 
-    ArenaGenerator<RecordView> SkipListMemTable::iterator(uint64_t snapshot_seq) const {
+    ArenaGenerator<RecordView> SkipListMemTable::iterate_snapshot_range(
+        uint64_t snapshot_seq,
+        std::vector<uint8_t> start_key,
+        std::vector<uint8_t> end_key
+    ) const {
+        const std::span<const uint8_t> start{start_key.data(), start_key.size()};
+        const std::span<const uint8_t> end{end_key.data(), end_key.size()};
+        if (!start.empty() && !end.empty() && compare_key_bytes(start, end) >= 0) {
+            co_return;
+        }
+
+        Node* current = start.empty()
+            ? head_->next[0].load(std::memory_order_acquire)
+            : find_node(start, nullptr, false);
+
+        while (current != nullptr) {
+            if (!end.empty() && compare_node_key(current, end) >= 0) {
+                break;
+            }
+
+            RecordView visible;
+            if (visible_record(current, snapshot_seq, &visible)) {
+                if (!start.empty() && visible.compare_key(start) < 0) {
+                    current = current->next[0].load(std::memory_order_acquire);
+                    continue;
+                }
+                if (!end.empty() && visible.compare_key(end) >= 0) {
+                    break;
+                }
+                co_yield visible;
+            }
+            current = current->next[0].load(std::memory_order_acquire);
+        }
+    }
+
+    ArenaGenerator<RecordView> SkipListMemTable::iterator(
+        ByteView start_key,
+        ByteView end_key,
+        uint64_t snapshot_seq
+    ) const {
+        const std::span<const uint8_t> start = as_u8(start_key);
+        const std::span<const uint8_t> end = as_u8(end_key);
+        std::vector<uint8_t> start_owned(start.begin(), start.end());
+        std::vector<uint8_t> end_owned(end.begin(), end.end());
+
         std::lock_guard<std::mutex> lock{generator_arena_mutex_};
-        return ArenaGenerator<RecordView>::with_arena(generator_arena_, [this, snapshot_seq]() {
-            return iterate_snapshot(snapshot_seq);
-        });
+        return ArenaGenerator<RecordView>::with_arena(
+            generator_arena_,
+            [this, snapshot_seq, start_owned = std::move(start_owned), end_owned = std::move(end_owned)]() mutable {
+                return iterate_snapshot_range(snapshot_seq, std::move(start_owned), std::move(end_owned));
+            }
+        );
     }
 
     void SkipListMemTable::freeze() {

@@ -99,7 +99,7 @@ namespace {
             assert(memtable->put(as_bv("c"), as_bv("3"), 3, 0).ok());
 
             std::vector<std::string> keys;
-            for (const RecordView& rec : memtable->iterator(3)) {
+            for (const RecordView& rec : memtable->iterator(ByteView{}, ByteView{}, 3)) {
                 keys.emplace_back(reinterpret_cast<const char*>(rec.key().data()), rec.key().size());
             }
 
@@ -180,7 +180,7 @@ namespace {
                 }
                 std::string prev_key;
                 bool first = true;
-                for (const RecordView& rec : memtable->iterator(snapshot)) {
+                for (const RecordView& rec : memtable->iterator(ByteView{}, ByteView{}, snapshot)) {
                     const std::string key{
                         reinterpret_cast<const char*>(rec.key().data()),
                         rec.key().size()

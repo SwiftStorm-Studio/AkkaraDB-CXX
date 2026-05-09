@@ -40,6 +40,7 @@ using namespace akkaradb::core;
 
 namespace {
     constexpr uint32_t kLatencySampleMask = 0x3F; // sample 1 / 64 ops to reduce benchmark perturbation
+    constexpr size_t kScanSampleWindow = 32; // amortize clock resolution/overhead for iterator next()
 
     struct CaseSpec {
         int key_size;
@@ -54,11 +55,13 @@ namespace {
         uint32_t sample_count = 0;
     };
 
-    struct ThroughputResult {
+struct ThroughputResult {
         double put_ops_per_sec;
         double get_ops_per_sec;
+        double scan_ops_per_sec;
         LatencyPercentiles put_latency;
         LatencyPercentiles get_latency;
+        LatencyPercentiles scan_latency;
     };
 
     enum class BackendKind {
@@ -319,6 +322,60 @@ namespace {
         }
     }
 
+    static double run_scan_single(
+        memtable::MemTable& memtable,
+        uint64_t snapshot,
+        size_t expected_records,
+        std::vector<uint32_t>* latency_samples_ns
+    ) {
+        if (latency_samples_ns) {
+            latency_samples_ns->clear();
+            latency_samples_ns->reserve((expected_records + kLatencySampleMask) / (kLatencySampleMask + 1));
+        }
+
+        memtable::MemTable::KeyRange full_range{};
+        size_t scanned = 0;
+        const auto scan_t0 = Clock::now();
+        auto it = memtable.iterator(full_range, snapshot);
+        while (it.has_next()) {
+            const bool do_sample = ((static_cast<uint32_t>(scanned) & kLatencySampleMask) == 0);
+            if (do_sample && latency_samples_ns) {
+                const auto t0 = Clock::now();
+                size_t window_count = 0;
+                while (window_count < kScanSampleWindow && it.has_next()) {
+                    const auto rec = it.next();
+                    if (!rec.has_value()) {
+                        std::fprintf(stderr, "SCAN iterator returned nullopt before end (scanned=%zu)\n", scanned);
+                        std::exit(4);
+                    }
+                    ++window_count;
+                    ++scanned;
+                }
+                const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+                const int64_t per_record_ns = window_count > 0 ? (dt / static_cast<int64_t>(window_count)) : 0;
+                latency_samples_ns->push_back(static_cast<uint32_t>(std::min<int64_t>(per_record_ns, INT32_MAX)));
+                continue;
+            }
+
+            const auto rec = it.next();
+            if (!rec.has_value()) {
+                std::fprintf(stderr, "SCAN iterator returned nullopt before end (scanned=%zu)\n", scanned);
+                std::exit(4);
+            }
+            ++scanned;
+        }
+        const auto scan_ms = std::chrono::duration<double, std::milli>(Clock::now() - scan_t0).count();
+
+        if (scanned != expected_records) {
+            std::fprintf(stderr, "SCAN count mismatch: expected=%zu actual=%zu\n", expected_records, scanned);
+            std::exit(5);
+        }
+        if (scan_ms <= 0.0) {
+            return 0.0;
+        }
+        return static_cast<double>(scanned) * 1000.0 / scan_ms;
+    }
+
     static ThroughputResult run_case(
         const CaseSpec spec,
         int ops_per_case,
@@ -379,6 +436,7 @@ namespace {
         auto memtable = memtable::MemTable::create(make_options(shard_count, backend));
         std::vector<uint32_t> put_latency_ns;
         std::vector<uint32_t> get_latency_ns;
+        std::vector<uint32_t> scan_latency_ns;
 
         const auto put_t0 = Clock::now();
         run_put_parallel(*memtable, keys, value, fp_ptr, mk_ptr, writer_threads, &put_latency_ns);
@@ -388,12 +446,15 @@ namespace {
         const auto get_t0 = Clock::now();
         run_get_parallel(*memtable, keys, snapshot, writer_threads, &get_latency_ns);
         const auto get_ms = std::chrono::duration<double, std::milli>(Clock::now() - get_t0).count();
+        const double scan_ops_per_sec = run_scan_single(*memtable, snapshot, keys.size(), &scan_latency_ns);
 
         return {
             .put_ops_per_sec = static_cast<double>(ops_per_case) * 1000.0 / put_ms,
             .get_ops_per_sec = static_cast<double>(ops_per_case) * 1000.0 / get_ms,
+            .scan_ops_per_sec = scan_ops_per_sec,
             .put_latency = build_percentiles(put_latency_ns),
-            .get_latency = build_percentiles(get_latency_ns)
+            .get_latency = build_percentiles(get_latency_ns),
+            .scan_latency = build_percentiles(scan_latency_ns)
         };
     }
 } // namespace
@@ -402,7 +463,7 @@ int main(int argc, char** argv) {
     int ops_per_case = 200000;
     int writer_threads = 16;
     bool use_prehash = false;
-    BackendKind backend = BackendKind::BPTree;
+    BackendKind backend = BackendKind::SkipList;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -453,25 +514,27 @@ int main(int argc, char** argv) {
     std::printf("resolved_shards = %u (MemTable same heuristic)\n\n", shard_count);
     std::printf("warmup_ops   = %d\n\n", std::min(ops_per_case, 50000));
     std::printf("prehash_mode = %s\n\n", use_prehash ? "ON (fp64/mk precomputed)" : "OFF (hash inside put)");
-    std::printf("%-10s %-12s %-8s %-8s %-14s %-14s %-10s %-10s\n",
-                "key", "value", "shards", "writers", "put(ops/s)", "get(ops/s)", "put_smp", "get_smp");
-    std::printf("%-10s %-12s %-8s %-8s %-14s %-14s %-10s %-10s\n",
-                "", "", "", "", "", "", "P50/P90/P99/P999(us)", "P50/P90/P99/P999(us)");
+    std::printf("%-10s %-12s %-8s %-8s %-14s %-14s %-14s %-8s %-8s %-8s\n",
+                "key", "value", "shards", "writers", "put(ops/s)", "get(ops/s)", "scan(ops/s)", "put_smp", "get_smp", "scan_smp");
+    std::printf("%-10s %-12s %-8s %-8s %-14s %-14s %-14s %-8s %-8s %-8s\n",
+                "", "", "", "", "", "", "", "P50/P90/P99/P999(us)", "P50/P90/P99/P999(us)", "P50/P90/P99/P999(us)");
     std::printf("------------------------------------------------------------------------------------------------\n");
 
     for (const auto& spec : cases) {
         const ThroughputResult result = run_case(spec, ops_per_case, use_prehash, shard_count, effective_writers, backend);
-        std::printf("%-10d %-12d %-8u %-8d %-14.0f %-14.0f %-10u %-10u\n",
+        std::printf("%-10d %-12d %-8u %-8d %-14.0f %-14.0f %-14.0f %-8u %-8u %-8u\n",
                     spec.key_size,
                     spec.value_size,
                     shard_count,
                     effective_writers,
                     result.put_ops_per_sec,
                     result.get_ops_per_sec,
+                    result.scan_ops_per_sec,
                     result.put_latency.sample_count,
-                    result.get_latency.sample_count);
-        std::printf("%-10s %-12s %-8s %-8s %-14s %-14s %4.2f/%4.2f/%4.2f/%4.2f %4.2f/%4.2f/%4.2f/%4.2f\n",
-                    "", "", "", "", "", "",
+                    result.get_latency.sample_count,
+                    result.scan_latency.sample_count);
+        std::printf("%-10s %-12s %-8s %-8s %-14s %-14s %-14s %4.2f/%4.2f/%4.2f/%4.2f %4.2f/%4.2f/%4.2f/%4.2f %4.2f/%4.2f/%4.2f/%4.2f\n",
+                    "", "", "", "", "", "", "",
                     result.put_latency.p50_us,
                     result.put_latency.p90_us,
                     result.put_latency.p99_us,
@@ -479,7 +542,11 @@ int main(int argc, char** argv) {
                     result.get_latency.p50_us,
                     result.get_latency.p90_us,
                     result.get_latency.p99_us,
-                    result.get_latency.p999_us);
+                    result.get_latency.p999_us,
+                    result.scan_latency.p50_us,
+                    result.scan_latency.p90_us,
+                    result.scan_latency.p99_us,
+                    result.scan_latency.p999_us);
         std::printf("------------------------------------------------------------------------------------------------\n");
         std::fflush(stdout);
     }

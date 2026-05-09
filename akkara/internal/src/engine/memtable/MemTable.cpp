@@ -202,7 +202,11 @@ namespace akkaradb::engine::memtable {
 
                     std::vector<RecordView> records;
                     records.reserve(item.table->entryCount());
-                    for (const RecordView& rec : item.table->iterator(std::numeric_limits<uint64_t>::max())) {
+                    for (const RecordView& rec : item.table->iterator(
+                        core::ByteView{},
+                        core::ByteView{},
+                        std::numeric_limits<uint64_t>::max()
+                    )) {
                         records.push_back(rec);
                     }
                 if (callback_) {
@@ -378,8 +382,8 @@ namespace akkaradb::engine::memtable {
                 }
             }
 
-            const std::span<const uint8_t> start{range.start.data(), range.start.size()};
-            const std::span<const uint8_t> end{range.end.data(), range.end.size()};
+            const core::ByteView start_view = to_byte_view(std::span<const uint8_t>{range.start.data(), range.start.size()});
+            const core::ByteView end_view = to_byte_view(std::span<const uint8_t>{range.end.data(), range.end.size()});
 
             std::vector<RecordView> deduped;
 
@@ -393,19 +397,11 @@ namespace akkaradb::engine::memtable {
                 if (consume_current) {
                     ++cursor.it;
                 }
-                while (cursor.it != cursor.generator.end()) {
-                    const RecordView rec = *cursor.it;
-                    if (!start.empty() && rec.compare_key(start) < 0) {
-                        ++cursor.it;
-                        continue;
-                    }
-                    if (!end.empty() && rec.compare_key(end) >= 0) {
-                        return false;
-                    }
-                    cursor.current = rec;
-                    return true;
+                if (cursor.it == cursor.generator.end()) {
+                    return false;
                 }
-                return false;
+                cursor.current = *cursor.it;
+                return true;
             };
 
             std::vector<SourceCursor> cursors;
@@ -413,7 +409,7 @@ namespace akkaradb::engine::memtable {
 
             for (const auto& table : sources) {
                 SourceCursor cursor;
-                cursor.generator = table->iterator(snapshot_seq);
+                cursor.generator = table->iterator(start_view, end_view, snapshot_seq);
                 cursor.it = cursor.generator.begin();
                 if (cursor.it == cursor.generator.end()) {
                     continue;
