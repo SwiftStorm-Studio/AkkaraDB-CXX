@@ -16,6 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+// internal\include\engine\memtable\ARTMemTable.hpp
 #pragma once
 
 #include <array>
@@ -33,194 +34,170 @@
 
 namespace akkaradb::engine {
     class ARTMemTable final : public IMemTable {
-    public:
-        static constexpr uint8_t MAX_VERSIONS_PER_KEY = 4;
+        public:
+            static constexpr uint8_t MAX_VERSIONS_PER_KEY = 4;
 
-        explicit ARTMemTable(
-            size_t data_arena_initial_block_size = core::BufferArena::DEFAULT_INITIAL_BLOCK_SIZE,
-            size_t data_arena_max_block_size = core::BufferArena::DEFAULT_MAX_BLOCK_SIZE,
-            size_t generator_arena_initial_block_size = 64 * 1024,
-            size_t generator_arena_max_block_size = 2 * 1024 * 1024
-        );
+            explicit ARTMemTable(
+                size_t data_arena_initial_block_size = core::BufferArena::DEFAULT_INITIAL_BLOCK_SIZE,
+                size_t data_arena_max_block_size = core::BufferArena::DEFAULT_MAX_BLOCK_SIZE,
+                size_t generator_arena_initial_block_size = 64 * 1024,
+                size_t generator_arena_max_block_size = 2 * 1024 * 1024
+            );
 
-        [[nodiscard]] Status put(
-            ByteView key,
-            ByteView value,
-            uint64_t seq,
-            uint8_t flags,
-            uint64_t precomputed_fp64 = 0,
-            uint64_t precomputed_mk = 0
-        ) override;
-        [[nodiscard]] bool get(ByteView key, uint64_t snapshot_seq, RecordView* out) const override;
-        [[nodiscard]] ArenaGenerator<RecordView> iterator(
-            ByteView start_key,
-            ByteView end_key,
-            uint64_t snapshot_seq
-        ) const override;
-        void freeze() override;
+            [[nodiscard]] Status put(
+                ByteView key,
+                ByteView value,
+                uint64_t seq,
+                uint8_t flags,
+                uint64_t precomputed_fp64 = 0,
+                uint64_t precomputed_mk = 0
+            ) override;
+            [[nodiscard]] bool get(ByteView key, uint64_t snapshot_seq, RecordView* out) const override;
+            [[nodiscard]] ArenaGenerator<RecordView> iterator(ByteView start_key, ByteView end_key, uint64_t snapshot_seq) const override;
+            void freeze() override;
 
-        [[nodiscard]] size_t sizeBytes() const override;
-        [[nodiscard]] size_t entryCount() const override;
+            [[nodiscard]] size_t sizeBytes() const override;
+            [[nodiscard]] size_t entryCount() const override;
 
-    private:
-        struct VersionChain {
-            std::atomic<uint64_t> version{0};
-            std::atomic<uint8_t> head{0};
-            std::atomic<uint8_t> count{0};
-            std::array<std::atomic<const core::OwnedRecord*>, MAX_VERSIONS_PER_KEY> ring{};
+        private:
+            struct VersionChain {
+                std::atomic<uint64_t> version{0};
+                std::atomic<uint8_t> head{0};
+                std::atomic<uint8_t> count{0};
+                std::array<std::atomic<const core::OwnedRecord*>, MAX_VERSIONS_PER_KEY> ring{};
 
-            VersionChain() noexcept = default;
-        };
-
-        struct NodeBase {
-            enum class Kind : uint8_t {
-                Node4,
-                Node16,
-                Node48,
-                Node256
+                VersionChain() noexcept = default;
             };
 
-            Kind kind{Kind::Node4};
-            uint16_t child_count{0};
-            uint16_t prefix_len{0};
-            const uint8_t* prefix{nullptr};
-            VersionChain* terminal{nullptr};
+            struct NodeBase {
+                enum class Kind : uint8_t {
+                    Node4, Node16, Node48, Node256
+                };
 
-            NodeBase(Kind k, uint16_t count, const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept
-                : kind{k}, child_count{count}, prefix_len{pfx_len}, prefix{pfx}, terminal{term} {}
-        };
+                Kind kind{Kind::Node4};
+                uint16_t child_count{0};
+                uint16_t prefix_len{0};
+                const uint8_t* prefix{nullptr};
+                VersionChain* terminal{nullptr};
 
-        struct Node4 final : NodeBase {
-            std::array<uint8_t, 4> keys{};
-            std::array<NodeBase*, 4> children{};
+                NodeBase(Kind k, uint16_t count, const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept
+                    : kind{k}, child_count{count}, prefix_len{pfx_len}, prefix{pfx}, terminal{term} {}
+            };
 
-            Node4(const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept
-                : NodeBase{Kind::Node4, 0, pfx, pfx_len, term} {}
-        };
+            struct Node4 final : NodeBase {
+                std::array<uint8_t, 4> keys{};
+                std::array<NodeBase*, 4> children{};
 
-        struct Node16 final : NodeBase {
-            std::array<uint8_t, 16> keys{};
-            std::array<NodeBase*, 16> children{};
+                Node4(const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept : NodeBase{Kind::Node4, 0, pfx, pfx_len, term} {}
+            };
 
-            Node16(const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept
-                : NodeBase{Kind::Node16, 0, pfx, pfx_len, term} {}
-        };
+            struct Node16 final : NodeBase {
+                std::array<uint8_t, 16> keys{};
+                std::array<NodeBase*, 16> children{};
 
-        struct Node48 final : NodeBase {
-            std::array<uint8_t, 256> child_index{};
-            std::array<uint8_t, 48> ordered_keys{};
-            std::array<NodeBase*, 48> children{};
+                Node16(const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept : NodeBase{Kind::Node16, 0, pfx, pfx_len, term} {}
+            };
 
-            Node48(const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept
-                : NodeBase{Kind::Node48, 0, pfx, pfx_len, term} {}
-        };
+            struct Node48 final : NodeBase {
+                std::array<uint8_t, 256> child_index{};
+                std::array<uint8_t, 48> ordered_keys{};
+                std::array<NodeBase*, 48> children{};
 
-        struct Node256 final : NodeBase {
-            std::array<uint8_t, 256> ordered_keys{};
-            std::array<NodeBase*, 256> children{};
+                Node48(const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept : NodeBase{Kind::Node48, 0, pfx, pfx_len, term} {}
+            };
 
-            Node256(const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept
-                : NodeBase{Kind::Node256, 0, pfx, pfx_len, term} {}
-        };
+            struct Node256 final : NodeBase {
+                std::array<uint8_t, 256> ordered_keys{};
+                std::array<NodeBase*, 256> children{};
 
-        struct InsertResult {
-            NodeBase* node{nullptr};
-            bool tree_changed{false};
-            bool inserted_new_key{false};
-        };
+                Node256(const uint8_t* pfx, uint16_t pfx_len, VersionChain* term) noexcept : NodeBase{Kind::Node256, 0, pfx, pfx_len, term} {}
+            };
 
-        using ChildEntry = std::pair<uint8_t, NodeBase*>;
-        using ChildVec = std::vector<ChildEntry>;
+            struct InsertResult {
+                NodeBase* node{nullptr};
+                bool tree_changed{false};
+                bool inserted_new_key{false};
+            };
 
-        core::BufferArena data_arena_;
-        mutable core::BufferArena generator_arena_;
-        mutable std::mutex generator_arena_mutex_;
+            using ChildEntry = std::pair<uint8_t, NodeBase*>;
+            using ChildVec = std::vector<ChildEntry>;
 
-        std::atomic<NodeBase*> root_{nullptr};
-        std::atomic<bool> frozen_{false};
-        std::atomic<size_t> bytes_{0};
-        std::atomic<size_t> entries_{0};
+            core::BufferArena data_arena_;
+            mutable core::BufferArena generator_arena_;
+            mutable std::mutex generator_arena_mutex_;
 
-        [[nodiscard]] static std::span<const uint8_t> as_u8(ByteView view) noexcept;
-        [[nodiscard]] static int compare_key_bytes(std::span<const uint8_t> lhs, std::span<const uint8_t> rhs) noexcept;
-        [[nodiscard]] static size_t common_prefix(std::span<const uint8_t> a, std::span<const uint8_t> b) noexcept;
+            std::atomic<NodeBase*> root_{nullptr};
+            std::atomic<bool> frozen_{false};
+            std::atomic<size_t> bytes_{0};
+            std::atomic<size_t> entries_{0};
 
-        template <typename T, typename... Args>
-        [[nodiscard]] T* arena_new(Args&&... args) {
-            std::byte* mem = data_arena_.allocate(sizeof(T), alignof(T));
-            bytes_.fetch_add(sizeof(T), std::memory_order_relaxed);
-            return new (mem) T(std::forward<Args>(args)...);
-        }
+            [[nodiscard]] static std::span<const uint8_t> as_u8(ByteView view) noexcept;
+            [[nodiscard]] static int compare_key_bytes(std::span<const uint8_t> lhs, std::span<const uint8_t> rhs) noexcept;
+            [[nodiscard]] static size_t common_prefix(std::span<const uint8_t> a, std::span<const uint8_t> b) noexcept;
 
-        [[nodiscard]] const uint8_t* copy_prefix(std::span<const uint8_t> prefix);
-        [[nodiscard]] VersionChain* make_chain(const core::OwnedRecord* initial);
-        [[nodiscard]] core::OwnedRecord* make_record(
-            std::span<const uint8_t> key,
-            std::span<const uint8_t> value,
-            uint64_t seq,
-            uint8_t flags,
-            uint64_t precomputed_fp64,
-            uint64_t precomputed_mk
-        );
+            template <typename T, typename... Args>
+            [[nodiscard]] T* arena_new(Args&&... args) {
+                std::byte* mem = data_arena_.allocate(sizeof(T), alignof(T));
+                bytes_.fetch_add(sizeof(T), std::memory_order_relaxed);
+                return new(mem) T(std::forward<Args>(args)...);
+            }
 
-        static void append_version(VersionChain* chain, const core::OwnedRecord* record, std::atomic<size_t>& entries) noexcept;
-        [[nodiscard]] static bool visible_record(VersionChain* chain, uint64_t snapshot_seq, RecordView* out) noexcept;
-        [[nodiscard]] static RecordView to_view(const core::OwnedRecord& record) noexcept;
+            [[nodiscard]] const uint8_t* copy_prefix(std::span<const uint8_t> prefix);
+            [[nodiscard]] VersionChain* make_chain(const core::OwnedRecord* initial);
+            [[nodiscard]] core::OwnedRecord* make_record(
+                std::span<const uint8_t> key,
+                std::span<const uint8_t> value,
+                uint64_t seq,
+                uint8_t flags,
+                uint64_t precomputed_fp64,
+                uint64_t precomputed_mk
+            );
 
-        static void export_children(const NodeBase* node, ChildVec& out);
-        [[nodiscard]] static NodeBase* find_child(const NodeBase* node, uint8_t key) noexcept;
-        [[nodiscard]] static bool child_at(const NodeBase* node, uint16_t index, uint8_t* edge, const NodeBase** child) noexcept;
-        template <typename Fn>
-        static void for_each_child(const NodeBase* node, Fn&& fn);
+            static void append_version(VersionChain* chain, const core::OwnedRecord* record, std::atomic<size_t>& entries) noexcept;
+            [[nodiscard]] static bool visible_record(VersionChain* chain, uint64_t snapshot_seq, RecordView* out) noexcept;
+            [[nodiscard]] static RecordView to_view(const core::OwnedRecord& record) noexcept;
 
-        [[nodiscard]] NodeBase* build_node(std::span<const uint8_t> prefix, VersionChain* terminal, const ChildVec& children);
-        [[nodiscard]] NodeBase* build_leaf(std::span<const uint8_t> suffix, const core::OwnedRecord* record);
-        [[nodiscard]] NodeBase* clone_with(const NodeBase* node, std::span<const uint8_t> prefix, VersionChain* terminal, const ChildVec& children);
+            static void export_children(const NodeBase* node, ChildVec& out);
+            [[nodiscard]] static NodeBase* find_child(const NodeBase* node, uint8_t key) noexcept;
+            [[nodiscard]] static bool child_at(const NodeBase* node, uint16_t index, uint8_t* edge, const NodeBase** child) noexcept;
+            template <typename Fn>
+            static void for_each_child(const NodeBase* node, Fn&& fn);
 
-        [[nodiscard]] InsertResult insert_recursive(const NodeBase* node, std::span<const uint8_t> key, size_t depth, const core::OwnedRecord* record);
+            [[nodiscard]] NodeBase* build_node(std::span<const uint8_t> prefix, VersionChain* terminal, const ChildVec& children);
+            [[nodiscard]] NodeBase* build_leaf(std::span<const uint8_t> suffix, const core::OwnedRecord* record);
+            [[nodiscard]] NodeBase* clone_with(const NodeBase* node, std::span<const uint8_t> prefix, VersionChain* terminal, const ChildVec& children);
 
-        [[nodiscard]] bool get_from_root(
-            const NodeBase* root,
-            std::span<const uint8_t> key,
-            uint64_t snapshot_seq,
-            RecordView* out
-        ) const;
+            [[nodiscard]] InsertResult insert_recursive(const NodeBase* node, std::span<const uint8_t> key, size_t depth, const core::OwnedRecord* record);
 
-        [[nodiscard]] ArenaGenerator<RecordView> iterate_snapshot_range(
-            uint64_t snapshot_seq,
-            std::vector<uint8_t> start_key,
-            std::vector<uint8_t> end_key
-        ) const;
+            [[nodiscard]] bool get_from_root(const NodeBase* root, std::span<const uint8_t> key, uint64_t snapshot_seq, RecordView* out) const;
+
+            [[nodiscard]] ArenaGenerator<RecordView> iterate_snapshot_range(
+                uint64_t snapshot_seq,
+                std::vector<uint8_t> start_key,
+                std::vector<uint8_t> end_key
+            ) const;
     };
 } // namespace akkaradb::engine
 
 namespace akkaradb::engine {
     template <typename Fn>
     void ARTMemTable::for_each_child(const NodeBase* node, Fn&& fn) {
-        if (node == nullptr) {
-            return;
-        }
+        if (node == nullptr) { return; }
 
         switch (node->kind) {
             case NodeBase::Kind::Node4: {
                 const auto* n = static_cast<const Node4*>(node);
-                for (uint16_t i = 0; i < n->child_count; ++i) {
-                    fn(n->keys[i], n->children[i]);
-                }
+                for (uint16_t i = 0; i < n->child_count; ++i) { fn(n->keys[i], n->children[i]); }
                 return;
             }
             case NodeBase::Kind::Node16: {
                 const auto* n = static_cast<const Node16*>(node);
-                for (uint16_t i = 0; i < n->child_count; ++i) {
-                    fn(n->keys[i], n->children[i]);
-                }
+                for (uint16_t i = 0; i < n->child_count; ++i) { fn(n->keys[i], n->children[i]); }
                 return;
             }
             case NodeBase::Kind::Node48: {
                 const auto* n = static_cast<const Node48*>(node);
-                for (uint16_t i = 0; i < n->child_count; ++i) {
-                    fn(n->ordered_keys[i], n->children[i]);
-                }
+                for (uint16_t i = 0; i < n->child_count; ++i) { fn(n->ordered_keys[i], n->children[i]); }
                 return;
             }
             case NodeBase::Kind::Node256: {

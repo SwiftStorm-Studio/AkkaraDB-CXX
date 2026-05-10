@@ -58,15 +58,13 @@ namespace akkaradb::cpu {
          * @return true if SSE4.2 CRC instructions can be used.
          */
         [[nodiscard]] bool SupportsSSE42() noexcept {
-            #if defined(__GNUC__) || defined(__clang__)
-            __builtin_cpu_init(); return __builtin_cpu_supports("sse4.2");
-            #elif defined(_MSC_VER)
-            int regs[4]{};
-            __cpuid(regs, 1);
-            return (regs[2] & (1 << 20)) != 0;
-            #else
-            return false;
-            #endif
+        #if defined(__GNUC__) || defined(__clang__)
+        __builtin_cpu_init();return __builtin_cpu_supports ("sse4.2");
+        #elif defined(_MSC_VER)
+        int regs[4]{}; __cpuid(regs, 1);return (regs[2]& (1 << 20)) != 0;
+        #else
+        return false;
+        #endif
         }
         #endif
 

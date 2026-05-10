@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/core/utils/ArenaGenerator.hpp
+// internal\include\core\utils\ArenaGenerator.hpp
 #pragma once
 
 #include <coroutine>
@@ -78,25 +78,15 @@ namespace akkaradb::core {
                 }
 
                 static void operator delete(void* ptr, size_t) noexcept {
-                    if (ptr == nullptr) {
-                        return;
-                    }
+                    if (ptr == nullptr) { return; }
 
-                    auto* header = reinterpret_cast<AllocationHeader*>(
-                        reinterpret_cast<std::byte*>(ptr) - sizeof(AllocationHeader)
-                    );
-                    if (!header->from_arena) {
-                        ::operator delete(header);
-                    }
+                    auto* header = reinterpret_cast<AllocationHeader*>(reinterpret_cast<std::byte*>(ptr) - sizeof(AllocationHeader));
+                    if (!header->from_arena) { ::operator delete(header); }
                 }
 
-                static void operator delete(void* ptr) noexcept {
-                    operator delete(ptr, 0);
-                }
+                static void operator delete(void* ptr) noexcept { operator delete(ptr, 0); }
 
-                [[nodiscard]] ArenaGenerator get_return_object() noexcept {
-                    return ArenaGenerator{handle_type::from_promise(*this)};
-                }
+                [[nodiscard]] ArenaGenerator get_return_object() noexcept { return ArenaGenerator{handle_type::from_promise(*this)}; }
 
                 [[nodiscard]] std::suspend_always initial_suspend() noexcept { return {}; }
                 [[nodiscard]] std::suspend_always final_suspend() noexcept { return {}; }
@@ -118,15 +108,12 @@ namespace akkaradb::core {
                     using reference = const T&;
 
                     iterator() noexcept = default;
-                    explicit iterator(handle_type handle, bool done) noexcept
-                        : handle_{handle}, done_{done} {}
+                    explicit iterator(handle_type handle, bool done) noexcept : handle_{handle}, done_{done} {}
 
                     iterator& operator++() {
                         handle_.resume();
                         if (handle_.done()) {
-                            if (handle_.promise().exception_) {
-                                std::rethrow_exception(handle_.promise().exception_);
-                            }
+                            if (handle_.promise().exception_) { std::rethrow_exception(handle_.promise().exception_); }
                             done_ = true;
                         }
                         return *this;
@@ -144,41 +131,29 @@ namespace akkaradb::core {
 
             ArenaGenerator() noexcept = default;
 
-            explicit ArenaGenerator(handle_type handle) noexcept
-                : handle_{handle} {}
+            explicit ArenaGenerator(handle_type handle) noexcept : handle_{handle} {}
 
             ArenaGenerator(const ArenaGenerator&) = delete;
             ArenaGenerator& operator=(const ArenaGenerator&) = delete;
 
-            ArenaGenerator(ArenaGenerator&& other) noexcept
-                : handle_{std::exchange(other.handle_, {})} {}
+            ArenaGenerator(ArenaGenerator&& other) noexcept : handle_{std::exchange(other.handle_, {})} {}
 
             ArenaGenerator& operator=(ArenaGenerator&& other) noexcept {
                 if (this != &other) {
-                    if (handle_) {
-                        handle_.destroy();
-                    }
+                    if (handle_) { handle_.destroy(); }
                     handle_ = std::exchange(other.handle_, {});
                 }
                 return *this;
             }
 
-            ~ArenaGenerator() {
-                if (handle_) {
-                    handle_.destroy();
-                }
-            }
+            ~ArenaGenerator() { if (handle_) { handle_.destroy(); } }
 
             [[nodiscard]] iterator begin() {
-                if (!handle_) {
-                    return iterator{};
-                }
+                if (!handle_) { return iterator{}; }
 
                 handle_.resume();
                 if (handle_.done()) {
-                    if (handle_.promise().exception_) {
-                        std::rethrow_exception(handle_.promise().exception_);
-                    }
+                    if (handle_.promise().exception_) { std::rethrow_exception(handle_.promise().exception_); }
                     return iterator{handle_, true};
                 }
 
@@ -190,10 +165,7 @@ namespace akkaradb::core {
             template <typename Factory>
             [[nodiscard]] static ArenaGenerator with_arena(BufferArena& arena, Factory&& factory) {
                 struct ScopedArena {
-                    explicit ScopedArena(BufferArena* arena_ptr) noexcept
-                        : prev_{promise_type::tls_arena_} {
-                        promise_type::tls_arena_ = arena_ptr;
-                    }
+                    explicit ScopedArena(BufferArena* arena_ptr) noexcept : prev_{promise_type::tls_arena_} { promise_type::tls_arena_ = arena_ptr; }
                     ~ScopedArena() { promise_type::tls_arena_ = prev_; }
                     BufferArena* prev_;
                 };
@@ -202,77 +174,44 @@ namespace akkaradb::core {
                 return std::forward<Factory>(factory)();
             }
 
-            [[nodiscard]] static ArenaGenerator yield_all(
-                BufferArena& arena,
-                ArenaGenerator first,
-                ArenaGenerator second
-            ) {
+            [[nodiscard]] static ArenaGenerator yield_all(BufferArena& arena, ArenaGenerator first, ArenaGenerator second) {
                 return yieldAll(arena, std::move(first), std::move(second));
             }
 
-            [[nodiscard]] static ArenaGenerator yieldAll(
-                BufferArena& arena,
-                ArenaGenerator first,
-                ArenaGenerator second
-            ) {
-                return with_arena(arena, [first = std::move(first), second = std::move(second)]() mutable {
-                    return yield_all_impl(std::move(first), std::move(second));
-                });
+            [[nodiscard]] static ArenaGenerator yieldAll(BufferArena& arena, ArenaGenerator first, ArenaGenerator second) {
+                return with_arena(
+                    arena,
+                    [first = std::move(first), second = std::move(second)]() mutable { return yield_all_impl(std::move(first), std::move(second)); }
+                );
             }
 
-            [[nodiscard]] static ArenaGenerator yieldAll(
-                BufferArena& arena,
-                ArenaGenerator first
-            ) {
-                return with_arena(arena, [first = std::move(first)]() mutable {
-                    return yield_all_impl(std::move(first), ArenaGenerator{});
-                });
+            [[nodiscard]] static ArenaGenerator yieldAll(BufferArena& arena, ArenaGenerator first) {
+                return with_arena(arena, [first = std::move(first)]() mutable { return yield_all_impl(std::move(first), ArenaGenerator{}); });
             }
 
             template <typename... Rest>
-            [[nodiscard]] static ArenaGenerator yieldAll(
-                BufferArena& arena,
-                ArenaGenerator first,
-                ArenaGenerator second,
-                Rest... rest
-            ) {
-                static_assert((std::is_same_v<ArenaGenerator, std::remove_cvref_t<Rest>> && ...),
-                    "yieldAll rest arguments must be ArenaGenerator<T>");
+            [[nodiscard]] static ArenaGenerator yieldAll(BufferArena& arena, ArenaGenerator first, ArenaGenerator second, Rest... rest) {
+                static_assert((std::is_same_v<ArenaGenerator, std::remove_cvref_t<Rest>> && ...), "yieldAll rest arguments must be ArenaGenerator<T>");
 
-                return with_arena(arena, [first = std::move(first),
-                                          second = std::move(second),
-                                          tail = std::array<ArenaGenerator, sizeof...(Rest)>{std::move(rest)...}]() mutable {
-                    return yield_all_many_impl(std::move(first), std::move(second), std::move(tail));
-                });
+                return with_arena(
+                    arena,
+                    [first = std::move(first), second = std::move(second), tail = std::array<ArenaGenerator, sizeof...(Rest)>{std::move(rest)...}]() mutable {
+                        return yield_all_many_impl(std::move(first), std::move(second), std::move(tail));
+                    }
+                );
             }
 
         private:
             [[nodiscard]] static ArenaGenerator yield_all_impl(ArenaGenerator first, ArenaGenerator second) {
-                for (auto&& value : first) {
-                    co_yield value;
-                }
-                for (auto&& value : second) {
-                    co_yield value;
-                }
+                for (auto&& value : first) { co_yield value; }
+                for (auto&& value : second) { co_yield value; }
             }
 
             template <size_t N>
-            [[nodiscard]] static ArenaGenerator yield_all_many_impl(
-                ArenaGenerator first,
-                ArenaGenerator second,
-                std::array<ArenaGenerator, N> tail
-            ) {
-                for (auto&& value : first) {
-                    co_yield value;
-                }
-                for (auto&& value : second) {
-                    co_yield value;
-                }
-                for (auto& gen : tail) {
-                    for (auto&& value : gen) {
-                        co_yield value;
-                    }
-                }
+            [[nodiscard]] static ArenaGenerator yield_all_many_impl(ArenaGenerator first, ArenaGenerator second, std::array<ArenaGenerator, N> tail) {
+                for (auto&& value : first) { co_yield value; }
+                for (auto&& value : second) { co_yield value; }
+                for (auto& gen : tail) { for (auto&& value : gen) { co_yield value; } }
             }
 
             handle_type handle_{};

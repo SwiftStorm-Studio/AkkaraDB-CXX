@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/core/buffer/BufferArena.hpp
+// internal\include\core\buffer\BufferArena.hpp
 #pragma once
 
 #include <cstddef>
@@ -40,10 +40,7 @@ namespace akkaradb::core {
             static constexpr size_t DEFAULT_INITIAL_BLOCK_SIZE = 64 * 1024;
             static constexpr size_t DEFAULT_MAX_BLOCK_SIZE = 4 * 1024 * 1024;
 
-            explicit BufferArena(
-                size_t initial_block_size = DEFAULT_INITIAL_BLOCK_SIZE,
-                size_t max_block_size = DEFAULT_MAX_BLOCK_SIZE
-            );
+            explicit BufferArena(size_t initial_block_size = DEFAULT_INITIAL_BLOCK_SIZE, size_t max_block_size = DEFAULT_MAX_BLOCK_SIZE);
 
             ~BufferArena() noexcept;
 

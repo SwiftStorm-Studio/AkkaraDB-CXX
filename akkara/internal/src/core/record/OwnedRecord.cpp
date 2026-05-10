@@ -24,9 +24,7 @@ namespace akkaradb::core {
         [[nodiscard]] uint64_t build_mini_key(std::span<const uint8_t> key) noexcept {
             uint64_t mini = 0;
             const size_t n = std::min<size_t>(key.size(), 8);
-            for (size_t i = 0; i < n; ++i) {
-                mini |= static_cast<uint64_t>(key[i]) << (i * 8);
-            }
+            for (size_t i = 0; i < n; ++i) { mini |= static_cast<uint64_t>(key[i]) << (i * 8); }
             return mini;
         }
     } // namespace
@@ -45,17 +43,13 @@ namespace akkaradb::core {
     ) {
         dst.hdr.k_len = static_cast<uint16_t>(key.size());
         dst.hdr.v_len = static_cast<uint16_t>(value.size());
-        dst.hdr.seq   = seq;
+        dst.hdr.seq = seq;
         dst.hdr.flags = flags;
 
         dst.key_fp64 = fp64;
         dst.mini_key = (mk != 0) ? mk : build_mini_key(key);
 
-        dst.data = SmallBuffer(
-            key.data(), key.size(),
-            value.data(), value.size(),
-            arena
-        );
+        dst.data = SmallBuffer(key.data(), key.size(), value.data(), value.size(), arena);
     }
 
     OwnedRecord OwnedRecord::create(
@@ -72,13 +66,7 @@ namespace akkaradb::core {
         return r;
     }
 
-    OwnedRecord OwnedRecord::create(
-        std::string_view key,
-        std::string_view value,
-        uint64_t seq,
-        uint8_t flags,
-        BufferArena& arena
-    ) {
+    OwnedRecord OwnedRecord::create(std::string_view key, std::string_view value, uint64_t seq, uint8_t flags, BufferArena& arena) {
         return create(
             std::span{reinterpret_cast<const uint8_t*>(key.data()), key.size()},
             std::span{reinterpret_cast<const uint8_t*>(value.data()), value.size()},
@@ -88,20 +76,7 @@ namespace akkaradb::core {
         );
     }
 
-    OwnedRecord OwnedRecord::tombstone(
-        std::span<const uint8_t> key,
-        uint64_t seq,
-        BufferArena& arena,
-        uint64_t fp64
-    ) {
-        return create(
-            key,
-            {},
-            seq,
-            MemHdr16::FLAG_TOMBSTONE,
-            arena,
-            fp64
-        );
+    OwnedRecord OwnedRecord::tombstone(std::span<const uint8_t> key, uint64_t seq, BufferArena& arena, uint64_t fp64) {
+        return create(key, {}, seq, MemHdr16::FLAG_TOMBSTONE, arena, fp64);
     }
-
 } // namespace akkaradb::core

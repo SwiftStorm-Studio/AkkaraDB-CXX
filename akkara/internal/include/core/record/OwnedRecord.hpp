@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/core/record/OwnedRecord.hpp
+// internal\include\core\record\OwnedRecord.hpp
 #pragma once
 
 #include <algorithm>
@@ -31,7 +31,7 @@
 
 namespace akkaradb::core {
     /**
-     * OwnedRecord — 64B fixed-size owning in-memory record
+     * OwnedRecord  E64B fixed-size owning in-memory record
      *
      * Layout (exactly 64 bytes):
      *
@@ -122,14 +122,9 @@ namespace akkaradb::core {
             if (min_len >= 8) {
                 const uint64_t lhs8 = bswap64(mini_key);
                 const uint64_t rhs8 = bswap64(other.mini_key);
-                if (lhs8 != rhs8) {
-                    return lhs8 < rhs8 ? -1 : 1;
-                }
-            } else if (min_len > 0) {
-                if (int c = std::memcmp(&mini_key, &other.mini_key, min_len); c != 0) {
-                    return c < 0 ? -1 : 1;
-                }
+                if (lhs8 != rhs8) { return lhs8 < rhs8 ? -1 : 1; }
             }
+            else if (min_len > 0) { if (int c = std::memcmp(&mini_key, &other.mini_key, min_len); c != 0) { return c < 0 ? -1 : 1; } }
 
             if (min_len > 8) { if (int c = std::memcmp(data.data() + 8, other.data.data() + 8, min_len - 8); c != 0) return c < 0 ? -1 : 1; }
 
@@ -144,14 +139,9 @@ namespace akkaradb::core {
             if (min_len >= 8) {
                 const uint64_t lhs8 = bswap64(mini_key);
                 const uint64_t rhs8 = bswap64(load_u64_unaligned(other.data()));
-                if (lhs8 != rhs8) {
-                    return lhs8 < rhs8 ? -1 : 1;
-                }
-            } else if (min_len > 0) {
-                if (int c = std::memcmp(&mini_key, other.data(), min_len); c != 0) {
-                    return c < 0 ? -1 : 1;
-                }
+                if (lhs8 != rhs8) { return lhs8 < rhs8 ? -1 : 1; }
             }
+            else if (min_len > 0) { if (int c = std::memcmp(&mini_key, other.data(), min_len); c != 0) { return c < 0 ? -1 : 1; } }
 
             if (min_len > 8) { if (int c = std::memcmp(data.data() + 8, other.data() + 8, min_len - 8); c != 0) return c < 0 ? -1 : 1; }
 

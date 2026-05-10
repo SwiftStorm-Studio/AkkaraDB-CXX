@@ -33,23 +33,17 @@ namespace akkaradb::engine {
         template <typename T, typename... Args>
         [[nodiscard]] T* arena_new(BufferArena& arena, Args&&... args) {
             std::byte* mem = arena.allocate(sizeof(T), alignof(T));
-            return new (mem) T(std::forward<Args>(args)...);
+            return new(mem) T(std::forward<Args>(args)...);
         }
 
         [[nodiscard]] int compare_key_bytes(std::span<const uint8_t> lhs, std::span<const uint8_t> rhs) noexcept {
             const size_t min_len = std::min(lhs.size(), rhs.size());
             if (min_len > 0) {
                 const int cmp = std::memcmp(lhs.data(), rhs.data(), min_len);
-                if (cmp != 0) {
-                    return cmp < 0 ? -1 : 1;
-                }
+                if (cmp != 0) { return cmp < 0 ? -1 : 1; }
             }
-            if (lhs.size() < rhs.size()) {
-                return -1;
-            }
-            if (lhs.size() > rhs.size()) {
-                return 1;
-            }
+            if (lhs.size() < rhs.size()) { return -1; }
+            if (lhs.size() > rhs.size()) { return 1; }
             return 0;
         }
     } // namespace
@@ -65,17 +59,13 @@ namespace akkaradb::engine {
         head_ = arena_new<Node>(data_arena_);
         head_->level = MAX_LEVEL;
         head_->key_record = nullptr;
-        for (uint8_t i = 0; i < MAX_LEVEL; ++i) {
-            head_->next[i].store(nullptr, std::memory_order_relaxed);
-        }
+        for (uint8_t i = 0; i < MAX_LEVEL; ++i) { head_->next[i].store(nullptr, std::memory_order_relaxed); }
         current_max_level_.store(1, std::memory_order_relaxed);
 
         bytes_.store(sizeof(Node), std::memory_order_relaxed);
     }
 
-    std::span<const uint8_t> SkipListMemTable::as_u8(ByteView view) noexcept {
-        return {reinterpret_cast<const uint8_t*>(view.data()), view.size()};
-    }
+    std::span<const uint8_t> SkipListMemTable::as_u8(ByteView view) noexcept { return {reinterpret_cast<const uint8_t*>(view.data()), view.size()}; }
 
     uint64_t SkipListMemTable::next_random() noexcept {
         uint64_t x = rng_state_;
@@ -88,9 +78,7 @@ namespace akkaradb::engine {
 
     uint8_t SkipListMemTable::random_level() noexcept {
         uint8_t level = 1;
-        while (level < MAX_LEVEL && ((next_random() & 0x3ULL) == 0ULL)) {
-            ++level;
-        }
+        while (level < MAX_LEVEL && ((next_random() & 0x3ULL) == 0ULL)) { ++level; }
         return level;
     }
 
@@ -114,25 +102,15 @@ namespace akkaradb::engine {
         uint64_t precomputed_fp64,
         uint64_t precomputed_mk
     ) {
-        const uint64_t fp64 = precomputed_fp64 != 0
-            ? precomputed_fp64
-            : (key.empty()
-            ? 0
-            : core::SSTHdr32::compute_key_fp64(key.data(), key.size()));
-        const uint64_t mini = precomputed_mk != 0
-            ? precomputed_mk
-            : (key.empty()
-            ? 0
-            : core::SSTHdr32::build_mini_key(key.data(), key.size()));
+        const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : (key.empty() ? 0 : core::SSTHdr32::compute_key_fp64(key.data(), key.size()));
+        const uint64_t mini = precomputed_mk != 0 ? precomputed_mk : (key.empty() ? 0 : core::SSTHdr32::build_mini_key(key.data(), key.size()));
 
         core::OwnedRecord* record = arena_new<core::OwnedRecord>(data_arena_);
         core::OwnedRecord::create_inplace(*record, key, value, seq, flags, data_arena_, fp64, mini);
         return record;
     }
 
-    int SkipListMemTable::compare_node_key(const Node* node, std::span<const uint8_t> key) noexcept {
-        return node->key_record->compare_key(key);
-    }
+    int SkipListMemTable::compare_node_key(const Node* node, std::span<const uint8_t> key) noexcept { return node->key_record->compare_key(key); }
 
     SkipListMemTable::Node* SkipListMemTable::find_node(
         std::span<const uint8_t> key,
@@ -190,9 +168,7 @@ namespace akkaradb::engine {
     bool SkipListMemTable::visible_record(const Node* node, uint64_t snapshot_seq, RecordView* out) const noexcept {
         for (;;) {
             const uint64_t begin = node->version.load(std::memory_order_acquire);
-            if ((begin & 1ULL) != 0ULL) {
-                continue;
-            }
+            if ((begin & 1ULL) != 0ULL) { continue; }
 
             const uint8_t count = node->count.load(std::memory_order_relaxed);
             const uint8_t head_local = node->head.load(std::memory_order_relaxed);
@@ -203,9 +179,8 @@ namespace akkaradb::engine {
                 // Common case: latest snapshot reads. Check the newest slot first
                 // and skip ring scan when it is visible.
                 const core::OwnedRecord* newest = node->ring[head_local].record.load(std::memory_order_relaxed);
-                if (newest != nullptr && newest->seq() <= snapshot_seq) {
-                    selected = newest;
-                } else {
+                if (newest != nullptr && newest->seq() <= snapshot_seq) { selected = newest; }
+                else {
                     for (uint8_t i = 1; i < count; ++i) {
                         const uint8_t index = static_cast<uint8_t>((head_local - i) & (MAX_VERSIONS_PER_KEY - 1));
                         const core::OwnedRecord* candidate = node->ring[index].record.load(std::memory_order_relaxed);
@@ -219,9 +194,7 @@ namespace akkaradb::engine {
 
             const uint64_t end = node->version.load(std::memory_order_acquire);
             if (begin == end && (end & 1ULL) == 0ULL) {
-                if (selected == nullptr) {
-                    return false;
-                }
+                if (selected == nullptr) { return false; }
                 *out = to_view(*selected);
                 return true;
             }
@@ -231,32 +204,13 @@ namespace akkaradb::engine {
     RecordView SkipListMemTable::to_view(const core::OwnedRecord& record) noexcept {
         const auto key = record.key();
         const auto value = record.value();
-        return {
-            key.data(),
-            record.hdr.k_len,
-            value.data(),
-            record.hdr.v_len,
-            record.hdr.seq,
-            record.hdr.flags,
-            record.key_fp64,
-            record.mini_key
-        };
+        return {key.data(), record.hdr.k_len, value.data(), record.hdr.v_len, record.hdr.seq, record.hdr.flags, record.key_fp64, record.mini_key};
     }
 
-    Status SkipListMemTable::put(
-        ByteView key,
-        ByteView value,
-        uint64_t seq,
-        uint8_t flags,
-        uint64_t precomputed_fp64,
-        uint64_t precomputed_mk
-    ) {
-        if (frozen_.load(std::memory_order_acquire)) {
-            return Status::Error(Status::Code::InvalidArgument, "memtable is frozen");
-        }
+    Status SkipListMemTable::put(ByteView key, ByteView value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64, uint64_t precomputed_mk) {
+        if (frozen_.load(std::memory_order_acquire)) { return Status::Error(Status::Code::InvalidArgument, "memtable is frozen"); }
 
-        if (key.size() > std::numeric_limits<uint16_t>::max() ||
-            value.size() > std::numeric_limits<uint16_t>::max()) {
+        if (key.size() > std::numeric_limits<uint16_t>::max() || value.size() > std::numeric_limits<uint16_t>::max()) {
             return Status::Error(Status::Code::InvalidArgument, "key/value too large for MemHdr16");
         }
 
@@ -287,11 +241,7 @@ namespace akkaradb::engine {
 
         const uint8_t level = random_level();
         const uint8_t observed_max = current_max_level_.load(std::memory_order_relaxed);
-        if (level > observed_max) {
-            for (uint8_t i = observed_max; i < level; ++i) {
-                update[i] = head_;
-            }
-        }
+        if (level > observed_max) { for (uint8_t i = observed_max; i < level; ++i) { update[i] = head_; } }
         Node* node = new_node(record, level);
         bytes_.fetch_add(sizeof(Node), std::memory_order_relaxed);
         entries_.fetch_add(1, std::memory_order_relaxed);
@@ -304,23 +254,17 @@ namespace akkaradb::engine {
         for (int i = static_cast<int>(level) - 1; i >= 0; --i) {
             update[static_cast<size_t>(i)]->next[static_cast<size_t>(i)].store(node, std::memory_order_release);
         }
-        if (level > observed_max) {
-            current_max_level_.store(level, std::memory_order_release);
-        }
+        if (level > observed_max) { current_max_level_.store(level, std::memory_order_release); }
 
         return Status::OK();
     }
 
     bool SkipListMemTable::get(ByteView key, uint64_t snapshot_seq, RecordView* out) const {
-        if (out == nullptr) {
-            return false;
-        }
+        if (out == nullptr) { return false; }
 
         const auto key_u8 = as_u8(key);
         Node* node = find_node(key_u8, nullptr, false);
-        if (node == nullptr || compare_node_key(node, key_u8) != 0) {
-            return false;
-        }
+        if (node == nullptr || compare_node_key(node, key_u8) != 0) { return false; }
 
         return visible_record(node, snapshot_seq, out);
     }
@@ -329,9 +273,7 @@ namespace akkaradb::engine {
         Node* current = head_->next[0].load(std::memory_order_acquire);
         while (current != nullptr) {
             RecordView visible;
-            if (visible_record(current, snapshot_seq, &visible)) {
-                co_yield visible;
-            }
+            if (visible_record(current, snapshot_seq, &visible)) { co_yield visible; }
             current = current->next[0].load(std::memory_order_acquire);
         }
     }
@@ -343,18 +285,12 @@ namespace akkaradb::engine {
     ) const {
         const std::span<const uint8_t> start{start_key.data(), start_key.size()};
         const std::span<const uint8_t> end{end_key.data(), end_key.size()};
-        if (!start.empty() && !end.empty() && compare_key_bytes(start, end) >= 0) {
-            co_return;
-        }
+        if (!start.empty() && !end.empty() && compare_key_bytes(start, end) >= 0) { co_return; }
 
-        Node* current = start.empty()
-            ? head_->next[0].load(std::memory_order_acquire)
-            : find_node(start, nullptr, false);
+        Node* current = start.empty() ? head_->next[0].load(std::memory_order_acquire) : find_node(start, nullptr, false);
 
         while (current != nullptr) {
-            if (!end.empty() && compare_node_key(current, end) >= 0) {
-                break;
-            }
+            if (!end.empty() && compare_node_key(current, end) >= 0) { break; }
 
             RecordView visible;
             if (visible_record(current, snapshot_seq, &visible)) {
@@ -362,20 +298,14 @@ namespace akkaradb::engine {
                     current = current->next[0].load(std::memory_order_acquire);
                     continue;
                 }
-                if (!end.empty() && visible.compare_key(end) >= 0) {
-                    break;
-                }
+                if (!end.empty() && visible.compare_key(end) >= 0) { break; }
                 co_yield visible;
             }
             current = current->next[0].load(std::memory_order_acquire);
         }
     }
 
-    ArenaGenerator<RecordView> SkipListMemTable::iterator(
-        ByteView start_key,
-        ByteView end_key,
-        uint64_t snapshot_seq
-    ) const {
+    ArenaGenerator<RecordView> SkipListMemTable::iterator(ByteView start_key, ByteView end_key, uint64_t snapshot_seq) const {
         const std::span<const uint8_t> start = as_u8(start_key);
         const std::span<const uint8_t> end = as_u8(end_key);
         std::vector<uint8_t> start_owned(start.begin(), start.end());
@@ -390,15 +320,9 @@ namespace akkaradb::engine {
         );
     }
 
-    void SkipListMemTable::freeze() {
-        frozen_.store(true, std::memory_order_release);
-    }
+    void SkipListMemTable::freeze() { frozen_.store(true, std::memory_order_release); }
 
-    size_t SkipListMemTable::sizeBytes() const {
-        return bytes_.load(std::memory_order_acquire);
-    }
+    size_t SkipListMemTable::sizeBytes() const { return bytes_.load(std::memory_order_acquire); }
 
-    size_t SkipListMemTable::entryCount() const {
-        return entries_.load(std::memory_order_acquire);
-    }
+    size_t SkipListMemTable::entryCount() const { return entries_.load(std::memory_order_acquire); }
 } // namespace akkaradb::engine

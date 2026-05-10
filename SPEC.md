@@ -1,4 +1,4 @@
-# AkkaraDB — Technical Specification v4
+# AkkaraDB  ETechnical Specification v4
 
 > Version 0.5.0 · C++23 · Copyright 2026 Swift Storm Studio · AGPL-3.0
 
@@ -43,7 +43,7 @@ leveled SST compaction.
 | Ordering     | Lexicographic on raw key bytes                           |
 | Concurrency  | All engine operations fully thread-safe                  |
 | Keys         | Binary-safe, arbitrary bytes, up to 65535 bytes          |
-| Values       | Binary-safe, arbitrary bytes, unlimited (≥16 KiB → Blob) |
+| Values       | Binary-safe, arbitrary bytes, unlimited (≥16 KiB ↁEBlob) |
 | Compression  | Per-file, self-describing: `None` or `Zstd`              |
 
 ### Non-Goals
@@ -55,58 +55,58 @@ leveled SST compaction.
 ## 2. Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      Public API                         │
-│      AkkaraDB   PackedTable<&T::field>   AkkEngine        │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-┌───────────────────────────▼─────────────────────────────┐
-│                      AkkEngine                          │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │               MemTable (N shards)                │   │
-│  │    ┌────────┐  ┌────────┐      ┌────────┐       │   │
-│  │    │ Shard0 │  │ Shard1 │  ... │ ShardN │       │   │
-│  │    │BPTree/ │  │BPTree/ │      │BPTree/ │       │   │
-│  │    │SkipList│  │SkipList│      │SkipList│       │   │
-│  │    └───┬────┘  └───┬────┘      └───┬────┘       │   │
-│  └────────┼───────────┼───────────────┼────────────┘   │
-│           │           │               │                  │
-│     ┌─────▼───┐  ┌────▼────┐   ┌─────▼────┐           │
-│     │  WAL    │  │  Blob   │   │   SST    │            │
-│     │ Writer  │  │ Manager │   │ Manager  │            │
-│     │(sharded)│  │(.blob)  │   │(L0..L6)  │            │
-│     └─────────┘  └─────────┘   └──────────┘            │
-│                                      │                   │
-│                                 ┌────▼─────┐            │
-│                                 │ Manifest │            │
-│                                 └──────────┘            │
-│                                                         │
-│     ┌───────────┐   ┌────────────┐                     │
-│     │VersionLog │   │  Cluster   │                     │
-│     │(optional) │   │  Manager   │                     │
-│     └───────────┘   └────────────┘                     │
-│                                                         │
-│     ┌──────────────────────────────┐                   │
-│     │ API Servers (TCP / HTTP)     │                   │
-│     │  Optional TLS via mbedTLS    │                   │
-│     └──────────────────────────────┘                   │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────━E
+━E                     Public API                         ━E
+━E     AkkaraDB   PackedTable<&T::field>   AkkEngine        ━E
+└───────────────────────────┬─────────────────────────────━E
+                            ━E
+┌───────────────────────────▼─────────────────────────────━E
+━E                     AkkEngine                          ━E
+━E                                                        ━E
+━E ┌─────────────────────────────────────────────────━E  ━E
+━E ━E              MemTable (N shards)                ━E  ━E
+━E ━E   ┌────────━E ┌────────━E     ┌────────━E      ━E  ━E
+━E ━E   ━EShard0 ━E ━EShard1 ━E ... ━EShardN ━E      ━E  ━E
+━E ━E   ━EPTree/ ━E ━EPTree/ ━E     ━EPTree/ ━E      ━E  ━E
+━E ━E   │SkipList━E │SkipList━E     │SkipList━E      ━E  ━E
+━E ━E   └───┬────━E └───┬────━E     └───┬────━E      ━E  ━E
+━E └────────┼───────────┼───────────────┼────────────━E  ━E
+━E          ━E          ━E              ━E                 ━E
+━E    ┌─────▼───━E ┌────▼────━E  ┌─────▼────━E          ━E
+━E    ━E WAL    ━E ━E Blob   ━E  ━E  SST    ━E           ━E
+━E    ━EWriter  ━E ━EManager ━E  ━EManager  ━E           ━E
+━E    ━Esharded)━E ━E.blob)  ━E  ━EL0..L6)  ━E           ━E
+━E    └─────────━E └─────────━E  └──────────━E           ━E
+━E                                     ━E                  ━E
+━E                                ┌────▼─────━E           ━E
+━E                                ━EManifest ━E           ━E
+━E                                └──────────━E           ━E
+━E                                                        ━E
+━E    ┌───────────━E  ┌────────────━E                    ━E
+━E    │VersionLog ━E  ━E Cluster   ━E                    ━E
+━E    ━Eoptional) ━E  ━E Manager   ━E                    ━E
+━E    └───────────━E  └────────────━E                    ━E
+━E                                                        ━E
+━E    ┌──────────────────────────────━E                  ━E
+━E    ━EAPI Servers (TCP / HTTP)     ━E                  ━E
+━E    ━E Optional TLS via mbedTLS    ━E                  ━E
+━E    └──────────────────────────────━E                  ━E
+└─────────────────────────────────────────────────────────━E
 ```
 
 ### Write Path
 
 ```
 put(key, value)
-  │
+  ━E
   ├─ compute key_fp64 (SipHash-2-4)
   ├─ select shard: fp64 & (shard_count - 1)
-  │
+  ━E
   ├─ [if value.size >= blob_threshold]
-  │    ├─ enqueue WAL entry (FLAG_BLOB, BlobRef 20B as value)
-  │    ├─ BlobManager::write(seq, value)
-  │    └─ MemTable::put(key, BlobRef, FLAG_BLOB, fp64)
-  │
+  ━E   ├─ enqueue WAL entry (FLAG_BLOB, BlobRef 20B as value)
+  ━E   ├─ BlobManager::write(seq, value)
+  ━E   └─ MemTable::put(key, BlobRef, FLAG_BLOB, fp64)
+  ━E
   └─ [else]
        ├─ enqueue WAL entry (FLAG_NORMAL, value)
        └─ MemTable::put(key, value, FLAG_NORMAL, fp64)
@@ -116,33 +116,33 @@ put(key, value)
 
 ```
 get(key)
-  │
+  ━E
   ├─ compute key_fp64
   ├─ select shard
   ├─ MemTable::find_into(key, out)
-  │    ├─ found, FLAG_NORMAL  → return value bytes
-  │    ├─ found, FLAG_BLOB    → BlobManager::read(blob_id) → return
-  │    ├─ found, TOMBSTONE    → return nullopt (do not check SST)
-  │    └─ not found          ↓
+  ━E   ├─ found, FLAG_NORMAL  ↁEreturn value bytes
+  ━E   ├─ found, FLAG_BLOB    ↁEBlobManager::read(blob_id) ↁEreturn
+  ━E   ├─ found, TOMBSTONE    ↁEreturn nullopt (do not check SST)
+  ━E   └─ not found          ↁE
   └─ SSTManager::get(key)
        ├─ L0 files (newest first, overlapping ranges)
        ├─ L1..L6 (binary search on level file list)
-       └─ bloom_check → index_seek → scan ≤128 records → return
+       └─ bloom_check ↁEindex_seek ↁEscan ≤128 records ↁEreturn
 ```
 
 ---
 
 ## 3. Record & Key Formats
 
-### 3.1 AKHdr32 — 32-Byte Record Header
+### 3.1 AKHdr32  E32-Byte Record Header
 
 All records (MemTable, WAL, SST) share this header. Layout is little-endian, `#pragma pack(1)`.
 
 ```
 Offset  Size  Field        Description
 ──────  ────  ───────────  ──────────────────────────────────────────
-  0      2    k_len        Key length in bytes (0–65535)
-  2      2    v_len        Value length in bytes (0–65535); inline ≤ blob_threshold, BlobRef = 20 B
+  0      2    k_len        Key length in bytes (0 E5535)
+  2      2    v_len        Value length in bytes (0 E5535); inline ≤ blob_threshold, BlobRef = 20 B
   4      2    reserved1    Reserved (0); reclaimed from formerly-wasted high 2 bytes of old u32 v_len
   6      8    seq          Monotonic write sequence number
  14      1    flags        Record type: NORMAL=0x00, TOMBSTONE=0x01, BLOB=0x02
@@ -160,19 +160,19 @@ Total  32 bytes
 - Bloom filter hashing in SST
 - Fast-rejection comparison in BPTree
 
-### 3.2 MemRecord — Owning In-Memory Record
+### 3.2 MemRecord  EOwning In-Memory Record
 
 ```
-┌──────────────────┬─────────────────────────────┐
-│   AKHdr32 (32B)  │      SmallBuffer (32B)       │
-│                  │  active_ptr(8) meta(2) inl(22)│
-└──────────────────┴─────────────────────────────┘
+┌──────────────────┬─────────────────────────────━E
+━E  AKHdr32 (32B)  ━E     SmallBuffer (32B)       ━E
+━E                 ━E active_ptr(8) meta(2) inl(22)━E
+└──────────────────┴─────────────────────────────━E
 Total: 64 bytes (both Debug and Release builds)
 ```
 
 `SmallBuffer` provides SSO-like inline storage: values ≤ 22 bytes are stored inline with no heap allocation.
 
-### 3.3 BlobRef — Inline Blob Reference
+### 3.3 BlobRef  EInline Blob Reference
 
 When a value is externalized to a `.blob` file, the MemTable/WAL stores a 20-byte `BlobRef` as the value:
 
@@ -193,30 +193,30 @@ The `FLAG_BLOB` flag in `AKHdr32.flags` signals that the value bytes are a `Blob
 **Primary key entry** (entity value):
 
 ```
-┌──────────────────────┬──────────────────────────────┐
-│   NS Prefix (8 B)    │     Encoded PK bytes          │
-│  FNV-1a-64(name)     │  BinPack::encode(entity.pk)   │
-└──────────────────────┴──────────────────────────────┘
-→ value: BinPack::encode(entity)   (all fields, declaration order)
+┌──────────────────────┬──────────────────────────────━E
+━E  NS Prefix (8 B)    ━E    Encoded PK bytes          ━E
+━E FNV-1a-64(name)     ━E BinPack::encode(entity.pk)   ━E
+└──────────────────────┴──────────────────────────────━E
+ↁEvalue: BinPack::encode(entity)   (all fields, declaration order)
 ```
 
 **Secondary index entry** (PK reference):
 ```
-┌──────────────────────┬──────────────────────────────┐
-│  Index Prefix (8 B)  │  Encoded field value bytes    │
-│  FNV-1a-64(name +    │  BinPack::encode(entity.field)│
-│  ":index:" +         │                               │
-│  field_name)         │                               │
-└──────────────────────┴──────────────────────────────┘
-→ value: BinPack::encode(pk)
+┌──────────────────────┬──────────────────────────────━E
+━E Index Prefix (8 B)  ━E Encoded field value bytes    ━E
+━E FNV-1a-64(name +    ━E BinPack::encode(entity.field)━E
+━E ":index:" +         ━E                              ━E
+━E field_name)         ━E                              ━E
+└──────────────────────┴──────────────────────────────━E
+ↁEvalue: BinPack::encode(pk)
 ```
 
-**Namespace prefix** is deterministic: same table name → same 8 bytes across all processes and restarts.
+**Namespace prefix** is deterministic: same table name ↁEsame 8 bytes across all processes and restarts.
 
 **Index prefix** is derived from `FNV-1a-64("<table_name>:index:<field_name>")`, where
 `field_name` is the C++ member name extracted at **compile time** via `member_name<MPtr>()`
 (parsing `__FUNCSIG__` on MSVC, `__PRETTY_FUNCTION__` on Clang/GCC).
-Name-based prefixes are **stable across struct layout changes** — adding, removing, or reordering
+Name-based prefixes are **stable across struct layout changes**  Eadding, removing, or reordering
 unrelated fields does not shift the index prefix, unlike an offset-based scheme.
 The prefix changes only when the field is renamed.
 
@@ -234,7 +234,7 @@ The prefix changes only when the field is renamed.
 
 Bump-pointer allocator used for BPTree node allocation. Block size: **256 KiB**.
 
-- **Allocation**: O(1), ~3–5 ns. No per-object free.
+- **Allocation**: O(1), ~3 E ns. No per-object free.
 - **Deallocation**: Entire arena freed as a unit when MemTable shard is flushed.
 - **Alignment**: 64-byte default for cache-line alignment.
 
@@ -260,9 +260,9 @@ RAII-owning aligned buffer. Uses `_aligned_malloc`/`_aligned_free` on Windows, `
 
 ### 5.1 Sharding
 
-- **Shard count**: Always a power of 2, range \[2, 256\]. Auto-derived from `expected_concurrent_writers` using birthday-paradox formula:
-  `S = next_pow2(⌈N×(N−1)×2.25⌉)`, minimum 2.
-- **Shard selection**: `key_fp64 & (shard_count - 1)` — branchless, ~1 ns, no integer division.
+- **Shard count**: Always a power of 2, range \[2, 256\]. Auto-derived from `expected_concurrent_writers` using birthday-paradox formula, then capped by `auto_shard_count_cap`:
+  `S = next_pow2(⌁EÁEN∁E)ÁE.25⌁E`, minimum 2.
+- **Shard selection**: `key_fp64 & (shard_count - 1)`  Ebranchless, ~1 ns, no integer division.
 - Each shard has its own `shared_mutex` (readers shared, writers exclusive).
 
 ### 5.2 Backends
@@ -285,7 +285,7 @@ Probabilistic ordered map with `p = 0.25`, `MAX_HEIGHT = 12`. Nodes allocated fr
 
 | Property        | Value                                    |
 |-----------------|------------------------------------------|
-| Expected height | ~log₄(N)                                 |
+| Expected height | ~log₁EN)                                 |
 | Point lookup    | O(log N) expected                        |
 | Node size       | 64B (MemRecord) + 4B (height) + pointers |
 | PRNG            | `std::mt19937` seeded at construction    |
@@ -299,7 +299,7 @@ Adaptive Radix Tree backend with path compression (`Node4/16/48/256`) and ordere
 1. Shard accumulates writes into active `IMemMap`.
 2. When `size_bytes > threshold_bytes_per_shard`: shard is sealed.
 3. Sealed map collected as `std::shared_ptr<IMemMap>`.
-4. Per-shard flusher thread calls `collect_sorted()` → sorted `vector<MemRecord>`.
+4. Per-shard flusher thread calls `collect_sorted()` ↁEsorted `vector<MemRecord>`.
 5. `FlushCallback` invoked with sorted records (typically writes an SST).
 6. `on_flushed(shard_id)` called to release the sealed map.
 
@@ -344,10 +344,10 @@ Total  32 bytes
 **Per-entry layout** (immediately follows previous entry or segment header):
 
 ```
-┌────────────────┬────────────┬─────────────┬──────────┐
-│  AKHdr32 (32B) │  key bytes │  value bytes│ crc32c(4)│
-└────────────────┴────────────┴─────────────┴──────────┘
-                               ↑ 0 bytes for tombstone
+┌────────────────┬────────────┬─────────────┬──────────━E
+━E AKHdr32 (32B) ━E key bytes ━E value bytes━Ecrc32c(4)━E
+└────────────────┴────────────┴─────────────┴──────────━E
+                               ↁE0 bytes for tombstone
 ```
 
 CRC32C covers: entire `AKHdr32` + key bytes + value bytes (not including the trailing CRC field).
@@ -396,7 +396,7 @@ Values whose size meets or exceeds `blob_threshold_bytes` (default: **16 384 byt
 
 ```
 {data_dir}/blobs/
-    00/   ← high byte of blob_id = 0x00
+    00/   ↁEhigh byte of blob_id = 0x00
         0000000000000001.blob
         0000000000000002.blob
     01/
@@ -431,13 +431,13 @@ Offset  Size  Field          Description
 ### 7.4 Write Path (Crash-Safe)
 
 1. Write to `{path}.tmp` (platform file I/O, fsync).
-2. Rename `.tmp` → `.blob` (atomic on all supported filesystems).
+2. Rename `.tmp` ↁE`.blob` (atomic on all supported filesystems).
 3. If the process crashes between steps 1 and 2, leftover `.tmp` files are harmless and can be purged at startup.
 
 ### 7.5 Delete Path (Crash-Safe, Two-Phase)
 
-1. `schedule_delete(blob_id)` → pushed to GC queue.
-2. GC worker renames `.blob` → `.blob.del` (atomic rename, crash-safe).
+1. `schedule_delete(blob_id)` ↁEpushed to GC queue.
+2. GC worker renames `.blob` ↁE`.blob.del` (atomic rename, crash-safe).
 3. GC worker deletes `.blob.del`.
 4. On startup, `startup_cleanup()` deletes any leftover `*.blob.del` files.
 
@@ -472,7 +472,7 @@ Offset  Size  Field          Description
 ──────  ────  ─────────────  ──────────────────────────────────────────
   0      4    magic          "AKSS"
   4      2    version        0x0001
-  6      1    level          0–6
+  6      1    level          0 E
   7      1    flags          Reserved (0)
   8      8    entry_count    Total records (including tombstones)
  16      8    data_size      Bytes in data section
@@ -491,8 +491,8 @@ Total  64 bytes
 
 | Section      | Offset         | Content                                                     |
 |--------------|----------------|-------------------------------------------------------------|
-| Data         | 64             | `[AKHdr32 \| key bytes \| value bytes \| crc32c(4)]` × N    |
-| Sparse index | `index_offset` | `[data_offset(8) \| key_len(2) \| key_bytes]` × index_count |
+| Data         | 64             | `[AKHdr32 \| key bytes \| value bytes \| crc32c(4)]` ÁEN    |
+| Sparse index | `index_offset` | `[data_offset(8) \| key_len(2) \| key_bytes]` ÁEindex_count |
 | Bloom filter | `bloom_offset` | Variable-length bit array                                   |
 
 **Sparse index stride**: One entry every 128 data records. First and last records always indexed.
@@ -500,7 +500,7 @@ Total  64 bytes
 ### 8.3 Bloom Filter
 
 - Hash function: double-hashing derived from `key_fp64`
-- Default: **10 bits per key** → ~1% false-positive rate
+- Default: **10 bits per key** ↁE~1% false-positive rate
 - On positive bloom hit: seek to nearest index entry, scan ≤128 records
 
 ### 8.4 Compaction Levels
@@ -510,7 +510,7 @@ Total  64 bytes
 | L0    | Overlapping (hash-sharded flush output) | `file_count ≥ max_l0_files` (default 8) |
 | L1–L6 | Non-overlapping, sorted by `first_key`  | `level_bytes > budget(n)`               |
 
-**Level budget**: `l1_max_bytes × level_multiplier^(n−1)`. Default: L1=10 MiB, L2=100 MiB, L3=1 GiB, …
+**Level budget**: `l1_max_bytes ÁElevel_multiplier^(n∁E)`. Default: L1=10 MiB, L2=100 MiB, L3=1 GiB, …
 
 **Tombstone elision**: Tombstones are dropped only when compacting into the **bottom level (L6)** and no older SST files remain that could contain the key.
 
@@ -543,7 +543,7 @@ Offset  Size  Field     Description
   6      2    flags     0 = full; 1 = delta-only
   8      8    created   Microseconds since epoch
  16      8    seq       Monotonic manifest record counter
- 24      4    crc32c    CRC32C of header (with crc32c=0)
+ 24      4    crc32c    CRC32C of full header (with crc32c=0)
  28      4    reserved  0
 ──────────────────────────────────────────────────────────────────
 Total  32 bytes
@@ -589,23 +589,25 @@ Optional per-key write history. When enabled, every `put` and `remove` is append
 - Full write history (`history(key)`)
 - Engine-level rollback (`rollback_to(seq)`, `rollback_key(key, seq)`)
 
-Enabled via `AkkEngineOptions::VersionLogOptions::enabled = true` or `StartupMode::DURABLE`.
+Enabled via AkkEngineOptions::VersionLogOptions::enabled = true or StartupMode::DURABLE.
+VersionLog v5 uses a dedicated on-disk format and does not read legacy v4 .akvlog files.
 
 ### 10.2 File Format
 
 **File**: `{data_dir}/history.akvlog`
 
-**File header** (32 bytes):
+**File header** (32 bytes, v5):
 
 ```
 Offset  Size  Field     Description
 ──────  ────  ────────  ──────────────────────────────────
-  0      4    magic     "AKVL"
+  0      4    magic     "AKV5"
   4      2    version   0x0001
-  6      2    flags     Reserved
-  8      8    created   Nanoseconds since Unix epoch
+  6      1    sync_mode_hint 0=Sync, 1=Async
+  7      1    reserved  0
+  8      8    created_ns Nanoseconds since Unix epoch
  16      8    reserved  0
- 24      4    crc32c    CRC32C of header (with crc32c=0)
+ 24      4    crc32c    CRC32C of full header (with crc32c=0)
  28      4    reserved  0
 ──────────────────────────────────────────────────────────
 Total  32 bytes
@@ -649,12 +651,11 @@ struct VersionEntry {
 
 `rollback_key(key, seq)`: Same as above for a single key.
 
-Rollback entries are written as normal put/remove operations; they are indistinguishable from user writes at the WAL level.
+Rollback entries are recorded as normal put/remove operations and include rollback metadata (`source_node_id = UINT64_MAX`, `flags |= 0x04`).
 
 ### 10.5 Recovery
 
-On `open()`, the `.akvlog` is replayed from the beginning. Entries with CRC32C mismatches are skipped (treated as truncated). The in-memory index (
-`key → list of VersionEntry`) is rebuilt from valid entries.
+On `open()`, the `.akvlog` is replayed from the beginning. Header CRC mismatch or unknown magic/version aborts recovery for the file. Per-entry CRC mismatches are skipped, while truncated/invalid-length entries terminate replay. The in-memory index (`key -> list of VersionEntry`) is rebuilt from valid entries.
 
 ---
 
@@ -706,10 +707,10 @@ Offset  Size  Field       Description
 
 | Method   | Path                               | Request        | Response              |
 |----------|------------------------------------|----------------|-----------------------|
-| `GET`    | `/v1/get?key=<encoded>`            | —              | 200 (raw bytes) / 404 |
+| `GET`    | `/v1/get?key=<encoded>`            |  E             | 200 (raw bytes) / 404 |
 | `POST`   | `/v1/put?key=<encoded>`            | raw bytes body | 204                   |
-| `DELETE` | `/v1/remove?key=<encoded>`         | —              | 204                   |
-| `GET`    | `/v1/get_at?key=<encoded>&seq=<n>` | —              | 200 / 404             |
+| `DELETE` | `/v1/remove?key=<encoded>`         |  E             | 204                   |
+| `GET`    | `/v1/get_at?key=<encoded>&seq=<n>` |  E             | 200 / 404             |
 
 - Content-Type: `application/octet-stream`
 - Keys: URL percent-encoded, binary-safe
@@ -739,7 +740,7 @@ consistent identity across restarts, even in non-cluster mode (used as `source_n
 
 ### 12.3 Replication Framing
 
-**Handshake — Client Hello** (22 bytes):
+**Handshake  EClient Hello** (22 bytes):
 
 ```
 Offset  Size  Field      Description
@@ -752,7 +753,7 @@ Offset  Size  Field      Description
 Total  22 bytes
 ```
 
-**Handshake — Server Hello** (22 bytes):
+**Handshake  EServer Hello** (22 bytes):
 
 ```
 Offset  Size  Field       Description
@@ -844,7 +845,7 @@ in `AkkEngineOptions::ApiOptions::tls`.
 
 | Mode         | WAL   | Sync      | VersionLog | MemTable threshold |
 |--------------|-------|-----------|------------|--------------------|
-| `ULTRA_FAST` | Off   | —         | Off        | 256 MiB/shard      |
+| `ULTRA_FAST` | Off   |  E        | Off        | 256 MiB/shard      |
 | `FAST`       | Async | group     | Off        | 128 MiB/shard      |
 | `NORMAL`     | Async | group     | Off        | 64 MiB/shard       |
 | `DURABLE`    | Sync  | per-write | On         | 32 MiB/shard       |
@@ -869,6 +870,7 @@ Individual options can be overridden via `AkkaraDB::Options::Overrides`.
 | Field                         | Default  | Description                                                           |
 |-------------------------------|----------|-----------------------------------------------------------------------|
 | `shard_count`                 | auto     | Power-of-2, \[2, 256\]; 0 = derive from `expected_concurrent_writers` |
+| `auto_shard_count_cap`        | 256      | Upper cap used only for auto-derived shard count (power-of-2, \[2, 256\]) |
 | `threshold_bytes_per_shard`   | 64 MiB   | Flush trigger per shard                                               |
 | `backend`                     | `BPTree` | `BPTree`, `SkipList`, or `ART`                                        |
 | `expected_concurrent_writers` | 0        | Used to auto-derive shard count                                       |
@@ -897,7 +899,7 @@ Individual options can be overridden via `AkkaraDB::Options::Overrides`.
 |--------------------------|---------|--------------------------------------------|
 | `max_level`              | 7       | Number of SST levels (1-based, so L0..L6)  |
 | `max_l0_files`           | 8       | L0→L1 compaction trigger                   |
-| `l1_max_bytes`           | 10 MiB  | L1 budget; each level × `level_multiplier` |
+| `l1_max_bytes`           | 10 MiB  | L1 budget; each level ÁE`level_multiplier` |
 | `level_multiplier`       | 10      | Exponential growth factor                  |
 | `target_file_size_bytes` | 4 MiB   | Compaction output file size                |
 | `bloom_bits_per_key`     | 10      | ~1% false-positive rate                    |
@@ -910,7 +912,7 @@ Individual options can be overridden via `AkkaraDB::Options::Overrides`.
 |-------------|---------------------------|-------------------------------|
 | `enabled`   | `false`                   | Enable write history tracking |
 | `log_path`  | `data_dir/history.akvlog` | History file path             |
-| `sync_mode` | `Async`                   | `Sync`, `Async`, or `Off`     |
+| `sync_mode` | `Async`                   | `Sync` or `Async`            |
 
 #### API Servers
 
@@ -982,7 +984,7 @@ eng.close();
 ### 15.3 PackedTable<PrimaryKeyPtr>
 
 ```cpp
-// Open — entity type and key type inferred from member pointer
+// Open  Eentity type and key type inferred from member pointer
 auto users = db->table<&User::id>("users");
 
 // With secondary indexes (fluent, rvalue chain)
@@ -1011,13 +1013,13 @@ while (it.has_next()) {
     auto [id, user] = it.next();
 }
 
-// Zero-overhead single-predicate query (FilterView<Pred> — template, inlined by compiler)
+// Zero-overhead single-predicate query (FilterView<Pred>  Etemplate, inlined by compiler)
 auto results = users
     .query([](const User& u) { return u.age > 21; })
     .limit(100)
     .to_vector();
 
-// Multi-predicate builder query (Query — chains .where() calls, uses std::function)
+// Multi-predicate builder query (Query  Echains .where() calls, uses std::function)
 auto results = users
     .query()
     .where([](const User& u) { return u.age > 21; })
@@ -1036,7 +1038,7 @@ size_t cnt = users.query([](const User& u) { return u.age > 18; }).count();
 
 **Thread-safety**: `PackedTable` is **not thread-safe**. `AkkEngine` (accessed via `engine()`) is.
 
-### 15.4 BinPack — Serialization Layer
+### 15.4 BinPack  ESerialization Layer
 
 Serialization is zero-config. All fields of an aggregate struct are serialized in
 declaration order via Boost.PFR. No specialization is required for:
@@ -1048,7 +1050,7 @@ declaration order via Boost.PFR. No specialization is required for:
 | Byte array  | `std::vector<uint8_t>` (optimized bulk path)                                                                                               |
 | Collections | `std::optional<T>`, `std::vector<T>`, `std::array<T,N>`, `std::map<K,V>`, `std::unordered_map<K,V>`, `std::pair<A,B>`, `std::tuple<Ts...>` |
 | Enums       | Serialized as `underlying_type`                                                                                                            |
-| Aggregates  | Any `struct` with no user-provided constructor — fields serialized recursively                                                             |
+| Aggregates  | Any `struct` with no user-provided constructor  Efields serialized recursively                                                             |
 
 For custom types, specialize `TypeAdapter<T>`:
 
@@ -1064,8 +1066,8 @@ struct akkaradb::binpack::TypeAdapter<MyType> {
 Direct BinPack API:
 
 ```cpp
-auto bytes = BinPack::encode(value);          // → vector<uint8_t>
-auto val   = BinPack::decode<T>(bytes);       // → T
+auto bytes = BinPack::encode(value);          // ↁEvector<uint8_t>
+auto val   = BinPack::decode<T>(bytes);       // ↁET
 BinPack::encode_into(value, buf);             // append to existing buffer
 size_t n   = BinPack::estimate_size(value);   // upper-bound estimate
 ```
@@ -1081,7 +1083,7 @@ size_t n   = BinPack::estimate_size(value);   // upper-bound estimate
 | `.akwal`  | `AKWA`        | `0x414B5741`   | `0x0001` |
 | `.aksst`  | `AKSS`        | `0x414B5353`   | `0x0001` |
 | `.blob`   | `AKBF`        | `0x4642414B`   | `0x0001` |
-| `.akvlog` | `AKVL`        | `0x4C564B41`   | `0x0001` |
+| `.akvlog` | `AKV5`        | `0x35564B41`   | `0x0001` |
 | `.akmf`   | `AKMF`        | `0x464D4B41`   | `0x0001` |
 | `.akcc`   | `AKCC`        | `0x4343414B`   | `0x0001` |
 
@@ -1207,7 +1209,7 @@ target_include_directories(my_app PRIVATE ${AKKARADB_INCLUDE_DIR})
 | `akkaradb/AkkaraDB.hpp`                       | `AkkaraDB`, `StartupMode`, `Options`                             |
 | `akkaradb/PackedTable.hpp`                    | `PackedTable<MPtr>`, `FilterView<Pred>`, `Query`, `Iterator`     |
 | `akkaradb/binpack/BinPack.hpp`                | `BinPack::encode`, `decode`, `encode_into`, `estimate_size`      |
-| `akkaradb/binpack/TypeAdapter.hpp`            | `TypeAdapter<T>` — specialize for custom types                   |
+| `akkaradb/binpack/TypeAdapter.hpp`            | `TypeAdapter<T>`  Especialize for custom types                   |
 | `akkaradb/binpack/detail/MemberPtrTraits.hpp` | `class_of<MPtr>`, `member_of<MPtr>`, `field_byte_offset<MPtr>()`, `member_name<MPtr>()` |
 | `akkaradb/detail/Hash.hpp`                    | `fnv1a_64`, `write_be64`, `read_be64`                            |
 

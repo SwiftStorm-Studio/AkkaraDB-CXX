@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/core/buffer/OwnedBuffer.hpp
+// internal\include\core\buffer\OwnedBuffer.hpp
 #pragma once
 
 #include <cstddef>
@@ -130,9 +130,7 @@ namespace akkaradb::core {
              * @brief Releases ownership and invokes the deleter.
              */
             void reset() noexcept {
-                if (data_) [[likely]] {
-                    deleter_(data_, size_, ctx_);
-                }
+                if (data_) [[likely]] { deleter_(data_, size_, ctx_); }
                 data_ = nullptr;
                 size_ = 0;
                 deleter_ = nullptr;

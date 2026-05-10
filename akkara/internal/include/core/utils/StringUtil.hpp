@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/core/utils/StringUtil.hpp
+// internal\include\core\utils\StringUtil.hpp
 #pragma once
 
 #include <cstring>
@@ -24,7 +24,6 @@
 #include "core/buffer/BufferArena.hpp"
 
 namespace akkaradb::core {
-
     /**
      * @brief Copies a string into memory managed by a BufferArena.
      *

@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/core/record/RecordView.hpp
+// internal\include\core\record\RecordView.hpp
 #pragma once
 
 #include <algorithm>
@@ -27,7 +27,7 @@
 
 namespace akkaradb::core {
     /**
-     * RecordView — unified zero-copy record view (MemTable + SST)
+     * RecordView  Eunified zero-copy record view (MemTable + SST)
      *
      * Purpose:
      *   - Provide a single read interface across:
@@ -44,14 +44,14 @@ namespace akkaradb::core {
      *
      * Layout (no fixed memory layout; logical structure):
      *
-     *   key_ptr_   → key bytes
-     *   val_ptr_   → value bytes
-     *   k_len_     → key length
-     *   v_len_     → value length
-     *   seq_       → sequence number
-     *   flags_     → tombstone etc.
-     *   key_fp64_  → hash fingerprint
-     *   mini_key_  → first ≤8 bytes of key (LE packed)
+     *   key_ptr_   ↁEkey bytes
+     *   val_ptr_   ↁEvalue bytes
+     *   k_len_     ↁEkey length
+     *   v_len_     ↁEvalue length
+     *   seq_       ↁEsequence number
+     *   flags_     ↁEtombstone etc.
+     *   key_fp64_  ↁEhash fingerprint
+     *   mini_key_  ↁEfirst ≤8 bytes of key (LE packed)
      *
      * Lifetime:
      *   - MemTable: tied to BufferArena lifetime
@@ -141,14 +141,9 @@ namespace akkaradb::core {
                 if (min_len >= 8) {
                     const uint64_t lhs8 = bswap64(mini_key_);
                     const uint64_t rhs8 = bswap64(other.mini_key_);
-                    if (lhs8 != rhs8) {
-                        return lhs8 < rhs8 ? -1 : 1;
-                    }
-                } else if (min_len > 0) {
-                    if (int c = std::memcmp(&mini_key_, &other.mini_key_, min_len); c != 0) {
-                        return c < 0 ? -1 : 1;
-                    }
+                    if (lhs8 != rhs8) { return lhs8 < rhs8 ? -1 : 1; }
                 }
+                else if (min_len > 0) { if (int c = std::memcmp(&mini_key_, &other.mini_key_, min_len); c != 0) { return c < 0 ? -1 : 1; } }
 
                 if (min_len > 8) { if (int c = std::memcmp(key_ + 8, other.key_ + 8, min_len - 8); c != 0) return c < 0 ? -1 : 1; }
 
@@ -165,14 +160,9 @@ namespace akkaradb::core {
                 if (min_len >= 8) {
                     const uint64_t lhs8 = bswap64(mini_key_);
                     const uint64_t rhs8 = bswap64(load_u64_unaligned(other.data()));
-                    if (lhs8 != rhs8) {
-                        return lhs8 < rhs8 ? -1 : 1;
-                    }
-                } else if (min_len > 0) {
-                    if (int c = std::memcmp(&mini_key_, other.data(), min_len); c != 0) {
-                        return c < 0 ? -1 : 1;
-                    }
+                    if (lhs8 != rhs8) { return lhs8 < rhs8 ? -1 : 1; }
                 }
+                else if (min_len > 0) { if (int c = std::memcmp(&mini_key_, other.data(), min_len); c != 0) { return c < 0 ? -1 : 1; } }
 
                 if (min_len > 8) { if (int c = std::memcmp(key_ + 8, other.data() + 8, min_len - 8); c != 0) return c < 0 ? -1 : 1; }
 

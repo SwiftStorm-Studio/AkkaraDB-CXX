@@ -16,6 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+// internal\include\engine\memtable\SkipListMemTable.hpp
 #pragma once
 
 #include <array>
@@ -52,11 +53,7 @@ namespace akkaradb::engine {
                 uint64_t precomputed_mk = 0
             ) override;
             [[nodiscard]] bool get(ByteView key, uint64_t snapshot_seq, RecordView* out) const override;
-            [[nodiscard]] ArenaGenerator<RecordView> iterator(
-                ByteView start_key,
-                ByteView end_key,
-                uint64_t snapshot_seq
-            ) const override;
+            [[nodiscard]] ArenaGenerator<RecordView> iterator(ByteView start_key, ByteView end_key, uint64_t snapshot_seq) const override;
             void freeze() override;
 
             [[nodiscard]] size_t sizeBytes() const override;
@@ -102,11 +99,7 @@ namespace akkaradb::engine {
             );
 
             [[nodiscard]] static int compare_node_key(const Node* node, std::span<const uint8_t> key) noexcept;
-            [[nodiscard]] Node* find_node(
-                std::span<const uint8_t> key,
-                std::array<Node*, MAX_LEVEL>* update,
-                bool writer_fast_path
-            ) const noexcept;
+            [[nodiscard]] Node* find_node(std::span<const uint8_t> key, std::array<Node*, MAX_LEVEL>* update, bool writer_fast_path) const noexcept;
 
             [[nodiscard]] bool visible_record(const Node* node, uint64_t snapshot_seq, RecordView* out) const noexcept;
             [[nodiscard]] static RecordView to_view(const core::OwnedRecord& record) noexcept;

@@ -28,38 +28,26 @@ namespace {
     size_t common_prefix_len(std::span<const uint8_t> a, std::span<const uint8_t> b) noexcept {
         const size_t n = std::min(a.size(), b.size());
         size_t i = 0;
-        while (i < n && a[i] == b[i]) {
-            ++i;
-        }
+        while (i < n && a[i] == b[i]) { ++i; }
         return i;
     }
 
     bool subtree_all_less_than(std::span<const uint8_t> subtree_prefix, std::span<const uint8_t> bound) noexcept {
-        if (bound.empty()) {
-            return false;
-        }
+        if (bound.empty()) { return false; }
 
         const size_t cp = common_prefix_len(subtree_prefix, bound);
         const size_t min_len = std::min(subtree_prefix.size(), bound.size());
-        if (cp == min_len) {
-            return false;
-        }
+        if (cp == min_len) { return false; }
         return subtree_prefix[cp] < bound[cp];
     }
 
     bool subtree_all_ge(std::span<const uint8_t> subtree_prefix, std::span<const uint8_t> bound) noexcept {
-        if (bound.empty()) {
-            return false;
-        }
+        if (bound.empty()) { return false; }
 
         const size_t cp = common_prefix_len(subtree_prefix, bound);
         const size_t min_len = std::min(subtree_prefix.size(), bound.size());
-        if (cp < min_len) {
-            return subtree_prefix[cp] > bound[cp];
-        }
-        if (bound.size() <= subtree_prefix.size()) {
-            return true;
-        }
+        if (cp < min_len) { return subtree_prefix[cp] > bound[cp]; }
+        if (bound.size() <= subtree_prefix.size()) { return true; }
         return false;
     }
 } // namespace
@@ -74,40 +62,28 @@ namespace akkaradb::engine {
         : data_arena_{data_arena_initial_block_size, data_arena_max_block_size},
           generator_arena_{generator_arena_initial_block_size, generator_arena_max_block_size} {}
 
-    std::span<const uint8_t> ARTMemTable::as_u8(ByteView view) noexcept {
-        return {reinterpret_cast<const uint8_t*>(view.data()), view.size()};
-    }
+    std::span<const uint8_t> ARTMemTable::as_u8(ByteView view) noexcept { return {reinterpret_cast<const uint8_t*>(view.data()), view.size()}; }
 
     int ARTMemTable::compare_key_bytes(std::span<const uint8_t> lhs, std::span<const uint8_t> rhs) noexcept {
         const size_t min_len = std::min(lhs.size(), rhs.size());
         if (min_len > 0) {
             const int cmp = std::memcmp(lhs.data(), rhs.data(), min_len);
-            if (cmp != 0) {
-                return cmp < 0 ? -1 : 1;
-            }
+            if (cmp != 0) { return cmp < 0 ? -1 : 1; }
         }
-        if (lhs.size() < rhs.size()) {
-            return -1;
-        }
-        if (lhs.size() > rhs.size()) {
-            return 1;
-        }
+        if (lhs.size() < rhs.size()) { return -1; }
+        if (lhs.size() > rhs.size()) { return 1; }
         return 0;
     }
 
     size_t ARTMemTable::common_prefix(std::span<const uint8_t> a, std::span<const uint8_t> b) noexcept {
         const size_t n = std::min(a.size(), b.size());
         size_t i = 0;
-        while (i < n && a[i] == b[i]) {
-            ++i;
-        }
+        while (i < n && a[i] == b[i]) { ++i; }
         return i;
     }
 
     const uint8_t* ARTMemTable::copy_prefix(std::span<const uint8_t> prefix) {
-        if (prefix.empty()) {
-            return nullptr;
-        }
+        if (prefix.empty()) { return nullptr; }
         std::byte* mem = data_arena_.allocate(prefix.size(), alignof(uint8_t));
         std::memcpy(mem, prefix.data(), prefix.size());
         bytes_.fetch_add(prefix.size(), std::memory_order_relaxed);
@@ -131,12 +107,8 @@ namespace akkaradb::engine {
         uint64_t precomputed_fp64,
         uint64_t precomputed_mk
     ) {
-        const uint64_t fp64 = precomputed_fp64 != 0
-            ? precomputed_fp64
-            : (key.empty() ? 0ULL : core::SSTHdr32::compute_key_fp64(key.data(), key.size()));
-        const uint64_t mini = precomputed_mk != 0
-            ? precomputed_mk
-            : (key.empty() ? 0ULL : core::SSTHdr32::build_mini_key(key.data(), key.size()));
+        const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : (key.empty() ? 0ULL : core::SSTHdr32::compute_key_fp64(key.data(), key.size()));
+        const uint64_t mini = precomputed_mk != 0 ? precomputed_mk : (key.empty() ? 0ULL : core::SSTHdr32::build_mini_key(key.data(), key.size()));
 
         core::OwnedRecord* record = arena_new<core::OwnedRecord>();
         core::OwnedRecord::create_inplace(*record, key, value, seq, flags, data_arena_, fp64, mini);
@@ -145,9 +117,7 @@ namespace akkaradb::engine {
     }
 
     void ARTMemTable::append_version(VersionChain* chain, const core::OwnedRecord* record, std::atomic<size_t>& entries) noexcept {
-        if (chain == nullptr) {
-            return;
-        }
+        if (chain == nullptr) { return; }
 
         chain->version.fetch_add(1, std::memory_order_acq_rel);
 
@@ -166,15 +136,11 @@ namespace akkaradb::engine {
     }
 
     bool ARTMemTable::visible_record(VersionChain* chain, uint64_t snapshot_seq, RecordView* out) noexcept {
-        if (chain == nullptr || out == nullptr) {
-            return false;
-        }
+        if (chain == nullptr || out == nullptr) { return false; }
 
         for (;;) {
             const uint64_t begin = chain->version.load(std::memory_order_acquire);
-            if ((begin & 1ULL) != 0ULL) {
-                continue;
-            }
+            if ((begin & 1ULL) != 0ULL) { continue; }
 
             const uint8_t head = chain->head.load(std::memory_order_relaxed);
             const uint8_t count = chain->count.load(std::memory_order_relaxed);
@@ -182,9 +148,8 @@ namespace akkaradb::engine {
             const core::OwnedRecord* selected = nullptr;
             if (count > 0) {
                 const core::OwnedRecord* newest = chain->ring[head].load(std::memory_order_relaxed);
-                if (newest != nullptr && newest->seq() <= snapshot_seq) {
-                    selected = newest;
-                } else {
+                if (newest != nullptr && newest->seq() <= snapshot_seq) { selected = newest; }
+                else {
                     for (uint8_t i = 1; i < count; ++i) {
                         const uint8_t idx = static_cast<uint8_t>((head - i) & (MAX_VERSIONS_PER_KEY - 1));
                         const core::OwnedRecord* candidate = chain->ring[idx].load(std::memory_order_relaxed);
@@ -198,9 +163,7 @@ namespace akkaradb::engine {
 
             const uint64_t end = chain->version.load(std::memory_order_acquire);
             if (begin == end && (end & 1ULL) == 0ULL) {
-                if (selected == nullptr) {
-                    return false;
-                }
+                if (selected == nullptr) { return false; }
                 *out = to_view(*selected);
                 return true;
             }
@@ -210,59 +173,34 @@ namespace akkaradb::engine {
     RecordView ARTMemTable::to_view(const core::OwnedRecord& record) noexcept {
         const auto key = record.key();
         const auto value = record.value();
-        return {
-            key.data(),
-            record.hdr.k_len,
-            value.data(),
-            record.hdr.v_len,
-            record.hdr.seq,
-            record.hdr.flags,
-            record.key_fp64,
-            record.mini_key
-        };
+        return {key.data(), record.hdr.k_len, value.data(), record.hdr.v_len, record.hdr.seq, record.hdr.flags, record.key_fp64, record.mini_key};
     }
 
     void ARTMemTable::export_children(const NodeBase* node, ChildVec& out) {
         out.clear();
-        if (node == nullptr) {
-            return;
-        }
+        if (node == nullptr) { return; }
         out.reserve(node->child_count);
-        for_each_child(node, [&](uint8_t key, NodeBase* child) {
-            out.emplace_back(key, child);
-        });
+        for_each_child(node, [&](uint8_t key, NodeBase* child) { out.emplace_back(key, child); });
     }
 
     ARTMemTable::NodeBase* ARTMemTable::find_child(const NodeBase* node, uint8_t key) noexcept {
-        if (node == nullptr) {
-            return nullptr;
-        }
+        if (node == nullptr) { return nullptr; }
 
         switch (node->kind) {
             case NodeBase::Kind::Node4: {
                 const auto* n = static_cast<const Node4*>(node);
-                for (uint16_t i = 0; i < n->child_count; ++i) {
-                    if (n->keys[i] == key) {
-                        return n->children[i];
-                    }
-                }
+                for (uint16_t i = 0; i < n->child_count; ++i) { if (n->keys[i] == key) { return n->children[i]; } }
                 return nullptr;
             }
             case NodeBase::Kind::Node16: {
                 const auto* n = static_cast<const Node16*>(node);
-                for (uint16_t i = 0; i < n->child_count; ++i) {
-                    if (n->keys[i] == key) {
-                        return n->children[i];
-                    }
-                }
+                for (uint16_t i = 0; i < n->child_count; ++i) { if (n->keys[i] == key) { return n->children[i]; } }
                 return nullptr;
             }
             case NodeBase::Kind::Node48: {
                 const auto* n = static_cast<const Node48*>(node);
                 const uint8_t idx = n->child_index[key];
-                if (idx == 0xFF) {
-                    return nullptr;
-                }
+                if (idx == 0xFF) { return nullptr; }
                 return n->children[idx];
             }
             case NodeBase::Kind::Node256: {
@@ -274,9 +212,7 @@ namespace akkaradb::engine {
     }
 
     bool ARTMemTable::child_at(const NodeBase* node, uint16_t index, uint8_t* edge, const NodeBase** child) noexcept {
-        if (node == nullptr || edge == nullptr || child == nullptr || index >= node->child_count) {
-            return false;
-        }
+        if (node == nullptr || edge == nullptr || child == nullptr || index >= node->child_count) { return false; }
 
         switch (node->kind) {
             case NodeBase::Kind::Node4: {
@@ -308,15 +244,9 @@ namespace akkaradb::engine {
         return false;
     }
 
-    ARTMemTable::NodeBase* ARTMemTable::build_node(
-        std::span<const uint8_t> prefix,
-        VersionChain* terminal,
-        const ChildVec& children
-    ) {
+    ARTMemTable::NodeBase* ARTMemTable::build_node(std::span<const uint8_t> prefix, VersionChain* terminal, const ChildVec& children) {
         ChildVec sorted = children;
-        std::sort(sorted.begin(), sorted.end(), [](const ChildEntry& a, const ChildEntry& b) {
-            return a.first < b.first;
-        });
+        std::sort(sorted.begin(), sorted.end(), [](const ChildEntry& a, const ChildEntry& b) { return a.first < b.first; });
 
         const uint8_t* prefix_ptr = copy_prefix(prefix);
         const uint16_t pfx_len = static_cast<uint16_t>(prefix.size());
@@ -369,29 +299,17 @@ namespace akkaradb::engine {
         return build_node(suffix, chain, empty);
     }
 
-    ARTMemTable::NodeBase* ARTMemTable::clone_with(
-        const NodeBase* node,
-        std::span<const uint8_t> prefix,
-        VersionChain* terminal,
-        const ChildVec& children
-    ) {
+    ARTMemTable::NodeBase* ARTMemTable::clone_with(const NodeBase* node, std::span<const uint8_t> prefix, VersionChain* terminal, const ChildVec& children) {
         (void)node;
         return build_node(prefix, terminal, children);
     }
 
-    ARTMemTable::InsertResult ARTMemTable::insert_recursive(
-        const NodeBase* node,
-        std::span<const uint8_t> key,
-        size_t depth,
-        const core::OwnedRecord* record
-    ) {
-        if (node == nullptr) {
-            return {build_leaf(key.subspan(depth), record), true, true};
-        }
+    ARTMemTable::InsertResult ARTMemTable::insert_recursive(const NodeBase* node, std::span<const uint8_t> key, size_t depth, const core::OwnedRecord* record) {
+        if (node == nullptr) { return {build_leaf(key.subspan(depth), record), true, true}; }
 
         const std::span<const uint8_t> node_prefix = node->prefix_len == 0
-            ? std::span<const uint8_t>{}
-            : std::span<const uint8_t>{node->prefix, node->prefix_len};
+                                                         ? std::span<const uint8_t>{}
+                                                         : std::span<const uint8_t>{node->prefix, node->prefix_len};
         const std::span<const uint8_t> remaining = key.subspan(depth);
 
         const size_t matched = common_prefix(node_prefix, remaining);
@@ -400,21 +318,15 @@ namespace akkaradb::engine {
             export_children(node, original_children);
 
             const uint8_t existing_edge = node_prefix[matched];
-            NodeBase* existing_child = clone_with(
-                node,
-                node_prefix.subspan(matched + 1),
-                node->terminal,
-                original_children
-            );
+            NodeBase* existing_child = clone_with(node, node_prefix.subspan(matched + 1), node->terminal, original_children);
 
             ChildVec split_children;
             split_children.reserve(2);
             split_children.emplace_back(existing_edge, existing_child);
 
             VersionChain* new_terminal = nullptr;
-            if (matched == remaining.size()) {
-                new_terminal = make_chain(record);
-            } else {
+            if (matched == remaining.size()) { new_terminal = make_chain(record); }
+            else {
                 const uint8_t new_edge = remaining[matched];
                 NodeBase* new_child = build_leaf(remaining.subspan(matched + 1), record);
                 split_children.emplace_back(new_edge, new_child);
@@ -448,9 +360,7 @@ namespace akkaradb::engine {
         }
 
         InsertResult child_result = insert_recursive(child, key, depth + 1, record);
-        if (!child_result.tree_changed) {
-            return {const_cast<NodeBase*>(node), false, child_result.inserted_new_key};
-        }
+        if (!child_result.tree_changed) { return {const_cast<NodeBase*>(node), false, child_result.inserted_new_key}; }
 
         ChildVec children;
         export_children(node, children);
@@ -464,36 +374,23 @@ namespace akkaradb::engine {
         return {updated, true, child_result.inserted_new_key};
     }
 
-    bool ARTMemTable::get_from_root(
-        const NodeBase* root,
-        std::span<const uint8_t> key,
-        uint64_t snapshot_seq,
-        RecordView* out
-    ) const {
-        if (root == nullptr || out == nullptr) {
-            return false;
-        }
+    bool ARTMemTable::get_from_root(const NodeBase* root, std::span<const uint8_t> key, uint64_t snapshot_seq, RecordView* out) const {
+        if (root == nullptr || out == nullptr) { return false; }
 
         const NodeBase* node = root;
         size_t depth = 0;
 
         while (node != nullptr) {
             const std::span<const uint8_t> prefix = node->prefix_len == 0
-                ? std::span<const uint8_t>{}
-                : std::span<const uint8_t>{node->prefix, node->prefix_len};
+                                                        ? std::span<const uint8_t>{}
+                                                        : std::span<const uint8_t>{node->prefix, node->prefix_len};
             const std::span<const uint8_t> remaining = key.subspan(depth);
             const size_t matched = common_prefix(prefix, remaining);
-            if (matched < prefix.size()) {
-                return false;
-            }
-            if (remaining.size() < prefix.size()) {
-                return false;
-            }
+            if (matched < prefix.size()) { return false; }
+            if (remaining.size() < prefix.size()) { return false; }
             depth += prefix.size();
 
-            if (depth == key.size()) {
-                return visible_record(node->terminal, snapshot_seq, out);
-            }
+            if (depth == key.size()) { return visible_record(node->terminal, snapshot_seq, out); }
 
             node = find_child(node, key[depth]);
             ++depth;
@@ -502,21 +399,13 @@ namespace akkaradb::engine {
         return false;
     }
 
-    ArenaGenerator<RecordView> ARTMemTable::iterate_snapshot_range(
-        uint64_t snapshot_seq,
-        std::vector<uint8_t> start_key,
-        std::vector<uint8_t> end_key
-    ) const {
+    ArenaGenerator<RecordView> ARTMemTable::iterate_snapshot_range(uint64_t snapshot_seq, std::vector<uint8_t> start_key, std::vector<uint8_t> end_key) const {
         const std::span<const uint8_t> start{start_key.data(), start_key.size()};
         const std::span<const uint8_t> end{end_key.data(), end_key.size()};
-        if (!start.empty() && !end.empty() && compare_key_bytes(start, end) >= 0) {
-            co_return;
-        }
+        if (!start.empty() && !end.empty() && compare_key_bytes(start, end) >= 0) { co_return; }
 
         const NodeBase* root = root_.load(std::memory_order_acquire);
-        if (root == nullptr) {
-            co_return;
-        }
+        if (root == nullptr) { co_return; }
 
         if (start.empty() && end.empty()) {
             struct FullScanFrame {
@@ -540,9 +429,7 @@ namespace akkaradb::engine {
                 if (!frame.terminal_done) {
                     frame.terminal_done = true;
                     RecordView visible;
-                    if (visible_record(node->terminal, snapshot_seq, &visible)) {
-                        co_yield visible;
-                    }
+                    if (visible_record(node->terminal, snapshot_seq, &visible)) { co_yield visible; }
                 }
 
                 if (frame.next_child >= node->child_count) {
@@ -575,9 +462,7 @@ namespace akkaradb::engine {
                         break;
                     }
                 }
-                if (child != nullptr) {
-                    stack.push_back({child, 0, false});
-                }
+                if (child != nullptr) { stack.push_back({child, 0, false}); }
             }
             co_return;
         }
@@ -632,12 +517,12 @@ namespace akkaradb::engine {
                 if (visible_record(node->terminal, snapshot_seq, &visible)) {
                     if (!start.empty() && visible.compare_key(start) < 0) {
                         // Skip keys below lower bound.
-                    } else if (!end.empty() && visible.compare_key(end) >= 0) {
+                    }
+                    else if (!end.empty() && visible.compare_key(end) >= 0) {
                         stop = true;
                         continue;
-                    } else {
-                        co_yield visible;
                     }
+                    else { co_yield visible; }
                 }
             }
 
@@ -650,9 +535,7 @@ namespace akkaradb::engine {
             uint8_t edge = 0;
             const NodeBase* child = nullptr;
             const uint16_t idx = frame.next_child++;
-            if (!child_at(node, idx, &edge, &child) || child == nullptr) {
-                continue;
-            }
+            if (!child_at(node, idx, &edge, &child) || child == nullptr) { continue; }
 
             const size_t parent_path_len = path.size();
             path.push_back(edge);
@@ -660,19 +543,9 @@ namespace akkaradb::engine {
         }
     }
 
-    Status ARTMemTable::put(
-        ByteView key,
-        ByteView value,
-        uint64_t seq,
-        uint8_t flags,
-        uint64_t precomputed_fp64,
-        uint64_t precomputed_mk
-    ) {
-        if (frozen_.load(std::memory_order_acquire)) {
-            return Status::Error(Status::Code::InvalidArgument, "memtable is frozen");
-        }
-        if (key.size() > std::numeric_limits<uint16_t>::max() ||
-            value.size() > std::numeric_limits<uint16_t>::max()) {
+    Status ARTMemTable::put(ByteView key, ByteView value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64, uint64_t precomputed_mk) {
+        if (frozen_.load(std::memory_order_acquire)) { return Status::Error(Status::Code::InvalidArgument, "memtable is frozen"); }
+        if (key.size() > std::numeric_limits<uint16_t>::max() || value.size() > std::numeric_limits<uint16_t>::max()) {
             return Status::Error(Status::Code::InvalidArgument, "key/value too large for MemHdr16");
         }
 
@@ -682,9 +555,7 @@ namespace akkaradb::engine {
 
         NodeBase* root = root_.load(std::memory_order_acquire);
         InsertResult result = insert_recursive(root, key_u8, 0, record);
-        if (result.tree_changed) {
-            root_.store(result.node, std::memory_order_release);
-        }
+        if (result.tree_changed) { root_.store(result.node, std::memory_order_release); }
         return Status::OK();
     }
 
@@ -694,11 +565,7 @@ namespace akkaradb::engine {
         return get_from_root(root, key_u8, snapshot_seq, out);
     }
 
-    ArenaGenerator<RecordView> ARTMemTable::iterator(
-        ByteView start_key,
-        ByteView end_key,
-        uint64_t snapshot_seq
-    ) const {
+    ArenaGenerator<RecordView> ARTMemTable::iterator(ByteView start_key, ByteView end_key, uint64_t snapshot_seq) const {
         const std::span<const uint8_t> start = as_u8(start_key);
         const std::span<const uint8_t> end = as_u8(end_key);
         std::vector<uint8_t> start_owned(start.begin(), start.end());
@@ -713,15 +580,9 @@ namespace akkaradb::engine {
         );
     }
 
-    void ARTMemTable::freeze() {
-        frozen_.store(true, std::memory_order_release);
-    }
+    void ARTMemTable::freeze() { frozen_.store(true, std::memory_order_release); }
 
-    size_t ARTMemTable::sizeBytes() const {
-        return bytes_.load(std::memory_order_acquire);
-    }
+    size_t ARTMemTable::sizeBytes() const { return bytes_.load(std::memory_order_acquire); }
 
-    size_t ARTMemTable::entryCount() const {
-        return entries_.load(std::memory_order_acquire);
-    }
+    size_t ARTMemTable::entryCount() const { return entries_.load(std::memory_order_acquire); }
 } // namespace akkaradb::engine

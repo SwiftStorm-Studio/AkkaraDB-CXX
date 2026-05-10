@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/core/record/SmallBuffer.hpp
+// internal\include\core\memory\SmallBuffer.hpp
 #pragma once
 
 #include <cassert>
@@ -26,9 +26,8 @@
 #include "core/buffer/BufferArena.hpp"
 
 namespace akkaradb::core {
-
     /**
-     * SmallBuffer — SSO + Arena backed contiguous byte buffer (32B fixed)
+     * SmallBuffer  ESSO + Arena backed contiguous byte buffer (32B fixed)
      *
      * Purpose:
      *   - Replace std::vector<uint8_t> with a cache-friendly fixed-size struct
@@ -38,26 +37,26 @@ namespace akkaradb::core {
      * Storage layout (exactly 32 bytes):
      *
      *   [0..7]   uint8_t* active_ptr_
-     *            → Always points to valid data
+     *            ↁEAlways points to valid data
      *              - inl_  (inline storage)
      *              - arena memory
      *
      *   [8..9]   uint16_t meta_
-     *            → Total byte size (key + value), max 65535
+     *            ↁETotal byte size (key + value), max 65535
      *
      *   [10..31] uint8_t inl_[22]
-     *            → Inline storage (INLINE_CAP = 22)
+     *            ↁEInline storage (INLINE_CAP = 22)
      *
      * Key design decisions:
      *   - No explicit "kind" field (inline vs arena)
-     *     → Determined via pointer comparison (active_ptr_ != inl_)
-     *     → Saves space, preserves 32B invariant
+     *     ↁEDetermined via pointer comparison (active_ptr_ != inl_)
+     *     ↁESaves space, preserves 32B invariant
      *
      *   - Branch-free data() access
-     *     → active_ptr_ always valid
+     *     ↁEactive_ptr_ always valid
      *
      *   - No destructor work
-     *     → Arena owns memory lifetime
+     *     ↁEArena owns memory lifetime
      *
      * Lifetime model:
      *   - Inline: owned by this object
@@ -92,65 +91,46 @@ namespace akkaradb::core {
 
         // ==================== Accessors ====================
 
-        [[nodiscard]] size_t size() const noexcept {
-            return meta_;
-        }
+        [[nodiscard]] size_t size() const noexcept { return meta_; }
 
-        [[nodiscard]] bool empty() const noexcept {
-            return meta_ == 0;
-        }
+        [[nodiscard]] bool empty() const noexcept { return meta_ == 0; }
 
         /**
          * Returns true if buffer uses arena-backed memory.
          *
-         * No extra metadata needed — pointer comparison is sufficient.
+         * No extra metadata needed  Epointer comparison is sufficient.
          */
-        [[nodiscard]] bool is_arena() const noexcept {
-            return active_ptr_ != inl_;
-        }
+        [[nodiscard]] bool is_arena() const noexcept { return active_ptr_ != inl_; }
 
         /**
          * Branch-free data access.
          */
-        [[nodiscard]] const uint8_t* data() const noexcept {
-            return active_ptr_;
-        }
+        [[nodiscard]] const uint8_t* data() const noexcept { return active_ptr_; }
 
-        [[nodiscard]] uint8_t* data() noexcept {
-            return active_ptr_;
-        }
+        [[nodiscard]] uint8_t* data() noexcept { return active_ptr_; }
 
         // ==================== Constructors ====================
 
         /**
          * Default: empty inline buffer.
          */
-        SmallBuffer() noexcept
-            : active_ptr_{inl_} {}
+        SmallBuffer() noexcept : active_ptr_{inl_} {}
 
         /**
          * Construct contiguous [key | value].
          *
          * Allocation strategy:
-         *   - <= 22 bytes → inline
-         *   - > 22 bytes  → arena
+         *   - <= 22 bytes ↁEinline
+         *   - > 22 bytes  ↁEarena
          */
-        SmallBuffer(
-            const uint8_t* key,
-            size_t k_len,
-            const uint8_t* val,
-            size_t v_len,
-            BufferArena& arena
-        ) {
+        SmallBuffer(const uint8_t* key, size_t k_len, const uint8_t* val, size_t v_len, BufferArena& arena) {
             const size_t n = k_len + v_len;
             assert(n <= 0xFFFF);
 
             meta_ = static_cast<uint16_t>(n);
 
             // Select storage (branch happens once at construction)
-            active_ptr_ = n <= INLINE_CAP
-                ? inl_
-                : reinterpret_cast<uint8_t*>(arena.allocate(n));
+            active_ptr_ = n <= INLINE_CAP ? inl_ : reinterpret_cast<uint8_t*>(arena.allocate(n));
 
             // Copy payload
             if (k_len) std::memcpy(active_ptr_, key, k_len);
@@ -173,16 +153,14 @@ namespace akkaradb::core {
          */
         SmallBuffer(SmallBuffer&& o) noexcept
             : meta_{o.meta_} {
-
             if (o.is_arena()) {
                 // Arena-backed: steal the external pointer
                 active_ptr_ = o.active_ptr_;
-            } else {
+            }
+            else {
                 // Inline: copy bytes to our own 'inl_' and point active_ptr_ here
                 active_ptr_ = inl_;
-                if (meta_ > 0) {
-                    std::memcpy(inl_, o.inl_, meta_);
-                }
+                if (meta_ > 0) { std::memcpy(inl_, o.inl_, meta_); }
             }
 
             // Ensure the source is left in a valid, empty inline state
@@ -196,13 +174,10 @@ namespace akkaradb::core {
             if (this == &o) return *this;
 
             meta_ = o.meta_;
-            if (o.is_arena()) {
-                active_ptr_ = o.active_ptr_;
-            } else {
+            if (o.is_arena()) { active_ptr_ = o.active_ptr_; }
+            else {
                 active_ptr_ = inl_;
-                if (meta_ > 0) {
-                    std::memcpy(inl_, o.inl_, meta_);
-                }
+                if (meta_ > 0) { std::memcpy(inl_, o.inl_, meta_); }
             }
 
             o.reset_to_empty();
@@ -234,5 +209,4 @@ namespace akkaradb::core {
 
     // Enforce strict layout guarantee (critical for OwnedRecord = 64B)
     static_assert(sizeof(SmallBuffer) == 32, "SmallBuffer must be 32 bytes");
-
 } // namespace akkaradb::core

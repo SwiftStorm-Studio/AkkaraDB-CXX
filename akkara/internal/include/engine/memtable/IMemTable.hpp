@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/engine/memtable/IMemTable.hpp
+// internal\include\engine\memtable\IMemTable.hpp
 #pragma once
 
 #include <cstddef>
@@ -115,11 +115,7 @@ namespace akkaradb::engine {
              * @param snapshot_seq Snapshot sequence boundary.
              * @return Generator of visible records within range.
              */
-            [[nodiscard]] virtual ArenaGenerator<RecordView> iterator(
-                ByteView start_key,
-                ByteView end_key,
-                uint64_t snapshot_seq
-            ) const = 0;
+            [[nodiscard]] virtual ArenaGenerator<RecordView> iterator(ByteView start_key, ByteView end_key, uint64_t snapshot_seq) const = 0;
 
             /**
              * @brief Freeze the MemTable into immutable state.

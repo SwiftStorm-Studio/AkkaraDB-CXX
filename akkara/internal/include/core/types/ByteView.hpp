@@ -16,14 +16,13 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/core/types/ByteView.hpp
+// internal\include\core\types\ByteView.hpp
 #pragma once
 
 #include <cstddef>
 #include <span>
 
 namespace akkaradb::core {
-
     /**
      * @brief Immutable view over contiguous binary data.
      *
@@ -47,5 +46,4 @@ namespace akkaradb::core {
      * - Arena-backed memory regions
      */
     using MutableByteView = std::span<std::byte>;
-
 } // namespace akkaradb::core
