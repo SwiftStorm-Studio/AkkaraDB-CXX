@@ -209,7 +209,6 @@ namespace akkaradb::engine::wal {
             static_cast<uint32_t>(value.size()),
             flags
         );
-        hdr.crc32c = entry_crc32c(hdr, key, value);
 
         std::vector<uint8_t> out;
         out.resize(hdr.entry_len);
@@ -221,6 +220,9 @@ namespace akkaradb::engine::wal {
             p += key.size();
         }
         if (!value.empty()) { std::memcpy(p, value.data(), value.size()); }
+
+        hdr.crc32c = crc32c_bytes(out.data(), out.size());
+        hdr.serialize(out.data());
         return out;
     }
 } // namespace akkaradb::engine::wal

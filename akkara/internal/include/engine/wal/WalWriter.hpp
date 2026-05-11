@@ -35,9 +35,12 @@ namespace akkaradb::engine::wal {
     struct WalOptions {
         std::filesystem::path wal_dir;
         WalSyncMode sync_mode = WalSyncMode::Sync;
-        uint16_t shard_count = 4;
+        // 0 means auto: one shard per hardware thread, capped at 16.
+        uint16_t shard_count = 0;
         uint32_t group_n = 128;
         uint32_t group_micros = 100;
+        uint64_t group_bytes = 4ULL * 1024ULL * 1024ULL;
+        uint64_t async_max_pending_bytes = 64ULL * 1024ULL * 1024ULL;
     };
 
     class WalWriter {

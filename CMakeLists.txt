@@ -296,6 +296,28 @@ set_target_properties(akkaradb_memtable_throughput_benchmark PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# ==================== WAL Throughput Benchmark ====================
+add_executable(akkaradb_wal_throughput_benchmark
+        benchmarks/wal_throughput_benchmark.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_wal_throughput_benchmark PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_wal_throughput_benchmark PRIVATE akkaradb)
+
+target_include_directories(akkaradb_wal_throughput_benchmark
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_wal_throughput_benchmark PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # ==================== VersionLog Smoke Test ====================
 add_executable(akkaradb_versionlog_smoke_test
         benchmarks/versionlog_smoke_test.cpp

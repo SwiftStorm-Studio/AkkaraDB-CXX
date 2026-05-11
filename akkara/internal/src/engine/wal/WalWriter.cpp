@@ -60,7 +60,10 @@ namespace akkaradb::engine::wal {
             );
         }
 
-        [[nodiscard]] bool is_power_of_two(uint16_t v) noexcept { return v != 0 && ((v & static_cast<uint16_t>(v - 1)) == 0u); }
+        [[nodiscard]] uint16_t resolve_auto_shard_count() noexcept {
+            const unsigned hw = std::thread::hardware_concurrency();
+            return static_cast<uint16_t>(std::clamp<unsigned>(hw == 0 ? 1u : hw, 1u, 16u));
+        }
 
         [[nodiscard]] uint32_t crc32c_bytes(const uint8_t* data, size_t size) noexcept {
             return cpu::CRC32C(reinterpret_cast<const std::byte*>(data), size);
@@ -180,7 +183,7 @@ namespace akkaradb::engine::wal {
 
         [[nodiscard]] uint16_t shard_for(uint64_t fp64, uint16_t shard_count) noexcept {
             if (shard_count <= 1) { return 0; }
-            return static_cast<uint16_t>(fp64 & static_cast<uint64_t>(shard_count - 1));
+            return static_cast<uint16_t>(fp64 % static_cast<uint64_t>(shard_count));
         }
     } // namespace
 
@@ -213,9 +216,18 @@ namespace akkaradb::engine::wal {
                     void append(PendingEntry entry) {
                         check_async_error();
                         if (options_.sync_mode == WalSyncMode::Async) {
+                            const uint64_t entry_bytes = static_cast<uint64_t>(entry.bytes.size());
                             {
-                                std::lock_guard lock{queue_mutex_};
+                                std::unique_lock lock{queue_mutex_};
+                                queue_space_cv_.wait(lock, [&] {
+                                    const uint64_t pending_bytes = queue_bytes_ + in_flight_bytes_;
+                                    return async_error_ ||
+                                           pending_bytes + entry_bytes <= options_.async_max_pending_bytes ||
+                                           (queue_.empty() && in_flight_bytes_ == 0);
+                                });
+                                if (async_error_) { std::rethrow_exception(async_error_); }
                                 queue_.push_back(std::move(entry));
+                                queue_bytes_ += entry_bytes;
                             }
                             queue_cv_.notify_one();
                             return;
@@ -362,16 +374,19 @@ namespace akkaradb::engine::wal {
                                     std::unique_lock lock{queue_mutex_};
                                     queue_cv_.wait(lock, [this] { return !queue_.empty() || !running_; });
                                     if (!running_ && queue_.empty()) { break; }
-                                    if (running_ && queue_.size() < options_.group_n) {
+                                    if (running_ && queue_.size() < options_.group_n && queue_bytes_ < options_.group_bytes) {
                                         queue_cv_.wait_for(
                                             lock,
                                             std::chrono::microseconds(options_.group_micros),
-                                            [this] { return queue_.size() >= options_.group_n || !running_; }
+                                            [this] { return queue_.size() >= options_.group_n || queue_bytes_ >= options_.group_bytes || !running_; }
                                         );
                                     }
                                     in_flight_ = true;
+                                    in_flight_bytes_ = queue_bytes_;
                                     std::swap(batch, queue_);
+                                    queue_bytes_ = 0;
                                 }
+                                queue_space_cv_.notify_all();
 
                                 if (!batch.empty()) {
                                     {
@@ -386,8 +401,10 @@ namespace akkaradb::engine::wal {
                                 {
                                     std::lock_guard lock{queue_mutex_};
                                     in_flight_ = false;
+                                    in_flight_bytes_ = 0;
                                 }
                                 queue_cv_.notify_all();
+                                queue_space_cv_.notify_all();
                             }
                         }
                         catch (...) {
@@ -395,8 +412,10 @@ namespace akkaradb::engine::wal {
                                 std::lock_guard lock{queue_mutex_};
                                 async_error_ = std::current_exception();
                                 in_flight_ = false;
+                                in_flight_bytes_ = 0;
                             }
                             queue_cv_.notify_all();
+                            queue_space_cv_.notify_all();
                         }
                     }
 
@@ -425,20 +444,27 @@ namespace akkaradb::engine::wal {
                     mutable std::mutex file_mutex_;
                     std::mutex queue_mutex_;
                     std::condition_variable queue_cv_;
+                    std::condition_variable queue_space_cv_;
                     std::vector<PendingEntry> queue_;
+                    uint64_t queue_bytes_ = 0;
                     bool running_ = false;
                     bool in_flight_ = false;
+                    uint64_t in_flight_bytes_ = 0;
                     std::exception_ptr async_error_;
                     std::thread thread_;
             };
 
             explicit Impl(WalOptions options) : options_{std::move(options)} {
                 if (options_.wal_dir.empty()) { throw std::invalid_argument("WAL directory is required"); }
-                if (!is_power_of_two(options_.shard_count) || options_.shard_count > 16) {
-                    throw std::invalid_argument("WAL shard_count must be one of 1,2,4,8,16");
+                if (options_.shard_count == 0) { options_.shard_count = resolve_auto_shard_count(); }
+                if (options_.shard_count > 16) {
+                    throw std::invalid_argument("WAL shard_count must be in range 1..16, or 0 for auto");
                 }
                 if (options_.group_n == 0) { options_.group_n = 128; }
                 if (options_.group_micros == 0) { options_.group_micros = 100; }
+                if (options_.group_bytes == 0) { options_.group_bytes = 4ULL * 1024ULL * 1024ULL; }
+                if (options_.async_max_pending_bytes == 0) { options_.async_max_pending_bytes = 64ULL * 1024ULL * 1024ULL; }
+                if (options_.async_max_pending_bytes < options_.group_bytes) { options_.async_max_pending_bytes = options_.group_bytes; }
 
                 shards_.reserve(options_.shard_count);
                 for (uint16_t i = 0; i < options_.shard_count; ++i) { shards_.push_back(std::make_unique<ShardWriter>(options_, i)); }
