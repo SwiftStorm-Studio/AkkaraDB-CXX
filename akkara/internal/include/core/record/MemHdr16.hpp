@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\core\record\MemHdr16.hpp
+// internal/include/core/record/MemHdr16.hpp
 #pragma once
 
 #include <cstdint>

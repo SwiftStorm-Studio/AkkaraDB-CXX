@@ -318,6 +318,50 @@ set_target_properties(akkaradb_versionlog_smoke_test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# ==================== Manifest Smoke Test ====================
+add_executable(akkaradb_manifest_smoke_test
+        benchmarks/manifest_smoke_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_manifest_smoke_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_manifest_smoke_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_manifest_smoke_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_manifest_smoke_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# ==================== WAL Smoke Test ====================
+add_executable(akkaradb_wal_smoke_test
+        benchmarks/wal_smoke_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_wal_smoke_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_wal_smoke_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_wal_smoke_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_wal_smoke_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 if (WIN32 AND BUILD_SHARED_LIBS)
     add_custom_command(TARGET akkaradb_benchmark POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different

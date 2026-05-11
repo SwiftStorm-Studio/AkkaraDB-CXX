@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\engine\memtable\BPTreeMemTable.hpp
+// internal/include/engine/memtable/BPTreeMemTable.hpp
 #pragma once
 
 #include <array>

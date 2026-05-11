@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\core\memory\SmallBuffer.hpp
+// internal/include/core/memory/SmallBuffer.hpp
 #pragma once
 
 #include <cassert>
@@ -27,7 +27,7 @@
 
 namespace akkaradb::core {
     /**
-     * SmallBuffer  ESSO + Arena backed contiguous byte buffer (32B fixed)
+     * SmallBuffer SSO + Arena backed contiguous byte buffer (32B fixed)
      *
      * Purpose:
      *   - Replace std::vector<uint8_t> with a cache-friendly fixed-size struct
@@ -37,26 +37,26 @@ namespace akkaradb::core {
      * Storage layout (exactly 32 bytes):
      *
      *   [0..7]   uint8_t* active_ptr_
-     *            ↁEAlways points to valid data
+     *            → Always points to valid data
      *              - inl_  (inline storage)
      *              - arena memory
      *
      *   [8..9]   uint16_t meta_
-     *            ↁETotal byte size (key + value), max 65535
+     *            → Total byte size (key + value), max 65535
      *
      *   [10..31] uint8_t inl_[22]
-     *            ↁEInline storage (INLINE_CAP = 22)
+     *            → Inline storage (INLINE_CAP = 22)
      *
      * Key design decisions:
      *   - No explicit "kind" field (inline vs arena)
-     *     ↁEDetermined via pointer comparison (active_ptr_ != inl_)
-     *     ↁESaves space, preserves 32B invariant
+     *     → Determined via pointer comparison (active_ptr_ != inl_)
+     *     → Saves space, preserves 32B invariant
      *
      *   - Branch-free data() access
-     *     ↁEactive_ptr_ always valid
+     *     → active_ptr_ always valid
      *
      *   - No destructor work
-     *     ↁEArena owns memory lifetime
+     *     → Arena owns memory lifetime
      *
      * Lifetime model:
      *   - Inline: owned by this object
@@ -98,7 +98,7 @@ namespace akkaradb::core {
         /**
          * Returns true if buffer uses arena-backed memory.
          *
-         * No extra metadata needed  Epointer comparison is sufficient.
+         * No extra metadata needed; pointer comparison is sufficient.
          */
         [[nodiscard]] bool is_arena() const noexcept { return active_ptr_ != inl_; }
 
@@ -120,8 +120,8 @@ namespace akkaradb::core {
          * Construct contiguous [key | value].
          *
          * Allocation strategy:
-         *   - <= 22 bytes ↁEinline
-         *   - > 22 bytes  ↁEarena
+         *   - <= 22 bytes → inline
+         *   - > 22 bytes  → arena
          */
         SmallBuffer(const uint8_t* key, size_t k_len, const uint8_t* val, size_t v_len, BufferArena& arena) {
             const size_t n = k_len + v_len;

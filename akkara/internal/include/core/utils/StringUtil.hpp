@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\core\utils\StringUtil.hpp
+// internal/include/core/utils/StringUtil.hpp
 #pragma once
 
 #include <cstring>

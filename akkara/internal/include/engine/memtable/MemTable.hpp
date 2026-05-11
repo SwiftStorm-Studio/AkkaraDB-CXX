@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\engine\memtable\MemTable.hpp
+// internal/include/engine/memtable/MemTable.hpp
 #pragma once
 
 #include <cstddef>

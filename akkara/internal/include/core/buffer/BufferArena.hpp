@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\core\buffer\BufferArena.hpp
+// internal/include/core/buffer/BufferArena.hpp
 #pragma once
 
 #include <cstddef>

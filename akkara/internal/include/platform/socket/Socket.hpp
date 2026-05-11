@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\platform\socket\Socket.hpp
+// internal/include/platform/socket/Socket.hpp
 #pragma once
 
 #include <cstddef>

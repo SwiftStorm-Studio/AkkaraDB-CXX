@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\core\utils\ArenaGenerator.hpp
+// internal/include/core/utils/ArenaGenerator.hpp
 #pragma once
 
 #include <coroutine>

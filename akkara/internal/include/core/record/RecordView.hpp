@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\core\record\RecordView.hpp
+// internal/include/core/record/RecordView.hpp
 #pragma once
 
 #include <algorithm>
@@ -27,7 +27,7 @@
 
 namespace akkaradb::core {
     /**
-     * RecordView  Eunified zero-copy record view (MemTable + SST)
+     * RecordView unified zero-copy record view (MemTable + SST)
      *
      * Purpose:
      *   - Provide a single read interface across:
@@ -44,14 +44,14 @@ namespace akkaradb::core {
      *
      * Layout (no fixed memory layout; logical structure):
      *
-     *   key_ptr_   ↁEkey bytes
-     *   val_ptr_   ↁEvalue bytes
-     *   k_len_     ↁEkey length
-     *   v_len_     ↁEvalue length
-     *   seq_       ↁEsequence number
-     *   flags_     ↁEtombstone etc.
-     *   key_fp64_  ↁEhash fingerprint
-     *   mini_key_  ↁEfirst ≤8 bytes of key (LE packed)
+     *   key_ptr_   → key bytes
+     *   val_ptr_   → value bytes
+     *   k_len_     → key length
+     *   v_len_     → value length
+     *   seq_       → sequence number
+     *   flags_     → tombstone etc.
+     *   key_fp64_  → hash fingerprint
+     *   mini_key_  → first ≤8 bytes of key (LE packed)
      *
      * Lifetime:
      *   - MemTable: tied to BufferArena lifetime

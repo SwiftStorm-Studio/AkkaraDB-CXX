@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\core\record\OwnedRecord.hpp
+// internal/include/core/record/OwnedRecord.hpp
 #pragma once
 
 #include <algorithm>
@@ -31,7 +31,7 @@
 
 namespace akkaradb::core {
     /**
-     * OwnedRecord  E64B fixed-size owning in-memory record
+     * OwnedRecord 64B fixed-size owning in-memory record
      *
      * Layout (exactly 64 bytes):
      *

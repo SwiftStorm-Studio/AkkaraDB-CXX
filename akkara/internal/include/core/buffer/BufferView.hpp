@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal\include\core\buffer\BufferView.hpp
+// internal/include/core/buffer/BufferView.hpp
 #pragma once
 
 #include <cstddef>
