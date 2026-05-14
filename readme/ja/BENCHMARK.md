@@ -6,14 +6,14 @@
 
 ## 現在使うターゲット
 
-| ターゲット | 目的 |
-|---|---|
-| `akkaradb_memtable_smoke_test` | MemTable backend の基本動作、snapshot、iterator、flush callback などの smoke test。 |
-| `akkaradb_memtable_throughput_benchmark` | Sharded MemTable の put / get / scan throughput と latency sample を測る。 |
-| `akkaradb_wal_smoke_test` | WAL append / recovery / tombstone / async force sync / corruption handling / rotation を確認する。 |
-| `akkaradb_wal_throughput_benchmark` | Sharded WAL の append / close drain / recovery throughput を測る。詳細は `readme/ja/WAL_SETUP.md` を参照。 |
-| `akkaradb_manifest_smoke_test` | Manifest の SST lifecycle record、compaction commit、CRC replay などを確認する。 |
-| `akkaradb_versionlog_smoke_test` | VersionLog の append / history / get_at / rollback 系の基本動作を確認する。 |
+| ターゲット                                    | 目的                                                                                             |
+|------------------------------------------|------------------------------------------------------------------------------------------------|
+| `akkaradb_memtable_smoke_test`           | MemTable backend の基本動作、snapshot、iterator、flush callback などの smoke test。                        |
+| `akkaradb_memtable_throughput_benchmark` | Sharded MemTable の put / get / scan throughput と latency sample を測る。                           |
+| `akkaradb_wal_smoke_test`                | WAL append / recovery / tombstone / async force sync / corruption handling / rotation を確認する。   |
+| `akkaradb_wal_throughput_benchmark`      | Sharded WAL の append / close drain / recovery throughput を測る。詳細は `readme/ja/WAL_SETUP.md` を参照。 |
+| `akkaradb_manifest_smoke_test`           | Manifest の SST lifecycle record、compaction commit、CRC replay などを確認する。                          |
+| `akkaradb_versionlog_smoke_test`         | VersionLog の append / history / get_at / rollback 系の基本動作を確認する。                                 |
 
 ## ビルド例
 

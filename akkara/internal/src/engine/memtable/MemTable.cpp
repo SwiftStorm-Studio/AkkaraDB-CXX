@@ -72,12 +72,11 @@ namespace akkaradb::engine::memtable {
 
             if (requested > 1) { return next_pow2_clamped(static_cast<uint64_t>(requested), 2, 256); }
 
-            const uint32_t effective_cap = next_pow2_clamped(static_cast<uint64_t>(auto_cap == 0 ? 256 : auto_cap), 2, 256);
+            const uint32_t effective_cap = next_pow2_clamped(static_cast<uint64_t>(auto_cap == 0 ? 128 : auto_cap), 2, 256);
 
             const size_t n = expected_concurrent_writers > 0 ? expected_concurrent_writers : std::max<size_t>(2, std::thread::hardware_concurrency());
 
-            const long double estimate = std::ceil(static_cast<long double>(n) * static_cast<long double>(n - 1) * 2.25L);
-            const uint64_t target = estimate < 2.0L ? 2ULL : static_cast<uint64_t>(estimate);
+            const uint64_t target = n <= 1 ? 1ULL : static_cast<uint64_t>(n) * 4ULL;
             return next_pow2_clamped(target, 2, effective_cap);
         }
 
@@ -135,6 +134,8 @@ namespace akkaradb::engine::memtable {
                 std::deque<Immutable> immutables;
                 std::atomic<std::shared_ptr<const PublishedTables>> published;
                 std::atomic<size_t> approx_bytes{0};
+                std::atomic<uint64_t> puts_applied{0};
+                std::atomic<uint64_t> removes_applied{0};
                 size_t active_bytes{0};
                 uint64_t next_immutable_id{1};
             };
@@ -265,15 +266,19 @@ namespace akkaradb::engine::memtable {
                     should_flush = threshold_bytes_per_shard_ > 0 && new_active_bytes > threshold_bytes_per_shard_;
                 }
 
-                puts_applied_.fetch_add(1, std::memory_order_relaxed);
+                shard.puts_applied.fetch_add(1, std::memory_order_relaxed);
                 advance_seq(seq);
                 if (should_flush) { trigger_flush(shard_index); }
             }
 
             void remove(std::span<const uint8_t> key, uint64_t seq, uint64_t precomputed_fp64, uint64_t precomputed_mk) {
-                put(key, {}, seq, RecordView::FLAG_TOMBSTONE, precomputed_fp64, precomputed_mk);
-                puts_applied_.fetch_sub(1, std::memory_order_relaxed);
-                removes_applied_.fetch_add(1, std::memory_order_relaxed);
+                const uint64_t fp64 = compute_fp64(key, precomputed_fp64);
+                const uint64_t mini = compute_mini(key, precomputed_mk);
+                const uint32_t shard_index = shard_for(fp64, shard_count_);
+
+                put(key, {}, seq, RecordView::FLAG_TOMBSTONE, fp64, mini);
+                shards_[shard_index]->puts_applied.fetch_sub(1, std::memory_order_relaxed);
+                shards_[shard_index]->removes_applied.fetch_add(1, std::memory_order_relaxed);
             }
 
             [[nodiscard]] bool get(std::span<const uint8_t> key, uint64_t snapshot_seq, RecordView* out) const {
@@ -392,6 +397,11 @@ namespace akkaradb::engine::memtable {
 
             [[nodiscard]] uint64_t next_seq() noexcept { return seq_gen_.fetch_add(1, std::memory_order_relaxed); }
 
+            [[nodiscard]] uint64_t reserve_seq(uint64_t count) {
+                if (count == 0) { return seq_gen_.load(std::memory_order_relaxed); }
+                return seq_gen_.fetch_add(count, std::memory_order_relaxed);
+            }
+
             [[nodiscard]] uint64_t last_seq() const noexcept { return seq_gen_.load(std::memory_order_relaxed); }
 
             void advance_seq(uint64_t observed_seq) noexcept {
@@ -437,12 +447,18 @@ namespace akkaradb::engine::memtable {
             }
 
             [[nodiscard]] MemTableSnapshot snapshot() const noexcept {
+                uint64_t puts = 0;
+                uint64_t removes = 0;
+                for (const auto& shard : shards_) {
+                    puts += shard->puts_applied.load(std::memory_order_relaxed);
+                    removes += shard->removes_applied.load(std::memory_order_relaxed);
+                }
                 return {
                     shard_count_,
                     static_cast<uint64_t>(threshold_bytes_per_shard_),
                     static_cast<uint64_t>(approx_size()),
-                    puts_applied_.load(std::memory_order_relaxed),
-                    removes_applied_.load(std::memory_order_relaxed),
+                    puts,
+                    removes,
                     flushes_completed_.load(std::memory_order_relaxed),
                 };
             }
@@ -515,8 +531,6 @@ namespace akkaradb::engine::memtable {
             std::vector<std::unique_ptr<Flusher>> flushers_;
 
             std::atomic<uint64_t> seq_gen_;
-            std::atomic<uint64_t> puts_applied_{0};
-            std::atomic<uint64_t> removes_applied_{0};
             std::atomic<uint64_t> flushes_completed_{0};
     };
 
@@ -565,6 +579,8 @@ namespace akkaradb::engine::memtable {
     MemTable::RangeIterator MemTable::iterator(const KeyRange& range, uint64_t snapshot_seq) const { return impl_->iterator(range, snapshot_seq); }
 
     uint64_t MemTable::next_seq() noexcept { return impl_->next_seq(); }
+
+    uint64_t MemTable::reserve_seq(uint64_t count) { return impl_->reserve_seq(count); }
 
     uint64_t MemTable::last_seq() const noexcept { return impl_->last_seq(); }
 

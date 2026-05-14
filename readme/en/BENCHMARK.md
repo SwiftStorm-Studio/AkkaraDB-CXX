@@ -6,14 +6,16 @@ The older `akkaradb_benchmark`-centered notes described SST, Blob, `AkkEngine`, 
 
 ## Current Targets
 
-| Target | Purpose |
-|---|---|
-| `akkaradb_memtable_smoke_test` | Smoke test for MemTable backends, snapshots, iterators, and flush callbacks. |
-| `akkaradb_memtable_throughput_benchmark` | Measures sharded MemTable put / get / scan throughput and sampled latency. |
-| `akkaradb_wal_smoke_test` | Checks WAL append, recovery, tombstones, async force sync, corruption handling, and rotation. |
-| `akkaradb_wal_throughput_benchmark` | Measures sharded WAL append, close drain, and recovery throughput. See `readme/ja/WAL_SETUP.md` for the detailed tuning notes. |
-| `akkaradb_manifest_smoke_test` | Checks Manifest SST lifecycle records, compaction commit, and CRC replay behavior. |
-| `akkaradb_versionlog_smoke_test` | Checks VersionLog append, history, get-at, and rollback behavior. |
+| Target                                   | Purpose                                                                                                                        |
+|------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
+| `akkaradb_memtable_smoke_test`           | Smoke test for MemTable backends, snapshots, iterators, and flush callbacks.                                                   |
+| `akkaradb_memtable_throughput_benchmark` | Measures sharded MemTable put / get / scan throughput and sampled latency.                                                     |
+| `akkaradb_wal_smoke_test`                | Checks WAL append, recovery, tombstones, async force sync, corruption handling, and rotation.                                  |
+| `akkaradb_wal_throughput_benchmark`      | Measures sharded WAL append, close drain, and recovery throughput. See `readme/ja/WAL_SETUP.md` for the detailed tuning notes. |
+| `akkaradb_sstable_smoke_test`            | Checks SST writer/reader round-trip, MemTable flush through SSTManager, recovery, compaction, and tombstone behavior.          |
+| `akkaradb_sstable_throughput_benchmark`  | Measures SST writer throughput, point-read throughput, full-scan throughput, sampled latency, and generated file bytes.        |
+| `akkaradb_manifest_smoke_test`           | Checks Manifest SST lifecycle records, compaction commit, and CRC replay behavior.                                             |
+| `akkaradb_versionlog_smoke_test`         | Checks VersionLog append, history, get-at, and rollback behavior.                                                              |
 
 ## Build Examples
 
@@ -22,6 +24,7 @@ Build individual Release targets:
 ```powershell
 cmake --build cmake-build-release --target akkaradb_memtable_throughput_benchmark --config Release
 cmake --build cmake-build-release --target akkaradb_wal_throughput_benchmark --config Release
+cmake --build cmake-build-release --target akkaradb_sstable_throughput_benchmark --config Release
 ```
 
 Build the smoke tests:
@@ -29,6 +32,7 @@ Build the smoke tests:
 ```powershell
 cmake --build cmake-build-release --target akkaradb_memtable_smoke_test --config Release
 cmake --build cmake-build-release --target akkaradb_wal_smoke_test --config Release
+cmake --build cmake-build-release --target akkaradb_sstable_smoke_test --config Release
 cmake --build cmake-build-release --target akkaradb_manifest_smoke_test --config Release
 cmake --build cmake-build-release --target akkaradb_versionlog_smoke_test --config Release
 ```
@@ -44,6 +48,7 @@ cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Too
 ```powershell
 cmake-build-release\bin\akkaradb_memtable_smoke_test.exe
 cmake-build-release\bin\akkaradb_wal_smoke_test.exe
+cmake-build-release\bin\akkaradb_sstable_smoke_test.exe
 cmake-build-release\bin\akkaradb_manifest_smoke_test.exe
 cmake-build-release\bin\akkaradb_versionlog_smoke_test.exe
 ```
@@ -58,4 +63,10 @@ WAL throughput:
 
 ```powershell
 cmake-build-release\bin\akkaradb_wal_throughput_benchmark.exe 200000 --writers=16 --sync=async --group-n=2048 --group-micros=500 --group-bytes=4MiB --max-pending-bytes=64MiB
+```
+
+SSTable throughput:
+
+```powershell
+cmake-build-release\bin\akkaradb_sstable_throughput_benchmark.exe 200000 --readers=16 --codec=zstd --block-size=32KiB --cache-bytes=64MiB
 ```

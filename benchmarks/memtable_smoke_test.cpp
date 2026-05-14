@@ -324,10 +324,11 @@ namespace {
 
         const uint64_t s1 = table->next_seq();
         table->put(as_u8("alpha"), as_u8("v1"), s1);
-        const uint64_t s2 = table->next_seq();
+        const uint64_t s2 = table->reserve_seq(2);
         table->remove(as_u8("alpha"), s2);
-        const uint64_t s3 = table->next_seq();
+        const uint64_t s3 = s2 + 1;
         table->put(as_u8("beta"), as_u8("v2"), s3);
+        assert(table->next_seq() == s3 + 1);
 
         std::vector<uint8_t> out;
         auto r1 = table->get_into(as_u8("beta"), s3, out);
@@ -508,8 +509,8 @@ namespace {
 
         auto table = memtable::MemTable::create(opts);
         const auto snap = table->snapshot();
-        // ceil(4 * 3 * 2.25) = 27, next_pow2(27) = 32
-        assert(snap.shard_count == 32);
+        // writers * 2 = 8, already power-of-two
+        assert(snap.shard_count == 8);
     }
 } // namespace
 

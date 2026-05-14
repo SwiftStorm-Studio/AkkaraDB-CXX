@@ -158,6 +158,7 @@ namespace akkaradb::engine {
             [[nodiscard]] static RecordView to_view(const core::OwnedRecord& record) noexcept;
 
             static void export_children(const NodeBase* node, ChildVec& out);
+            static void insert_child_sorted(ChildVec& children, uint8_t edge, NodeBase* child);
             [[nodiscard]] static NodeBase* find_child(const NodeBase* node, uint8_t key) noexcept;
             [[nodiscard]] static bool child_at(const NodeBase* node, uint16_t index, uint8_t* edge, const NodeBase** child) noexcept;
             template <typename Fn>

@@ -183,19 +183,33 @@ namespace akkaradb::engine {
         for_each_child(node, [&](uint8_t key, NodeBase* child) { out.emplace_back(key, child); });
     }
 
+    void ARTMemTable::insert_child_sorted(ChildVec& children, uint8_t edge, NodeBase* child) {
+        const auto pos = std::lower_bound(
+            children.begin(),
+            children.end(),
+            edge,
+            [](const ChildEntry& entry, uint8_t key) { return entry.first < key; }
+        );
+        children.insert(pos, ChildEntry{edge, child});
+    }
+
     ARTMemTable::NodeBase* ARTMemTable::find_child(const NodeBase* node, uint8_t key) noexcept {
         if (node == nullptr) { return nullptr; }
 
         switch (node->kind) {
             case NodeBase::Kind::Node4: {
                 const auto* n = static_cast<const Node4*>(node);
-                for (uint16_t i = 0; i < n->child_count; ++i) { if (n->keys[i] == key) { return n->children[i]; } }
-                return nullptr;
+                const void* found = std::memchr(n->keys.data(), key, n->child_count);
+                if (found == nullptr) { return nullptr; }
+                const auto idx = static_cast<size_t>(static_cast<const uint8_t*>(found) - n->keys.data());
+                return n->children[idx];
             }
             case NodeBase::Kind::Node16: {
                 const auto* n = static_cast<const Node16*>(node);
-                for (uint16_t i = 0; i < n->child_count; ++i) { if (n->keys[i] == key) { return n->children[i]; } }
-                return nullptr;
+                const void* found = std::memchr(n->keys.data(), key, n->child_count);
+                if (found == nullptr) { return nullptr; }
+                const auto idx = static_cast<size_t>(static_cast<const uint8_t*>(found) - n->keys.data());
+                return n->children[idx];
             }
             case NodeBase::Kind::Node48: {
                 const auto* n = static_cast<const Node48*>(node);
@@ -245,19 +259,16 @@ namespace akkaradb::engine {
     }
 
     ARTMemTable::NodeBase* ARTMemTable::build_node(std::span<const uint8_t> prefix, VersionChain* terminal, const ChildVec& children) {
-        ChildVec sorted = children;
-        std::sort(sorted.begin(), sorted.end(), [](const ChildEntry& a, const ChildEntry& b) { return a.first < b.first; });
-
         const uint8_t* prefix_ptr = copy_prefix(prefix);
         const uint16_t pfx_len = static_cast<uint16_t>(prefix.size());
-        const size_t n = sorted.size();
+        const size_t n = children.size();
 
         if (n <= 4) {
             Node4* node = arena_new<Node4>(prefix_ptr, pfx_len, terminal);
             node->child_count = static_cast<uint16_t>(n);
             for (size_t i = 0; i < n; ++i) {
-                node->keys[i] = sorted[i].first;
-                node->children[i] = sorted[i].second;
+                node->keys[i] = children[i].first;
+                node->children[i] = children[i].second;
             }
             return node;
         }
@@ -265,8 +276,8 @@ namespace akkaradb::engine {
             Node16* node = arena_new<Node16>(prefix_ptr, pfx_len, terminal);
             node->child_count = static_cast<uint16_t>(n);
             for (size_t i = 0; i < n; ++i) {
-                node->keys[i] = sorted[i].first;
-                node->children[i] = sorted[i].second;
+                node->keys[i] = children[i].first;
+                node->children[i] = children[i].second;
             }
             return node;
         }
@@ -275,9 +286,9 @@ namespace akkaradb::engine {
             node->child_count = static_cast<uint16_t>(n);
             node->child_index.fill(0xFF);
             for (size_t i = 0; i < n; ++i) {
-                node->ordered_keys[i] = sorted[i].first;
-                node->child_index[sorted[i].first] = static_cast<uint8_t>(i);
-                node->children[i] = sorted[i].second;
+                node->ordered_keys[i] = children[i].first;
+                node->child_index[children[i].first] = static_cast<uint8_t>(i);
+                node->children[i] = children[i].second;
             }
             return node;
         }
@@ -285,8 +296,8 @@ namespace akkaradb::engine {
         Node256* node = arena_new<Node256>(prefix_ptr, pfx_len, terminal);
         node->child_count = static_cast<uint16_t>(n);
         for (size_t i = 0; i < n; ++i) {
-            const uint8_t k = sorted[i].first;
-            NodeBase* child = sorted[i].second;
+            const uint8_t k = children[i].first;
+            NodeBase* child = children[i].second;
             node->ordered_keys[i] = k;
             node->children[k] = child;
         }
@@ -322,15 +333,21 @@ namespace akkaradb::engine {
 
             ChildVec split_children;
             split_children.reserve(2);
-            split_children.emplace_back(existing_edge, existing_child);
 
             VersionChain* new_terminal = nullptr;
             if (matched == remaining.size()) { new_terminal = make_chain(record); }
             else {
                 const uint8_t new_edge = remaining[matched];
                 NodeBase* new_child = build_leaf(remaining.subspan(matched + 1), record);
-                split_children.emplace_back(new_edge, new_child);
+                if (new_edge < existing_edge) {
+                    split_children.emplace_back(new_edge, new_child);
+                    split_children.emplace_back(existing_edge, existing_child);
+                } else {
+                    split_children.emplace_back(existing_edge, existing_child);
+                    split_children.emplace_back(new_edge, new_child);
+                }
             }
+            if (matched == remaining.size()) { split_children.emplace_back(existing_edge, existing_child); }
 
             NodeBase* parent = build_node(node_prefix.first(matched), new_terminal, split_children);
             return {parent, true, true};
@@ -354,7 +371,7 @@ namespace akkaradb::engine {
         if (child == nullptr) {
             ChildVec children;
             export_children(node, children);
-            children.emplace_back(edge, build_leaf(key.subspan(depth + 1), record));
+            insert_child_sorted(children, edge, build_leaf(key.subspan(depth + 1), record));
             NodeBase* updated = clone_with(node, node_prefix, node->terminal, children);
             return {updated, true, true};
         }
@@ -385,9 +402,8 @@ namespace akkaradb::engine {
                                                         ? std::span<const uint8_t>{}
                                                         : std::span<const uint8_t>{node->prefix, node->prefix_len};
             const std::span<const uint8_t> remaining = key.subspan(depth);
-            const size_t matched = common_prefix(prefix, remaining);
-            if (matched < prefix.size()) { return false; }
             if (remaining.size() < prefix.size()) { return false; }
+            if (!prefix.empty() && std::memcmp(prefix.data(), remaining.data(), prefix.size()) != 0) { return false; }
             depth += prefix.size();
 
             if (depth == key.size()) { return visible_record(node->terminal, snapshot_seq, out); }

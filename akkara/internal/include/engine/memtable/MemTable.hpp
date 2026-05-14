@@ -41,7 +41,7 @@ namespace akkaradb::engine::memtable {
             struct Options {
                 size_t shard_count = 0;
                 size_t expected_concurrent_writers = 0;
-                size_t auto_shard_count_cap = 256;
+                size_t auto_shard_count_cap = 128;
                 size_t threshold_bytes_per_shard = 64ULL * 1024 * 1024;
                 MemTableFactory backend_factory = nullptr;
                 FlushCallback on_flush = nullptr;
@@ -111,6 +111,7 @@ namespace akkaradb::engine::memtable {
             [[nodiscard]] RangeIterator iterator(const KeyRange& range, uint64_t snapshot_seq) const;
 
             [[nodiscard]] uint64_t next_seq() noexcept;
+            [[nodiscard]] uint64_t reserve_seq(uint64_t count);
             [[nodiscard]] uint64_t last_seq() const noexcept;
 
             void flush_hint();

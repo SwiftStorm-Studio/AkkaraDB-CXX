@@ -318,6 +318,28 @@ set_target_properties(akkaradb_wal_throughput_benchmark PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# ==================== SSTable Throughput Benchmark ====================
+add_executable(akkaradb_sstable_throughput_benchmark
+        benchmarks/sstable_throughput_benchmark.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_sstable_throughput_benchmark PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_sstable_throughput_benchmark PRIVATE akkaradb)
+
+target_include_directories(akkaradb_sstable_throughput_benchmark
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_sstable_throughput_benchmark PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # ==================== VersionLog Smoke Test ====================
 add_executable(akkaradb_versionlog_smoke_test
         benchmarks/versionlog_smoke_test.cpp
@@ -359,6 +381,28 @@ target_include_directories(akkaradb_manifest_smoke_test
 )
 
 set_target_properties(akkaradb_manifest_smoke_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# ==================== SSTable Smoke Test ====================
+add_executable(akkaradb_sstable_smoke_test
+        benchmarks/sstable_smoke_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_sstable_smoke_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_sstable_smoke_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_sstable_smoke_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_sstable_smoke_test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 

@@ -44,7 +44,8 @@ namespace akkaradb::core {
      * - Fixed size: Exactly 32 bytes (cache-line friendly, predictable IO)
      * - Naturally aligned: No packing directives; preserves 8-byte alignment
      * - On-disk optimized: Includes fingerprint and prefix hint for fast seek
-     * - Forward-compatible: version + reserved allow safe evolution
+     * - Forward-compatible: SST file header owns the format version; reserved
+     *   bytes allow record-local evolution without changing the hot header size
      * - POD type: Trivially copyable, standard layout
      *
      * Notes:

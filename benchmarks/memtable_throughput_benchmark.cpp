@@ -85,14 +85,14 @@ namespace {
     };
 
     struct BenchConfig {
-        int ops_per_case = 200000;
+        int ops_per_case = 500000;
         int writer_threads = 16;
         uint32_t requested_shards = 0;
-        uint32_t auto_shard_count_cap = 256;
+        uint32_t auto_shard_count_cap = 128;
         uint64_t threshold_bytes_per_shard = kAutoFlushDisabledThreshold;
         bool flush_after_scan = false;
         bool use_prehash = false;
-        BackendKind backend = BackendKind::ART;
+        BackendKind backend = BackendKind::BPTree;
     };
 
     [[nodiscard]] static uint32_t next_pow2_clamped(uint64_t n, uint32_t min_value, uint32_t max_value) {
@@ -121,20 +121,11 @@ namespace {
             return next_pow2_clamped(static_cast<uint64_t>(requested), 2, 256);
         }
 
-        const uint32_t effective_cap = next_pow2_clamped(
-            static_cast<uint64_t>(auto_cap == 0 ? 256 : auto_cap),
-            2,
-            256
-        );
+        const uint32_t effective_cap = next_pow2_clamped(static_cast<uint64_t>(auto_cap == 0 ? 128 : auto_cap), 2, 256);
         const size_t n = expected_concurrent_writers > 0
             ? expected_concurrent_writers
             : std::max<size_t>(2, std::thread::hardware_concurrency());
-        const long double estimate = std::ceil(
-            static_cast<long double>(n) *
-            static_cast<long double>(n - 1) *
-            2.25L
-        );
-        const uint64_t target = estimate < 2.0L ? 2ULL : static_cast<uint64_t>(estimate);
+        const uint64_t target = n <= 1 ? 1ULL : static_cast<uint64_t>(n) * 4ULL;
         return next_pow2_clamped(target, 2, effective_cap);
     }
 
@@ -344,10 +335,15 @@ namespace {
         for (int tid = 0; tid < writer_threads; ++tid) {
             threads.emplace_back([&, tid]() {
                 auto& samples = local_samples[static_cast<size_t>(tid)];
-                for (size_t i = static_cast<size_t>(tid); i < keys.size(); i += static_cast<size_t>(writer_threads)) {
+                const size_t stride = static_cast<size_t>(writer_threads);
+                const size_t first = static_cast<size_t>(tid);
+                const size_t op_count = first < keys.size() ? ((keys.size() - first + stride - 1) / stride) : 0;
+                const uint64_t seq_base = memtable.reserve_seq(static_cast<uint64_t>(op_count));
+                uint64_t seq_offset = 0;
+                for (size_t i = first; i < keys.size(); i += stride) {
                     const bool do_sample = ((static_cast<uint32_t>(i) & kLatencySampleMask) == 0);
                     const auto t0 = do_sample ? Clock::now() : Clock::time_point{};
-                    const uint64_t seq = memtable.next_seq();
+                    const uint64_t seq = seq_base + seq_offset++;
                     memtable.put(
                         as_u8(keys[i]),
                         as_u8(value),
@@ -513,7 +509,7 @@ namespace {
         int writer_threads,
         const BenchConfig& config
     ) {
-        const int warmup_ops = std::min(ops_per_case, 50000);
+        const int warmup_ops = std::min(ops_per_case, 100000);
 
         std::vector<std::string> keys;
         keys.reserve(static_cast<size_t>(ops_per_case));
@@ -699,7 +695,7 @@ int main(int argc, char** argv) {
         std::printf("writer_threads = %d\n", config.writer_threads);
     }
     if (config.requested_shards == 0) {
-        std::printf("resolved_shards = %u (auto, birthday heuristic, cap %u)\n", shard_count, config.auto_shard_count_cap);
+        std::printf("resolved_shards = %u (auto, writers*4 locality heuristic, cap %u)\n", shard_count, config.auto_shard_count_cap);
     } else if (config.requested_shards == shard_count) {
         std::printf("resolved_shards = %u (explicit)\n", shard_count);
     } else {
