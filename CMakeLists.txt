@@ -384,6 +384,28 @@ set_target_properties(akkaradb_manifest_smoke_test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# ==================== Cluster Smoke Test ====================
+add_executable(akkaradb_cluster_smoke_test
+        benchmarks/cluster_smoke_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_cluster_smoke_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_cluster_smoke_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_cluster_smoke_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_cluster_smoke_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # ==================== SSTable Smoke Test ====================
 add_executable(akkaradb_sstable_smoke_test
         benchmarks/sstable_smoke_test.cpp

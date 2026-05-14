@@ -25,6 +25,19 @@ namespace {
         return dir;
     }
 
+    static std::filesystem::path latest_manifest_file(const std::filesystem::path& base) {
+        if (std::filesystem::exists(base)) {
+            return base;
+        }
+        for (size_t i = 1; i < 10000; ++i) {
+            auto rotated = base.parent_path() / (base.filename().string() + "." + std::to_string(i));
+            if (std::filesystem::exists(rotated)) {
+                return rotated;
+            }
+        }
+        return base;
+    }
+
     static void test_basic_state_and_replay() {
         const auto dir = make_temp_dir("basic");
         const auto path = dir / "manifest.akmf";
@@ -92,7 +105,7 @@ namespace {
         }
 
         {
-            std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+            std::fstream file(latest_manifest_file(path), std::ios::in | std::ios::out | std::ios::binary);
             assert(file.good());
             // Corrupt first record payload byte after 32B file header + 8B rec header.
             file.seekp(40, std::ios::beg);
@@ -115,4 +128,3 @@ int main() {
     std::printf("manifest smoke test passed\n");
     return 0;
 }
-

@@ -19,12 +19,20 @@
 // internal/include/net/tls/TlsStream.hpp
 #pragma once
 
-#include "platform/socket/Socket.hpp"
-
 #include <cstddef>
 #include <cstdint>
 
 namespace akkaradb::net {
+    struct TlsConfig {
+        const char* cert_path = nullptr;
+        const char* key_path = nullptr;
+        const char* ca_path = nullptr;
+        const unsigned char* psk = nullptr;
+        std::size_t psk_len = 0;
+        const char* psk_identity = nullptr;
+        bool verify_peer = true;
+    };
+
     /**
      * @brief TLS stream over a TCP socket.
      *
@@ -50,7 +58,14 @@ namespace akkaradb::net {
              *
              * @throws std::runtime_error on failure
              */
-            void connect(const char* host, uint16_t port);
+            void connect(const char* host, uint16_t port, const TlsConfig& config = {});
+
+            /**
+             * @brief Adopt an accepted TCP socket and complete a server-side TLS handshake.
+             *
+             * The stream owns @p native_socket after this call starts, even if the handshake fails.
+             */
+            void accept(std::uintptr_t native_socket, const TlsConfig& config = {});
 
             /**
              * @brief Send data over TLS.
@@ -72,15 +87,22 @@ namespace akkaradb::net {
             void close() noexcept;
 
             /**
+             * @brief Shutdown the underlying TCP socket without destroying TLS state.
+             *
+             * This is used to unblock another thread currently waiting in recv().
+             */
+            void shutdown() noexcept;
+
+            /**
              * @brief Check if stream is connected.
              */
             [[nodiscard]] bool valid() const noexcept;
 
         private:
-            platform::Socket socket_;
-
             // Opaque TLS state (implementation-specific)
             struct Impl;
             Impl* impl_ = nullptr;
+
+            void setup(const TlsConfig& config, int endpoint, const char* hostname);
     };
 } //akkaradb::net
