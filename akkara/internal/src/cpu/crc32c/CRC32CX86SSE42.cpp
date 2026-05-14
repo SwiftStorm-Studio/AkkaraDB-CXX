@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/cpu/crc32c/CRC32CX86SSE42.cpp
+// internal/src/cpu/crc32c/CRC32CX86SSE42.cpp
 #if defined(__x86_64__) || defined(_M_X64) || defined(_M_IX86)
 
 #include <cstddef>

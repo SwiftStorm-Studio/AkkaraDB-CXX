@@ -16,6 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+// internal/src/engine/memtable/SkipListMemTable.cpp
 #include "engine/memtable/SkipListMemTable.hpp"
 
 #include <algorithm>
@@ -25,8 +26,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/record/KeyFingerprint.hpp"
 #include "core/record/MemHdr16.hpp"
-#include "core/record/SSTHdr32.hpp"
 
 namespace akkaradb::engine {
     namespace {
@@ -102,8 +103,8 @@ namespace akkaradb::engine {
         uint64_t precomputed_fp64,
         uint64_t precomputed_mk
     ) {
-        const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : (key.empty() ? 0 : core::SSTHdr32::compute_key_fp64(key.data(), key.size()));
-        const uint64_t mini = precomputed_mk != 0 ? precomputed_mk : (key.empty() ? 0 : core::SSTHdr32::build_mini_key(key.data(), key.size()));
+        const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : (key.empty() ? 0 : core::compute_key_fp64(key.data(), key.size()));
+        const uint64_t mini = precomputed_mk != 0 ? precomputed_mk : (key.empty() ? 0 : core::build_mini_key(key.data(), key.size()));
 
         core::OwnedRecord* record = arena_new<core::OwnedRecord>(data_arena_);
         core::OwnedRecord::create_inplace(*record, key, value, seq, flags, data_arena_, fp64, mini);

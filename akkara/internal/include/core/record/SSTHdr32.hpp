@@ -19,6 +19,8 @@
 // internal/include/core/record/SSTHdr32.hpp
 #pragma once
 
+#include "core/record/KeyFingerprint.hpp"
+
 #include <cstdint>
 #include <type_traits>
 
@@ -90,13 +92,15 @@ namespace akkaradb::core {
         /**
          * Computes SipHash-2-4 fingerprint of a key.
          *
-         * Uses the default seed: 0x5AD6DCD676D23C25
+         * Compatibility wrapper for core::compute_key_fp64().
          *
          * @param key Key data
          * @param key_len Key length
          * @return 64-bit fingerprint
          */
-        [[nodiscard]] static uint64_t compute_key_fp64(const uint8_t* key, size_t key_len) noexcept;
+        [[nodiscard]] static uint64_t compute_key_fp64(const uint8_t* key, size_t key_len) noexcept {
+            return core::compute_key_fp64(key, key_len);
+        }
 
         /**
          * Builds mini_key from the first 8 bytes of the key (Little-Endian packed).
@@ -107,7 +111,9 @@ namespace akkaradb::core {
          * @param key_len Key length
          * @return 64-bit mini_key value
          */
-        [[nodiscard]] static uint64_t build_mini_key(const uint8_t* key, size_t key_len) noexcept;
+        [[nodiscard]] static uint64_t build_mini_key(const uint8_t* key, size_t key_len) noexcept {
+            return core::build_mini_key(key, key_len);
+        }
 
         /**
          * Creates an SSTHdr32 from key/value metadata. Also computes key_fp64 and mini_key.

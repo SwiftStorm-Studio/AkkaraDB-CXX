@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/cpu/crc32c/CRC32CRef.cpp
+// internal/src/cpu/crc32c/CRC32CRef.cpp
 #include <array>
 #include <cstddef>
 #include <cstdint>

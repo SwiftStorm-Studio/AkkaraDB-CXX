@@ -1,4 +1,4 @@
-﻿/*
+/*
  * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
  *
@@ -19,7 +19,7 @@
 // internal/src/engine/wal/WalWriter.cpp
 #include "engine/wal/WalWriter.hpp"
 
-#include "core/record/SSTHdr32.hpp"
+#include "core/record/KeyFingerprint.hpp"
 #include "cpu/CRC32C.hpp"
 #include "engine/wal/WalFraming.hpp"
 
@@ -473,7 +473,7 @@ namespace akkaradb::engine::wal {
             ~Impl() { close(); }
 
             void append(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64) {
-                const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : (key.empty() ? 0 : core::SSTHdr32::compute_key_fp64(key.data(), key.size()));
+                const uint64_t fp64 = precomputed_fp64 != 0 ? precomputed_fp64 : (key.empty() ? 0 : core::compute_key_fp64(key.data(), key.size()));
                 const uint16_t shard_id = shard_for(fp64, options_.shard_count);
                 PendingEntry entry{seq, serialize_entry(key, value, seq, fp64, flags)};
                 shards_[shard_id]->append(std::move(entry));

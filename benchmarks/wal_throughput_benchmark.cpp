@@ -19,8 +19,8 @@
  *   shards       = 0 (auto, clamped to WAL's 16-shard limit)
  */
 
+#include "core/record/KeyFingerprint.hpp"
 #include "core/record/MemHdr16.hpp"
-#include "core/record/SSTHdr32.hpp"
 #include "engine/wal/WalRecovery.hpp"
 #include "engine/wal/WalWriter.hpp"
 
@@ -357,7 +357,7 @@ namespace {
             key_fp64.resize(static_cast<size_t>(ops_per_case));
             for (int i = 0; i < ops_per_case; ++i) {
                 const auto& key = keys[static_cast<size_t>(i)];
-                key_fp64[static_cast<size_t>(i)] = SSTHdr32::compute_key_fp64(
+                key_fp64[static_cast<size_t>(i)] = core::compute_key_fp64(
                     reinterpret_cast<const uint8_t*>(key.data()),
                     key.size()
                 );

@@ -19,6 +19,7 @@
  *   max payload   = 512 MiB per case unless --fixed-ops is set
  */
 
+#include "core/record/KeyFingerprint.hpp"
 #include "core/record/SSTHdr32.hpp"
 #include "engine/sstable/SSTReader.hpp"
 #include "engine/sstable/SSTWriter.hpp"
@@ -237,8 +238,8 @@ namespace {
         for (int i = 0; i < count; ++i) {
             const auto& key = records.keys[static_cast<size_t>(i)];
             const auto key_span = as_u8(key);
-            const uint64_t fp = SSTHdr32::compute_key_fp64(key_span.data(), key_span.size());
-            const uint64_t mk = SSTHdr32::build_mini_key(key_span.data(), key_span.size());
+            const uint64_t fp = core::compute_key_fp64(key_span.data(), key_span.size());
+            const uint64_t mk = core::build_mini_key(key_span.data(), key_span.size());
             records.views.emplace_back(
                 key_span.data(),
                 static_cast<uint16_t>(key_span.size()),

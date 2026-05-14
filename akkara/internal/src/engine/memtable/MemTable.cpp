@@ -1,4 +1,4 @@
-﻿/*
+/*
  * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
  *
@@ -16,6 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+// internal/src/engine/memtable/MemTable.cpp
 #include "engine/memtable/MemTable.hpp"
 
 #include <algorithm>
@@ -38,7 +39,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/record/SSTHdr32.hpp"
+#include "core/record/KeyFingerprint.hpp"
 #include "engine/memtable/SkipListMemTable.hpp"
 
 namespace akkaradb::engine::memtable {
@@ -50,13 +51,13 @@ namespace akkaradb::engine::memtable {
         [[nodiscard]] uint64_t compute_fp64(std::span<const uint8_t> key, uint64_t precomputed_fp64) noexcept {
             if (precomputed_fp64 != 0) { return precomputed_fp64; }
             if (key.empty()) { return 0; }
-            return core::SSTHdr32::compute_key_fp64(key.data(), key.size());
+            return core::compute_key_fp64(key.data(), key.size());
         }
 
         [[nodiscard]] uint64_t compute_mini(std::span<const uint8_t> key, uint64_t precomputed_mk) noexcept {
             if (precomputed_mk != 0) { return precomputed_mk; }
             if (key.empty()) { return 0; }
-            return core::SSTHdr32::build_mini_key(key.data(), key.size());
+            return core::build_mini_key(key.data(), key.size());
         }
 
         [[nodiscard]] uint32_t next_pow2_clamped(uint64_t n, uint32_t min_value, uint32_t max_value) noexcept {

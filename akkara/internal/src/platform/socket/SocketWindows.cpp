@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/platform/socket/SocketWindows.cpp
+// internal/src/platform/socket/SocketWindows.cpp
 #include "platform/socket/Socket.hpp"
 
 #if defined(_WIN32)

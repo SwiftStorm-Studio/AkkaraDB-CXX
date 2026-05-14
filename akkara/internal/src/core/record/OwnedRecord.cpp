@@ -18,17 +18,9 @@
 
 // internal/src/core/record/OwnedRecord.cpp
 #include "core/record/OwnedRecord.hpp"
+#include "core/record/KeyFingerprint.hpp"
 
 namespace akkaradb::core {
-    namespace {
-        [[nodiscard]] uint64_t build_mini_key(std::span<const uint8_t> key) noexcept {
-            uint64_t mini = 0;
-            const size_t n = std::min<size_t>(key.size(), 8);
-            for (size_t i = 0; i < n; ++i) { mini |= static_cast<uint64_t>(key[i]) << (i * 8); }
-            return mini;
-        }
-    } // namespace
-
     // ==================== Factory ====================
 
     void OwnedRecord::create_inplace(

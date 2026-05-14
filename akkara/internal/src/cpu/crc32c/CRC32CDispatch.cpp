@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// internal/include/cpu/crc32c/CRC32CArmCRC.cpp
+// internal/src/cpu/crc32c/CRC32CDispatch.cpp
 #include "cpu/CRC32C.hpp"
 
 #include <cstddef>

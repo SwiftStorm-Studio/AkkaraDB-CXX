@@ -1,6 +1,19 @@
 /*
  * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 // internal/src/engine/sstable/SSTReader.cpp
@@ -17,6 +30,7 @@
 #include <zstd.h>
 
 #include "cpu/CRC32C.hpp"
+#include "core/record/KeyFingerprint.hpp"
 
 namespace akkaradb::engine::sst {
     namespace {
@@ -129,8 +143,8 @@ namespace akkaradb::engine::sst {
 
             [[nodiscard]] std::optional<SSTRecord> get(std::span<const uint8_t> key) const {
                 if (!key_in_range(key)) { return std::nullopt; }
-                const uint64_t fp = key.empty() ? 0 : core::SSTHdr32::compute_key_fp64(key.data(), key.size());
-                const uint64_t mini = key.empty() ? 0 : core::SSTHdr32::build_mini_key(key.data(), key.size());
+                const uint64_t fp = key.empty() ? 0 : core::compute_key_fp64(key.data(), key.size());
+                const uint64_t mini = key.empty() ? 0 : core::build_mini_key(key.data(), key.size());
                 if (!bloom_might_contain(fp)) { return std::nullopt; }
                 const auto block_index = candidate_block(key);
                 if (!block_index.has_value()) { return std::nullopt; }
@@ -141,8 +155,8 @@ namespace akkaradb::engine::sst {
 
             [[nodiscard]] std::optional<bool> contains(std::span<const uint8_t> key) const {
                 if (!key_in_range(key)) { return std::nullopt; }
-                const uint64_t fp = key.empty() ? 0 : core::SSTHdr32::compute_key_fp64(key.data(), key.size());
-                const uint64_t mini = key.empty() ? 0 : core::SSTHdr32::build_mini_key(key.data(), key.size());
+                const uint64_t fp = key.empty() ? 0 : core::compute_key_fp64(key.data(), key.size());
+                const uint64_t mini = key.empty() ? 0 : core::build_mini_key(key.data(), key.size());
                 if (!bloom_might_contain(fp)) { return std::nullopt; }
                 const auto block_index = candidate_block(key);
                 if (!block_index.has_value()) { return std::nullopt; }
@@ -155,8 +169,8 @@ namespace akkaradb::engine::sst {
 
             [[nodiscard]] std::optional<bool> get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const {
                 if (!key_in_range(key)) { return std::nullopt; }
-                const uint64_t fp = key.empty() ? 0 : core::SSTHdr32::compute_key_fp64(key.data(), key.size());
-                const uint64_t mini = key.empty() ? 0 : core::SSTHdr32::build_mini_key(key.data(), key.size());
+                const uint64_t fp = key.empty() ? 0 : core::compute_key_fp64(key.data(), key.size());
+                const uint64_t mini = key.empty() ? 0 : core::build_mini_key(key.data(), key.size());
                 if (!bloom_might_contain(fp)) { return std::nullopt; }
                 const auto block_index = candidate_block(key);
                 if (!block_index.has_value()) { return std::nullopt; }

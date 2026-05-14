@@ -2,6 +2,8 @@
  * AkkaraDB - SST v2 smoke tests
  */
 
+#include "core/record/KeyFingerprint.hpp"
+#include "core/record/SSTHdr32.hpp"
 #include "engine/sstable/SSTManager.hpp"
 #include "engine/sstable/SSTReader.hpp"
 #include "engine/sstable/SSTWriter.hpp"
@@ -56,8 +58,8 @@ namespace {
         for (int i = 0; i < count; ++i) {
             const auto& k = r.keys[static_cast<size_t>(i)];
             const auto& v = r.vals[static_cast<size_t>(i)];
-            const uint64_t fp = core::SSTHdr32::compute_key_fp64(k.data(), k.size());
-            const uint64_t mk = core::SSTHdr32::build_mini_key(k.data(), k.size());
+            const uint64_t fp = core::compute_key_fp64(k.data(), k.size());
+            const uint64_t mk = core::build_mini_key(k.data(), k.size());
             r.views.emplace_back(k.data(), static_cast<uint16_t>(k.size()), v.data(), static_cast<uint16_t>(v.size()), seq_base + static_cast<uint64_t>(i), core::SSTHdr32::FLAG_NORMAL, fp, mk);
         }
         return r;
@@ -155,8 +157,8 @@ namespace {
 
         auto v1_key = bytes("dup");
         auto v1_val = bytes("v1");
-        const uint64_t fp = core::SSTHdr32::compute_key_fp64(v1_key.data(), v1_key.size());
-        const uint64_t mk = core::SSTHdr32::build_mini_key(v1_key.data(), v1_key.size());
+        const uint64_t fp = core::compute_key_fp64(v1_key.data(), v1_key.size());
+        const uint64_t mk = core::build_mini_key(v1_key.data(), v1_key.size());
         std::vector<core::RecordView> batch1;
         batch1.emplace_back(v1_key.data(), static_cast<uint16_t>(v1_key.size()), v1_val.data(), static_cast<uint16_t>(v1_val.size()), 1, core::SSTHdr32::FLAG_NORMAL, fp, mk);
         manager->flush(batch1);

@@ -16,10 +16,11 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+// internal/src/engine/vlog/VersionLog.cpp
 #include "engine/vlog/VersionLog.hpp"
 
 #include "cpu/CRC32C.hpp"
-#include "core/record/SSTHdr32.hpp"
+#include "core/record/KeyFingerprint.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -132,7 +133,7 @@ namespace akkaradb::engine::vlog {
                 hdr.source_node_id = source_node_id;
                 hdr.timestamp_ns = timestamp_ns;
                 hdr.flags = flags;
-                hdr.key_fp64 = key_len == 0 ? 0ULL : core::SSTHdr32::compute_key_fp64(key_data, key_len);
+                hdr.key_fp64 = key_len == 0 ? 0ULL : core::compute_key_fp64(key_data, key_len);
                 hdr.key_len = static_cast<uint16_t>(key_len);
                 hdr.value_len = static_cast<uint32_t>(value_len);
                 p += ENTRY_HDR_SIZE;
