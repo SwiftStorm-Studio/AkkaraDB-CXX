@@ -47,39 +47,38 @@
 
 namespace akkaradb::engine::cluster {
     namespace {
-#ifdef _WIN32
-        using socket_t = SOCKET;
-        constexpr socket_t BAD_SOCKET = INVALID_SOCKET;
-        void shutdown_socket(socket_t s) noexcept { if (s != BAD_SOCKET) { ::shutdown(s, SD_BOTH); } }
-        void close_socket(socket_t s) noexcept { if (s != BAD_SOCKET) { ::closesocket(s); } }
-        bool socket_ok(socket_t s) noexcept { return s != INVALID_SOCKET; }
-        void net_init() {
+        #ifdef _WIN32
+        using socket_t = SOCKET; constexpr socket_t BAD_SOCKET = INVALID_SOCKET; void
+        shutdown_socket(socket_t s) noexcept { if (s != BAD_SOCKET) { ::shutdown(s, SD_BOTH); } } void close_socket(socket_t s) noexcept {
+            if (s != BAD_SOCKET) { ::closesocket(s); }
+        } bool socket_ok(socket_t s) noexcept { return s != INVALID_SOCKET; } void net_init() {
             static std::once_flag once;
-            std::call_once(once, [] {
-                WSADATA wsa{};
-                ::WSAStartup(MAKEWORD(2, 2), &wsa);
-            });
+            std::call_once(
+                once,
+                [] {
+                    WSADATA wsa{};
+                    ::WSAStartup(MAKEWORD(2, 2), &wsa);
+                }
+            );
         }
-#else
+        #else
         using socket_t = int;
         constexpr socket_t BAD_SOCKET = -1;
         void shutdown_socket(socket_t s) noexcept { if (s >= 0) { ::shutdown(s, SHUT_RDWR); } }
         void close_socket(socket_t s) noexcept { if (s >= 0) { ::close(s); } }
         bool socket_ok(socket_t s) noexcept { return s >= 0; }
         void net_init() {}
-#endif
+        #endif
 
         bool send_all(socket_t s, const uint8_t* data, size_t size) {
             size_t sent = 0;
             while (sent < size) {
-#ifdef _WIN32
+                #ifdef _WIN32
                 const int rc = ::send(s, reinterpret_cast<const char*>(data + sent), static_cast<int>(size - sent), 0);
-#else
+                #else
                 const ssize_t rc = ::send(s, data + sent, size - sent, 0);
-#endif
-                if (rc <= 0) {
-                    return false;
-                }
+                #endif
+                if (rc <= 0) { return false; }
                 sent += static_cast<size_t>(rc);
             }
             return true;
@@ -88,14 +87,12 @@ namespace akkaradb::engine::cluster {
         bool recv_all(socket_t s, uint8_t* data, size_t size) {
             size_t got = 0;
             while (got < size) {
-#ifdef _WIN32
+                #ifdef _WIN32
                 const int rc = ::recv(s, reinterpret_cast<char*>(data + got), static_cast<int>(size - got), 0);
-#else
+                #else
                 const ssize_t rc = ::recv(s, data + got, size - got, 0);
-#endif
-                if (rc <= 0) {
-                    return false;
-                }
+                #endif
+                if (rc <= 0) { return false; }
                 got += static_cast<size_t>(rc);
             }
             return true;
@@ -103,58 +100,41 @@ namespace akkaradb::engine::cluster {
 
         bool send_all(net::TlsStream& stream, const uint8_t* data, size_t size) {
             size_t sent = 0;
-            while (sent < size) {
-                sent += stream.send(data + sent, size - sent);
-            }
+            while (sent < size) { sent += stream.send(data + sent, size - sent); }
             return true;
         }
 
         bool recv_all(net::TlsStream& stream, uint8_t* data, size_t size) {
             size_t got = 0;
-            while (got < size) {
-                got += stream.recv(data + got, size - got);
-            }
+            while (got < size) { got += stream.recv(data + got, size - got); }
             return true;
         }
 
         uint32_t read_u32(const uint8_t* b) noexcept {
-            return static_cast<uint32_t>(b[0]) |
-                   (static_cast<uint32_t>(b[1]) << 8) |
-                   (static_cast<uint32_t>(b[2]) << 16) |
-                   (static_cast<uint32_t>(b[3]) << 24);
+            return static_cast<uint32_t>(b[0]) | (static_cast<uint32_t>(b[1]) << 8) | (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[3]) << 24);
         }
 
         bool recv_frame(socket_t s, DecodedFrame& out) {
             uint8_t header[ReplFrameHeader::SIZE];
-            if (!recv_all(s, header, sizeof(header))) {
-                return false;
-            }
+            if (!recv_all(s, header, sizeof(header))) { return false; }
             const uint32_t payload_len = read_u32(header + 6);
             std::vector<uint8_t> wire(sizeof(header) + payload_len);
             std::memcpy(wire.data(), header, sizeof(header));
-            if (payload_len > 0 && !recv_all(s, wire.data() + sizeof(header), payload_len)) {
-                return false;
-            }
+            if (payload_len > 0 && !recv_all(s, wire.data() + sizeof(header), payload_len)) { return false; }
             return decode_frame(wire, out);
         }
 
         bool recv_frame(net::TlsStream& stream, DecodedFrame& out) {
             uint8_t header[ReplFrameHeader::SIZE];
             try {
-                if (!recv_all(stream, header, sizeof(header))) {
-                    return false;
-                }
+                if (!recv_all(stream, header, sizeof(header))) { return false; }
                 const uint32_t payload_len = read_u32(header + 6);
                 std::vector<uint8_t> wire(sizeof(header) + payload_len);
                 std::memcpy(wire.data(), header, sizeof(header));
-                if (payload_len > 0 && !recv_all(stream, wire.data() + sizeof(header), payload_len)) {
-                    return false;
-                }
+                if (payload_len > 0 && !recv_all(stream, wire.data() + sizeof(header), payload_len)) { return false; }
                 return decode_frame(wire, out);
             }
-            catch (...) {
-                return false;
-            }
+            catch (...) { return false; }
         }
 
         struct TlsConfigStorage {
@@ -179,9 +159,7 @@ namespace akkaradb::engine::cluster {
         socket_t listen_on(uint16_t port) {
             net_init();
             socket_t s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-            if (!socket_ok(s)) {
-                throw std::runtime_error("ReplicationServer: socket failed");
-            }
+            if (!socket_ok(s)) { throw std::runtime_error("ReplicationServer: socket failed"); }
             int reuse = 1;
             ::setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
             sockaddr_in addr{};
@@ -217,9 +195,7 @@ namespace akkaradb::engine::cluster {
             std::thread recv_thread;
 
             ~ReplicaState() {
-                if (tls) {
-                    tls->close();
-                }
+                if (tls) { tls->close(); }
                 close_socket(sock);
             }
         };
@@ -267,25 +243,17 @@ namespace akkaradb::engine::cluster {
                     close_replica(replica);
                     replica->queue_cv.notify_all();
                 }
-                if (accept_thread.joinable()) {
-                    accept_thread.join();
-                }
+                if (accept_thread.joinable()) { accept_thread.join(); }
                 for (auto& replica : copy) {
-                    if (replica->send_thread.joinable()) {
-                        replica->send_thread.join();
-                    }
-                    if (replica->recv_thread.joinable()) {
-                        replica->recv_thread.join();
-                    }
+                    if (replica->send_thread.joinable()) { replica->send_thread.join(); }
+                    if (replica->recv_thread.joinable()) { replica->recv_thread.join(); }
                 }
             }
 
             void accept_loop() {
                 while (running.load()) {
                     socket_t client = ::accept(listen_sock, nullptr, nullptr);
-                    if (!socket_ok(client)) {
-                        break;
-                    }
+                    if (!socket_ok(client)) { break; }
 
                     std::unique_ptr<net::TlsStream> tls;
                     if (runtime_options.transport_mode == TransportMode::TLS) {
@@ -303,12 +271,8 @@ namespace akkaradb::engine::cluster {
 
                     DecodedFrame frame;
                     ClientHello hello;
-                    if (!recv_frame_from(client, tls.get(), frame) ||
-                        frame.type != ReplMsgType::ClientHello ||
-                        !decode_client_hello(frame.payload, hello)) {
-                        if (tls) {
-                            tls->close();
-                        }
+                    if (!recv_frame_from(client, tls.get(), frame) || frame.type != ReplMsgType::ClientHello || !decode_client_hello(frame.payload, hello)) {
+                        if (tls) { tls->close(); }
                         close_socket(client);
                         continue;
                     }
@@ -319,9 +283,7 @@ namespace akkaradb::engine::cluster {
                     response.role = NodeRole::Primary;
                     auto hello_wire = encode_server_hello(response);
                     if (!send_to(client, tls.get(), hello_wire.data(), hello_wire.size())) {
-                        if (tls) {
-                            tls->close();
-                        }
+                        if (tls) { tls->close(); }
                         close_socket(client);
                         continue;
                     }
@@ -335,9 +297,7 @@ namespace akkaradb::engine::cluster {
                     {
                         std::lock_guard lock{replicas_mutex};
                         for (const auto& buffered : entry_buffer) {
-                            if (buffered.seq == 0 || buffered.seq > hello.last_seq) {
-                                replica->queue.push_back(buffered.wire);
-                            }
+                            if (buffered.seq == 0 || buffered.seq > hello.last_seq) { replica->queue.push_back(buffered.wire); }
                         }
                         replicas.push_back(replica);
                     }
@@ -348,12 +308,8 @@ namespace akkaradb::engine::cluster {
             }
 
             static bool send_to(socket_t sock, net::TlsStream* tls, const uint8_t* data, size_t size) {
-                try {
-                    return tls != nullptr ? send_all(*tls, data, size) : send_all(sock, data, size);
-                }
-                catch (...) {
-                    return false;
-                }
+                try { return tls != nullptr ? send_all(*tls, data, size) : send_all(sock, data, size); }
+                catch (...) { return false; }
             }
 
             static bool recv_frame_from(socket_t sock, net::TlsStream* tls, DecodedFrame& out) {
@@ -361,9 +317,7 @@ namespace akkaradb::engine::cluster {
             }
 
             static void close_replica(const std::shared_ptr<ReplicaState>& replica) {
-                if (replica->tls) {
-                    replica->tls->shutdown();
-                }
+                if (replica->tls) { replica->tls->shutdown(); }
                 else {
                     shutdown_socket(replica->sock);
                     close_socket(replica->sock);
@@ -377,9 +331,7 @@ namespace akkaradb::engine::cluster {
                     {
                         std::unique_lock lock{replica->queue_mutex};
                         replica->queue_cv.wait(lock, [&] { return replica->dead.load() || !replica->queue.empty(); });
-                        if (replica->dead.load() && replica->queue.empty()) {
-                            break;
-                        }
+                        if (replica->dead.load() && replica->queue.empty()) { break; }
                         wire = std::move(replica->queue.front());
                         replica->queue.pop_front();
                     }
@@ -394,16 +346,10 @@ namespace akkaradb::engine::cluster {
             void recv_loop(const std::shared_ptr<ReplicaState>& replica) {
                 while (!replica->dead.load()) {
                     DecodedFrame frame;
-                    if (!recv_frame_from(replica->sock, replica->tls.get(), frame)) {
-                        break;
-                    }
-                    if (frame.type != ReplMsgType::Ack) {
-                        break;
-                    }
+                    if (!recv_frame_from(replica->sock, replica->tls.get(), frame)) { break; }
+                    if (frame.type != ReplMsgType::Ack) { break; }
                     ReplAck ack;
-                    if (!decode_ack(frame.payload, ack)) {
-                        break;
-                    }
+                    if (!decode_ack(frame.payload, ack)) { break; }
                     replica->last_acked_seq.store(ack.seq);
                     ack_cv.notify_all();
                 }
@@ -416,9 +362,7 @@ namespace akkaradb::engine::cluster {
                 {
                     std::lock_guard lock{replicas_mutex};
                     entry_buffer.push_back(BufferedWire{seq, wire});
-                    while (entry_buffer.size() > ENTRY_BUFFER_SIZE) {
-                        entry_buffer.pop_front();
-                    }
+                    while (entry_buffer.size() > ENTRY_BUFFER_SIZE) { entry_buffer.pop_front(); }
                     for (auto& replica : replicas) {
                         if (!replica->dead.load()) {
                             std::lock_guard qlock{replica->queue_mutex};
@@ -431,9 +375,7 @@ namespace akkaradb::engine::cluster {
             }
 
             void wait_for_acks(uint64_t seq) {
-                if (ack_policy.mode == AckPolicyMode::Async || seq == 0) {
-                    return;
-                }
+                if (ack_policy.mode == AckPolicyMode::Async || seq == 0) { return; }
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
                 while (std::chrono::steady_clock::now() < deadline) {
                     size_t live = 0;
@@ -443,19 +385,13 @@ namespace akkaradb::engine::cluster {
                         for (const auto& replica : replicas) {
                             if (!replica->dead.load()) {
                                 ++live;
-                                if (replica->last_acked_seq.load() >= seq) {
-                                    ++acked;
-                                }
+                                if (replica->last_acked_seq.load() >= seq) { ++acked; }
                             }
                         }
                     }
 
-                    const bool ok = ack_policy.mode == AckPolicyMode::All
-                        ? acked >= live
-                        : acked >= ack_policy.quorum;
-                    if (ok) {
-                        return;
-                    }
+                    const bool ok = ack_policy.mode == AckPolicyMode::All ? acked >= live : acked >= ack_policy.quorum;
+                    if (ok) { return; }
 
                     std::unique_lock lock{ack_mutex};
                     ack_cv.wait_for(lock, std::chrono::milliseconds(50));
@@ -479,7 +415,7 @@ namespace akkaradb::engine::cluster {
         impl->get_current_seq = std::move(get_current_seq);
         impl->ack_policy = ack_policy;
         impl->runtime_options = std::move(runtime_options);
-        return std::unique_ptr<ReplicationServer>(new ReplicationServer(std::move(impl)));
+        return std::unique_ptr < ReplicationServer > (new ReplicationServer(std::move(impl)));
     }
 
     void ReplicationServer::start() { impl_->start(); }
@@ -514,11 +450,7 @@ namespace akkaradb::engine::cluster {
     size_t ReplicationServer::replica_count() const noexcept {
         std::lock_guard lock{impl_->replicas_mutex};
         size_t count = 0;
-        for (const auto& replica : impl_->replicas) {
-            if (!replica->dead.load()) {
-                ++count;
-            }
-        }
+        for (const auto& replica : impl_->replicas) { if (!replica->dead.load()) { ++count; } }
         return count;
     }
 } // namespace akkaradb::engine::cluster

@@ -42,8 +42,8 @@ namespace akkaradb::engine::cluster {
      */
     struct ClusterEngineCallbacks {
         std::function<uint64_t()> get_current_seq; ///< Primary hello: current sequence advertised to replicas.
-        std::function<uint64_t()> get_last_seq;    ///< Replica hello: last applied sequence sent to primary.
-        ReplicationClient::ApplyCallback apply;    ///< Applies replicated put/remove entries on replicas.
+        std::function<uint64_t()> get_last_seq; ///< Replica hello: last applied sequence sent to primary.
+        ReplicationClient::ApplyCallback apply; ///< Applies replicated put/remove entries on replicas.
         ReplicationClient::BlobCallback apply_blob; ///< Applies replicated blob payloads on replicas.
         ClusterManager::RoleChangeCallback role_change; ///< Notifies the engine after local role changes.
     };

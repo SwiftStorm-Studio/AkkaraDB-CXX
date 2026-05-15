@@ -34,7 +34,6 @@
 #include "engine/sstable/SSTWriter.hpp"
 
 namespace akkaradb::engine::sst {
-
     class SSTManager {
         public:
             struct Options {
@@ -77,10 +76,7 @@ namespace akkaradb::engine::sst {
                     size_t index_{0};
             };
 
-            [[nodiscard]] static std::unique_ptr<SSTManager> create(
-                Options options,
-                manifest::Manifest* manifest = nullptr
-            );
+            [[nodiscard]] static std::unique_ptr<SSTManager> create(Options options, manifest::Manifest* manifest = nullptr);
 
             ~SSTManager();
             SSTManager(const SSTManager&) = delete;
@@ -104,5 +100,4 @@ namespace akkaradb::engine::sst {
             class Impl;
             std::unique_ptr<Impl> impl_;
     };
-
 } // namespace akkaradb::engine::sst

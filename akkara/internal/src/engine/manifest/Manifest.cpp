@@ -49,10 +49,10 @@ namespace akkaradb::engine::manifest {
         class FileHandle {
             public:
                 #ifdef _WIN32
-                using NativeHandle = HANDLE;
-                inline static const NativeHandle INVALID = INVALID_HANDLE_VALUE;
+                using NativeHandle = HANDLE; inline static const NativeHandle INVALID = INVALID_HANDLE_VALUE;
                 #else
-                using NativeHandle = int; static constexpr NativeHandle INVALID = -1;
+                using NativeHandle = int;
+                static constexpr NativeHandle INVALID = -1;
                 #endif
 
                 FileHandle() : handle_{INVALID} {}
@@ -75,25 +75,28 @@ namespace akkaradb::engine::manifest {
                 [[nodiscard]] static FileHandle open(const std::filesystem::path& path) {
                     FileHandle fh;
                     #ifdef _WIN32
-                    fh.handle_ = ::CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-                    if (fh.handle_ == INVALID) { throw std::runtime_error("Failed to open manifest: " + path.string()); }
-                    ::SetFilePointer(fh.handle_, 0, nullptr, FILE_END);
+                    fh.handle_ = ::CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr); if (fh.
+                        handle_ == INVALID) { throw std::runtime_error("Failed to open manifest: " + path.string()); } ::SetFilePointer(
+                        fh.handle_,
+                        0,
+                        nullptr,
+                        FILE_END
+                    );
                     #else
-                    fh.handle_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644); if (fh.handle_ < 0) {
-                        throw std::runtime_error("Failed to open manifest: " + path.string());
-                    }
+                    fh.handle_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+                    if (fh.handle_ < 0) { throw std::runtime_error("Failed to open manifest: " + path.string()); }
                     #endif
                     return fh;
                 }
 
                 void write(const uint8_t* data, size_t size) {
                     #ifdef _WIN32
-                    DWORD written = 0;
-                    if (!::WriteFile(handle_, data, static_cast<DWORD>(size), &written, nullptr)) { throw std::runtime_error("Manifest write failed"); }
-                    #else
-                    ssize_t result = ::write(handle_, data, size); if (result < 0 || static_cast<size_t>(result) != size) {
+                    DWORD written = 0; if (!::WriteFile(handle_, data, static_cast<DWORD>(size), &written, nullptr)) {
                         throw std::runtime_error("Manifest write failed");
                     }
+                    #else
+                    ssize_t result = ::write(handle_, data, size);
+                    if (result < 0 || static_cast<size_t>(result) != size) { throw std::runtime_error("Manifest write failed"); }
                     #endif
                 }
 

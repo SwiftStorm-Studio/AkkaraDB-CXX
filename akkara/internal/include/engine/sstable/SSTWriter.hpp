@@ -28,12 +28,10 @@
 #include "engine/sstable/SSTFormat.hpp"
 
 namespace akkaradb::engine::sst {
-
     class SSTWriter {
         public:
             enum class Codec : uint8_t {
-                None = 0,
-                Zstd = 1,
+                None = 0, Zstd = 1,
             };
 
             struct Options {
@@ -54,14 +52,9 @@ namespace akkaradb::engine::sst {
                 std::vector<uint8_t> last_key;
             };
 
-            [[nodiscard]] static Result write(
-                const std::filesystem::path& path,
-                std::span<const core::RecordView> records,
-                const Options& options = {}
-            );
+            [[nodiscard]] static Result write(const std::filesystem::path& path, std::span<const core::RecordView> records, const Options& options = {});
 
         private:
             SSTWriter() = delete;
     };
-
 } // namespace akkaradb::engine::sst

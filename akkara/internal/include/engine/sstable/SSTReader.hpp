@@ -31,7 +31,6 @@
 #include "engine/sstable/SSTFormat.hpp"
 
 namespace akkaradb::engine::sst {
-
     struct SSTRecord {
         std::vector<uint8_t> key;
         std::vector<uint8_t> value;
@@ -40,9 +39,7 @@ namespace akkaradb::engine::sst {
         uint64_t key_fp64 = 0;
         uint64_t mini_key = 0;
 
-        [[nodiscard]] bool is_tombstone() const noexcept {
-            return (flags & core::SSTHdr32::FLAG_TOMBSTONE) != 0;
-        }
+        [[nodiscard]] bool is_tombstone() const noexcept { return (flags & core::SSTHdr32::FLAG_TOMBSTONE) != 0; }
     };
 
     class SSTReader {
@@ -51,10 +48,7 @@ namespace akkaradb::engine::sst {
                 uint64_t block_cache_bytes = 64ULL * 1024ULL * 1024ULL;
             };
 
-            [[nodiscard]] static std::unique_ptr<SSTReader> open(
-                const std::filesystem::path& path,
-                const Options& options = {}
-            );
+            [[nodiscard]] static std::unique_ptr<SSTReader> open(const std::filesystem::path& path, const Options& options = {});
 
             ~SSTReader();
             SSTReader(const SSTReader&) = delete;
@@ -78,5 +72,4 @@ namespace akkaradb::engine::sst {
             class Impl;
             std::unique_ptr<Impl> impl_;
     };
-
 } // namespace akkaradb::engine::sst

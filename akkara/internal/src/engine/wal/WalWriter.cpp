@@ -1,4 +1,4 @@
-/*
+﻿/*
  * AkkaraDB - The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database
  * Copyright (C) 2026 Swift Storm Studio
  *
@@ -53,11 +53,7 @@ namespace akkaradb::engine::wal {
         static constexpr uint64_t SEGMENT_BYTES = 64ULL * 1024ULL * 1024ULL;
 
         [[nodiscard]] uint64_t now_us() noexcept {
-            return static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()
-                ).count()
-            );
+            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
         }
 
         [[nodiscard]] uint16_t resolve_auto_shard_count() noexcept {
@@ -65,9 +61,7 @@ namespace akkaradb::engine::wal {
             return static_cast<uint16_t>(std::clamp<unsigned>(hw == 0 ? 1u : hw, 1u, 16u));
         }
 
-        [[nodiscard]] uint32_t crc32c_bytes(const uint8_t* data, size_t size) noexcept {
-            return cpu::CRC32C(reinterpret_cast<const std::byte*>(data), size);
-        }
+        [[nodiscard]] uint32_t crc32c_bytes(const uint8_t* data, size_t size) noexcept { return cpu::CRC32C(reinterpret_cast<const std::byte*>(data), size); }
 
         void refresh_segment_crc(WalSegmentHeader& header) noexcept {
             header.crc32c = 0;
@@ -78,19 +72,19 @@ namespace akkaradb::engine::wal {
 
         void do_fdatasync(FILE* f) {
             if (f == nullptr) { return; }
-#ifdef _WIN32
+            #ifdef _WIN32
             if (_commit(_fileno(f)) != 0) { throw std::runtime_error("WAL fdatasync failed"); }
-#else
+            #else
             if (::fdatasync(fileno(f)) != 0) { throw std::runtime_error("WAL fdatasync failed"); }
-#endif
+            #endif
         }
 
         [[nodiscard]] FILE* open_rw(const fs::path& path, bool exists) {
-#ifdef _WIN32
+            #ifdef _WIN32
             FILE* f = _wfopen(path.wstring().c_str(), exists ? L"r+b" : L"w+b");
-#else
+            #else
             FILE* f = std::fopen(path.string().c_str(), exists ? "r+b" : "w+b");
-#endif
+            #endif
             if (f == nullptr) { throw std::runtime_error("WAL failed to open segment: " + path.string()); }
             return f;
         }
@@ -115,8 +109,7 @@ namespace akkaradb::engine::wal {
 
         [[nodiscard]] std::string segment_name(uint16_t shard_id, uint64_t segment_id) {
             std::ostringstream os;
-            os << std::setfill('0') << std::setw(4) << shard_id << "_"
-               << std::hex << std::nouppercase << std::setw(16) << segment_id << ".akwal";
+            os << std::setfill('0') << std::setw(4) << shard_id << "_" << std::hex << std::nouppercase << std::setw(16) << segment_id << ".akwal";
             return os.str();
         }
 
@@ -219,12 +212,14 @@ namespace akkaradb::engine::wal {
                             const uint64_t entry_bytes = static_cast<uint64_t>(entry.bytes.size());
                             {
                                 std::unique_lock lock{queue_mutex_};
-                                queue_space_cv_.wait(lock, [&] {
-                                    const uint64_t pending_bytes = queue_bytes_ + in_flight_bytes_;
-                                    return async_error_ ||
-                                           pending_bytes + entry_bytes <= options_.async_max_pending_bytes ||
-                                           (queue_.empty() && in_flight_bytes_ == 0);
-                                });
+                                queue_space_cv_.wait(
+                                    lock,
+                                    [&] {
+                                        const uint64_t pending_bytes = queue_bytes_ + in_flight_bytes_;
+                                        return async_error_ || pending_bytes + entry_bytes <= options_.async_max_pending_bytes || (queue_.empty() &&
+                                            in_flight_bytes_ == 0);
+                                    }
+                                );
                                 if (async_error_) { std::rethrow_exception(async_error_); }
                                 queue_.push_back(std::move(entry));
                                 queue_bytes_ += entry_bytes;
@@ -454,12 +449,11 @@ namespace akkaradb::engine::wal {
                     std::thread thread_;
             };
 
-            explicit Impl(WalOptions options) : options_{std::move(options)} {
+            explicit Impl(WalOptions options)
+                : options_{std::move(options)} {
                 if (options_.wal_dir.empty()) { throw std::invalid_argument("WAL directory is required"); }
                 if (options_.shard_count == 0) { options_.shard_count = resolve_auto_shard_count(); }
-                if (options_.shard_count > 16) {
-                    throw std::invalid_argument("WAL shard_count must be in range 1..16, or 0 for auto");
-                }
+                if (options_.shard_count > 16) { throw std::invalid_argument("WAL shard_count must be in range 1..16, or 0 for auto"); }
                 if (options_.group_n == 0) { options_.group_n = 128; }
                 if (options_.group_micros == 0) { options_.group_micros = 100; }
                 if (options_.group_bytes == 0) { options_.group_bytes = 4ULL * 1024ULL * 1024ULL; }
@@ -479,13 +473,9 @@ namespace akkaradb::engine::wal {
                 shards_[shard_id]->append(std::move(entry));
             }
 
-            void force_sync() {
-                for (const auto& shard : shards_) { shard->force_sync(); }
-            }
+            void force_sync() { for (const auto& shard : shards_) { shard->force_sync(); } }
 
-            void prune_until(uint64_t checkpoint_seq) {
-                for (const auto& shard : shards_) { shard->prune_until(checkpoint_seq); }
-            }
+            void prune_until(uint64_t checkpoint_seq) { for (const auto& shard : shards_) { shard->prune_until(checkpoint_seq); } }
 
             void close() {
                 if (closed_) { return; }
@@ -517,7 +507,5 @@ namespace akkaradb::engine::wal {
 
     void WalWriter::prune_until(uint64_t checkpoint_seq) { impl_->prune_until(checkpoint_seq); }
 
-    void WalWriter::close() {
-        if (impl_) { impl_->close(); }
-    }
+    void WalWriter::close() { if (impl_) { impl_->close(); } }
 } // namespace akkaradb::engine::wal

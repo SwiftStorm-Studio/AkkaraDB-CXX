@@ -116,9 +116,7 @@ namespace akkaradb::engine::sst {
                 .mini_key = rec.mini_key()
             };
 
-            if (key.size() > UINT16_MAX || value.size() > UINT16_MAX) {
-                throw std::invalid_argument("SSTWriter: key/value length exceeds u16");
-            }
+            if (key.size() > UINT16_MAX || value.size() > UINT16_MAX) { throw std::invalid_argument("SSTWriter: key/value length exceeds u16"); }
 
             append_pod(block.raw, hdr);
             block.raw.insert(block.raw.end(), key.begin(), key.end());
@@ -152,20 +150,14 @@ namespace akkaradb::engine::sst {
         }
     } // namespace
 
-    SSTWriter::Result SSTWriter::write(
-        const std::filesystem::path& path,
-        std::span<const core::RecordView> records,
-        const Options& options
-    ) {
+    SSTWriter::Result SSTWriter::write(const std::filesystem::path& path, std::span<const core::RecordView> records, const Options& options) {
         if (records.empty()) { throw std::invalid_argument("SSTWriter::write: records must be non-empty"); }
         if (options.block_size < 4096 || (options.block_size & 7u) != 0) {
             throw std::invalid_argument("SSTWriter::write: block_size must be >=4096 and 8-byte aligned");
         }
 
         for (size_t i = 1; i < records.size(); ++i) {
-            if (records[i - 1].compare_key(records[i]) > 0) {
-                throw std::invalid_argument("SSTWriter::write: records must be sorted by key");
-            }
+            if (records[i - 1].compare_key(records[i]) > 0) { throw std::invalid_argument("SSTWriter::write: records must be sorted by key"); }
         }
 
         if (path.has_parent_path()) { std::filesystem::create_directories(path.parent_path()); }
@@ -233,21 +225,23 @@ namespace akkaradb::engine::sst {
 
             const uint32_t first_key_off = add_key(key_arena, block.first_key);
             const uint32_t last_key_off = add_key(key_arena, block.last_key);
-            index.push_back(SSTBlockIndexEntryV2{
-                .block_offset = block_offset,
-                .block_size = static_cast<uint32_t>(next - block_offset),
-                .uncompressed_size = static_cast<uint32_t>(block.raw.size()),
-                .first_mini_key = block.first_mini,
-                .last_mini_key = block.last_mini,
-                .first_key_fp64 = block.first_fp,
-                .last_key_fp64 = block.last_fp,
-                .first_key_offset = first_key_off,
-                .first_key_len = static_cast<uint32_t>(block.first_key.size()),
-                .last_key_offset = last_key_off,
-                .last_key_len = static_cast<uint32_t>(block.last_key.size()),
-                .record_count = static_cast<uint32_t>(block.offsets.size()),
-                .flags = block_flags
-            });
+            index.push_back(
+                SSTBlockIndexEntryV2{
+                    .block_offset = block_offset,
+                    .block_size = static_cast<uint32_t>(next - block_offset),
+                    .uncompressed_size = static_cast<uint32_t>(block.raw.size()),
+                    .first_mini_key = block.first_mini,
+                    .last_mini_key = block.last_mini,
+                    .first_key_fp64 = block.first_fp,
+                    .last_key_fp64 = block.last_fp,
+                    .first_key_offset = first_key_off,
+                    .first_key_len = static_cast<uint32_t>(block.first_key.size()),
+                    .last_key_offset = last_key_off,
+                    .last_key_len = static_cast<uint32_t>(block.last_key.size()),
+                    .record_count = static_cast<uint32_t>(block.offsets.size()),
+                    .flags = block_flags
+                }
+            );
 
             block = PendingBlock{};
         };

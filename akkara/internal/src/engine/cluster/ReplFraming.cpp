@@ -30,48 +30,29 @@ namespace akkaradb::engine::cluster {
             b.push_back(static_cast<uint8_t>(v >> 8));
         }
 
-        void write_u32(std::vector<uint8_t>& b, uint32_t v) {
-            for (size_t i = 0; i < 4; ++i) {
-                b.push_back(static_cast<uint8_t>(v >> (8 * i)));
-            }
-        }
+        void write_u32(std::vector<uint8_t>& b, uint32_t v) { for (size_t i = 0; i < 4; ++i) { b.push_back(static_cast<uint8_t>(v >> (8 * i))); } }
 
-        void write_u64(std::vector<uint8_t>& b, uint64_t v) {
-            for (size_t i = 0; i < 8; ++i) {
-                b.push_back(static_cast<uint8_t>(v >> (8 * i)));
-            }
-        }
+        void write_u64(std::vector<uint8_t>& b, uint64_t v) { for (size_t i = 0; i < 8; ++i) { b.push_back(static_cast<uint8_t>(v >> (8 * i))); } }
 
-        void write_u32_at(uint8_t* b, size_t off, uint32_t v) {
-            for (size_t i = 0; i < 4; ++i) {
-                b[off + i] = static_cast<uint8_t>(v >> (8 * i));
-            }
-        }
+        void write_u32_at(uint8_t* b, size_t off, uint32_t v) { for (size_t i = 0; i < 4; ++i) { b[off + i] = static_cast<uint8_t>(v >> (8 * i)); } }
 
         uint16_t read_u16(std::span<const uint8_t> b, size_t off) {
-            return static_cast<uint16_t>(b[off]) |
-                   static_cast<uint16_t>(static_cast<uint16_t>(b[off + 1]) << 8);
+            return static_cast<uint16_t>(b[off]) | static_cast<uint16_t>(static_cast<uint16_t>(b[off + 1]) << 8);
         }
 
         uint32_t read_u32(std::span<const uint8_t> b, size_t off) {
-            return static_cast<uint32_t>(b[off]) |
-                   (static_cast<uint32_t>(b[off + 1]) << 8) |
-                   (static_cast<uint32_t>(b[off + 2]) << 16) |
-                   (static_cast<uint32_t>(b[off + 3]) << 24);
+            return static_cast<uint32_t>(b[off]) | (static_cast<uint32_t>(b[off + 1]) << 8) | (static_cast<uint32_t>(b[off + 2]) << 16) | (static_cast<uint32_t>
+                (b[off + 3]) << 24);
         }
 
         uint64_t read_u64(std::span<const uint8_t> b, size_t off) {
             uint64_t v = 0;
-            for (size_t i = 0; i < 8; ++i) {
-                v |= static_cast<uint64_t>(b[off + i]) << (8 * i);
-            }
+            for (size_t i = 0; i < 8; ++i) { v |= static_cast<uint64_t>(b[off + i]) << (8 * i); }
             return v;
         }
 
         bool read_bytes(std::span<const uint8_t> p, size_t& cursor, size_t len, std::vector<uint8_t>& out) {
-            if (cursor + len > p.size()) {
-                return false;
-            }
+            if (cursor + len > p.size()) { return false; }
             out.assign(p.begin() + static_cast<std::ptrdiff_t>(cursor), p.begin() + static_cast<std::ptrdiff_t>(cursor + len));
             cursor += len;
             return true;
@@ -86,28 +67,18 @@ namespace akkaradb::engine::cluster {
         write_u32_at(wire.data(), 6, static_cast<uint32_t>(payload.size()));
         const uint32_t crc = cpu::CRC32C(reinterpret_cast<const std::byte*>(payload.data()), payload.size());
         write_u32_at(wire.data(), 10, crc);
-        if (!payload.empty()) {
-            std::memcpy(wire.data() + ReplFrameHeader::SIZE, payload.data(), payload.size());
-        }
+        if (!payload.empty()) { std::memcpy(wire.data() + ReplFrameHeader::SIZE, payload.data(), payload.size()); }
         return wire;
     }
 
     bool decode_frame(std::span<const uint8_t> wire, DecodedFrame& out) {
-        if (wire.size() < ReplFrameHeader::SIZE) {
-            return false;
-        }
-        if (read_u32(wire, 0) != ReplFrameHeader::MAGIC) {
-            return false;
-        }
+        if (wire.size() < ReplFrameHeader::SIZE) { return false; }
+        if (read_u32(wire, 0) != ReplFrameHeader::MAGIC) { return false; }
         const auto payload_len = read_u32(wire, 6);
-        if (wire.size() != ReplFrameHeader::SIZE + payload_len) {
-            return false;
-        }
+        if (wire.size() != ReplFrameHeader::SIZE + payload_len) { return false; }
         const auto payload = wire.subspan(ReplFrameHeader::SIZE, payload_len);
         const uint32_t crc = cpu::CRC32C(reinterpret_cast<const std::byte*>(payload.data()), payload.size());
-        if (crc != read_u32(wire, 10)) {
-            return false;
-        }
+        if (crc != read_u32(wire, 10)) { return false; }
         out.type = static_cast<ReplMsgType>(wire[4]);
         out.flags = wire[5];
         out.payload.assign(payload.begin(), payload.end());
@@ -181,9 +152,7 @@ namespace akkaradb::engine::cluster {
     }
 
     bool decode_client_hello(std::span<const uint8_t> payload, ClientHello& out) {
-        if (payload.size() != 18) {
-            return false;
-        }
+        if (payload.size() != 18) { return false; }
         out.node_id = read_u64(payload, 0);
         out.last_seq = read_u64(payload, 8);
         out.role = static_cast<NodeRole>(payload[16]);
@@ -191,9 +160,7 @@ namespace akkaradb::engine::cluster {
     }
 
     bool decode_server_hello(std::span<const uint8_t> payload, ServerHello& out) {
-        if (payload.size() != 18) {
-            return false;
-        }
+        if (payload.size() != 18) { return false; }
         out.node_id = read_u64(payload, 0);
         out.current_seq = read_u64(payload, 8);
         out.role = static_cast<NodeRole>(payload[16]);
@@ -201,9 +168,7 @@ namespace akkaradb::engine::cluster {
     }
 
     bool decode_entry(std::span<const uint8_t> payload, ReplEntry& out) {
-        if (payload.size() < 26) {
-            return false;
-        }
+        if (payload.size() < 26) { return false; }
         out.seq = read_u64(payload, 0);
         out.source_node_id = read_u64(payload, 8);
         out.op = static_cast<ReplOpType>(payload[16]);
@@ -211,38 +176,27 @@ namespace akkaradb::engine::cluster {
         const uint32_t key_len = read_u32(payload, 18);
         const uint32_t val_len = read_u32(payload, 22);
         size_t cursor = 26;
-        return read_bytes(payload, cursor, key_len, out.key) &&
-               read_bytes(payload, cursor, val_len, out.value) &&
-               cursor == payload.size();
+        return read_bytes(payload, cursor, key_len, out.key) && read_bytes(payload, cursor, val_len, out.value) && cursor == payload.size();
     }
 
     bool decode_blob(std::span<const uint8_t> payload, ReplBlob& out) {
-        if (payload.size() < 24) {
-            return false;
-        }
+        if (payload.size() < 24) { return false; }
         out.seq = read_u64(payload, 0);
         out.blob_id = read_u64(payload, 8);
         const uint64_t content_len = read_u64(payload, 16);
-        if (content_len > payload.size() - 24) {
-            return false;
-        }
+        if (content_len > payload.size() - 24) { return false; }
         size_t cursor = 24;
-        return read_bytes(payload, cursor, static_cast<size_t>(content_len), out.content) &&
-               cursor == payload.size();
+        return read_bytes(payload, cursor, static_cast<size_t>(content_len), out.content) && cursor == payload.size();
     }
 
     bool decode_ack(std::span<const uint8_t> payload, ReplAck& out) {
-        if (payload.size() != 8) {
-            return false;
-        }
+        if (payload.size() != 8) { return false; }
         out.seq = read_u64(payload, 0);
         return true;
     }
 
     bool decode_read_request(std::span<const uint8_t> payload, ReadRequest& out) {
-        if (payload.size() < 20) {
-            return false;
-        }
+        if (payload.size() < 20) { return false; }
         out.request_id = read_u64(payload, 0);
         out.snapshot_seq = read_u64(payload, 8);
         const uint32_t key_len = read_u32(payload, 16);
@@ -251,9 +205,7 @@ namespace akkaradb::engine::cluster {
     }
 
     bool decode_read_response(std::span<const uint8_t> payload, ReadResponse& out) {
-        if (payload.size() < 22) {
-            return false;
-        }
+        if (payload.size() < 22) { return false; }
         out.request_id = read_u64(payload, 0);
         out.status = static_cast<ReadStatus>(payload[8]);
         out.record_flags = payload[9];

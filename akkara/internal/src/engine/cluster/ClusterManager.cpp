@@ -45,45 +45,35 @@
 
 namespace akkaradb::engine::cluster {
     namespace {
-#ifdef _WIN32
-        using LockHandle = HANDLE;
-        inline const LockHandle INVALID_LOCK = INVALID_HANDLE_VALUE;
-
-        void net_init() {
+        #ifdef _WIN32
+        using LockHandle = HANDLE; inline const LockHandle INVALID_LOCK = INVALID_HANDLE_VALUE; void net_init() {
             static std::once_flag once;
-            std::call_once(once, [] {
-                WSADATA wsa{};
-                ::WSAStartup(MAKEWORD(2, 2), &wsa);
-            });
-        }
-
-        LockHandle try_acquire_lock(const std::filesystem::path& path) {
+            std::call_once(
+                once,
+                [] {
+                    WSADATA wsa{};
+                    ::WSAStartup(MAKEWORD(2, 2), &wsa);
+                }
+            );
+        } LockHandle try_acquire_lock(const std::filesystem::path& path) {
             auto h = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (h == INVALID_HANDLE_VALUE) {
-                return INVALID_LOCK;
-            }
+            if (h == INVALID_HANDLE_VALUE) { return INVALID_LOCK; }
             OVERLAPPED ov{};
             if (!::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
                 ::CloseHandle(h);
                 return INVALID_LOCK;
             }
             return h;
-        }
-
-        void release_lock(LockHandle h) noexcept {
+        } void release_lock(LockHandle h) noexcept {
             if (h != INVALID_LOCK) {
                 OVERLAPPED ov{};
                 ::UnlockFileEx(h, 0, 1, 0, &ov);
                 ::CloseHandle(h);
             }
-        }
-
-        bool write_lock_file(LockHandle h, const NodeInfo& self) {
+        } bool write_lock_file(LockHandle h, const NodeInfo& self) {
             const auto host_len = static_cast<uint16_t>(self.host.size());
             std::vector<uint8_t> bytes(12 + host_len);
-            for (size_t i = 0; i < 8; ++i) {
-                bytes[i] = static_cast<uint8_t>(self.node_id >> (8 * i));
-            }
+            for (size_t i = 0; i < 8; ++i) { bytes[i] = static_cast<uint8_t>(self.node_id >> (8 * i)); }
             bytes[8] = static_cast<uint8_t>(self.repl_port);
             bytes[9] = static_cast<uint8_t>(self.repl_port >> 8);
             bytes[10] = static_cast<uint8_t>(host_len);
@@ -92,15 +82,10 @@ namespace akkaradb::engine::cluster {
             ::SetFilePointer(h, 0, nullptr, FILE_BEGIN);
             ::SetEndOfFile(h);
             DWORD written = 0;
-            return ::WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) != 0 &&
-                   written == bytes.size();
-        }
-
-        bool read_lock_file(const std::filesystem::path& path, uint64_t& node_id, uint16_t& repl_port, std::string& host) {
+            return ::WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) != 0 && written == bytes.size();
+        } bool read_lock_file(const std::filesystem::path& path, uint64_t& node_id, uint16_t& repl_port, std::string& host) {
             HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (h == INVALID_HANDLE_VALUE) {
-                return false;
-            }
+            if (h == INVALID_HANDLE_VALUE) { return false; }
             uint8_t fixed[12]{};
             DWORD read = 0;
             if (!::ReadFile(h, fixed, sizeof(fixed), &read, nullptr) || read != sizeof(fixed)) {
@@ -108,9 +93,7 @@ namespace akkaradb::engine::cluster {
                 return false;
             }
             node_id = 0;
-            for (size_t i = 0; i < 8; ++i) {
-                node_id |= static_cast<uint64_t>(fixed[i]) << (8 * i);
-            }
+            for (size_t i = 0; i < 8; ++i) { node_id |= static_cast<uint64_t>(fixed[i]) << (8 * i); }
             repl_port = static_cast<uint16_t>(fixed[8]) | static_cast<uint16_t>(fixed[9] << 8);
             const uint16_t host_len = static_cast<uint16_t>(fixed[10]) | static_cast<uint16_t>(fixed[11] << 8);
             host.resize(host_len);
@@ -120,18 +103,14 @@ namespace akkaradb::engine::cluster {
             }
             ::CloseHandle(h);
             return true;
-        }
-
-        bool tcp_reachable(const std::string& host, uint16_t port) noexcept {
+        } bool tcp_reachable(const std::string& host, uint16_t port) noexcept {
             net_init();
             addrinfo hints{};
             hints.ai_family = AF_INET;
             hints.ai_socktype = SOCK_STREAM;
             addrinfo* result = nullptr;
             const std::string port_s = std::to_string(port);
-            if (::getaddrinfo(host.c_str(), port_s.c_str(), &hints, &result) != 0) {
-                return false;
-            }
+            if (::getaddrinfo(host.c_str(), port_s.c_str(), &hints, &result) != 0) { return false; }
             SOCKET sock = ::socket(result->ai_family, result->ai_socktype, result->ai_protocol);
             if (sock == INVALID_SOCKET) {
                 ::freeaddrinfo(result);
@@ -142,15 +121,13 @@ namespace akkaradb::engine::cluster {
             ::freeaddrinfo(result);
             return ok;
         }
-#else
+        #else
         using LockHandle = int;
         constexpr LockHandle INVALID_LOCK = -1;
 
         LockHandle try_acquire_lock(const std::filesystem::path& path) {
             int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0644);
-            if (fd < 0) {
-                return INVALID_LOCK;
-            }
+            if (fd < 0) { return INVALID_LOCK; }
             if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
                 ::close(fd);
                 return INVALID_LOCK;
@@ -168,9 +145,7 @@ namespace akkaradb::engine::cluster {
         bool write_lock_file(LockHandle fd, const NodeInfo& self) {
             const auto host_len = static_cast<uint16_t>(self.host.size());
             std::vector<uint8_t> bytes(12 + host_len);
-            for (size_t i = 0; i < 8; ++i) {
-                bytes[i] = static_cast<uint8_t>(self.node_id >> (8 * i));
-            }
+            for (size_t i = 0; i < 8; ++i) { bytes[i] = static_cast<uint8_t>(self.node_id >> (8 * i)); }
             bytes[8] = static_cast<uint8_t>(self.repl_port);
             bytes[9] = static_cast<uint8_t>(self.repl_port >> 8);
             bytes[10] = static_cast<uint8_t>(host_len);
@@ -183,18 +158,14 @@ namespace akkaradb::engine::cluster {
 
         bool read_lock_file(const std::filesystem::path& path, uint64_t& node_id, uint16_t& repl_port, std::string& host) {
             int fd = ::open(path.c_str(), O_RDONLY);
-            if (fd < 0) {
-                return false;
-            }
+            if (fd < 0) { return false; }
             uint8_t fixed[12]{};
             if (::read(fd, fixed, sizeof(fixed)) != static_cast<ssize_t>(sizeof(fixed))) {
                 ::close(fd);
                 return false;
             }
             node_id = 0;
-            for (size_t i = 0; i < 8; ++i) {
-                node_id |= static_cast<uint64_t>(fixed[i]) << (8 * i);
-            }
+            for (size_t i = 0; i < 8; ++i) { node_id |= static_cast<uint64_t>(fixed[i]) << (8 * i); }
             repl_port = static_cast<uint16_t>(fixed[8]) | static_cast<uint16_t>(fixed[9] << 8);
             const uint16_t host_len = static_cast<uint16_t>(fixed[10]) | static_cast<uint16_t>(fixed[11] << 8);
             host.resize(host_len);
@@ -212,9 +183,7 @@ namespace akkaradb::engine::cluster {
             hints.ai_socktype = SOCK_STREAM;
             addrinfo* result = nullptr;
             const std::string port_s = std::to_string(port);
-            if (::getaddrinfo(host.c_str(), port_s.c_str(), &hints, &result) != 0) {
-                return false;
-            }
+            if (::getaddrinfo(host.c_str(), port_s.c_str(), &hints, &result) != 0) { return false; }
             int sock = ::socket(result->ai_family, result->ai_socktype, result->ai_protocol);
             if (sock < 0) {
                 ::freeaddrinfo(result);
@@ -225,7 +194,7 @@ namespace akkaradb::engine::cluster {
             ::freeaddrinfo(result);
             return ok;
         }
-#endif
+        #endif
     } // namespace
 
     class ClusterManager::Impl {
@@ -233,11 +202,8 @@ namespace akkaradb::engine::cluster {
             Impl(std::filesystem::path db_dir, ClusterConfig config, uint64_t self_node_id)
                 : db_dir_{std::move(db_dir)}, config_{std::move(config)}, self_node_id_{self_node_id} {
                 config_.validate();
-                if (const NodeInfo* self = config_.find_by_id(self_node_id_)) {
-                    self_ = *self;
-                } else if (!config_.is_standalone()) {
-                    throw std::runtime_error("ClusterManager: self_node_id not found in cluster config");
-                }
+                if (const NodeInfo* self = config_.find_by_id(self_node_id_)) { self_ = *self; }
+                else if (!config_.is_standalone()) { throw std::runtime_error("ClusterManager: self_node_id not found in cluster config"); }
             }
 
             ~Impl() { close(); }
@@ -252,9 +218,7 @@ namespace akkaradb::engine::cluster {
                     set_role(NodeRole::Standalone);
                     return;
                 }
-                if (running_.exchange(true)) {
-                    return;
-                }
+                if (running_.exchange(true)) { return; }
                 std::filesystem::create_directories(db_dir_);
                 elect_role();
                 monitor_thread_ = std::thread([this] { monitor_loop(); });
@@ -263,9 +227,7 @@ namespace akkaradb::engine::cluster {
             void close() {
                 running_.store(false);
                 monitor_cv_.notify_all();
-                if (monitor_thread_.joinable()) {
-                    monitor_thread_.join();
-                }
+                if (monitor_thread_.joinable()) { monitor_thread_.join(); }
                 release_lock(lock_handle_);
                 lock_handle_ = INVALID_LOCK;
             }
@@ -287,31 +249,23 @@ namespace akkaradb::engine::cluster {
         private:
             void set_role(NodeRole role) {
                 const NodeRole old = role_.exchange(role);
-                if (old == role) {
-                    return;
-                }
+                if (old == role) { return; }
                 RoleChangeCallback cb;
                 {
                     std::lock_guard lock{callback_mutex_};
                     cb = callback_;
                 }
-                if (cb) {
-                    cb(role);
-                }
+                if (cb) { cb(role); }
             }
 
             void elect_role() {
                 const auto lock_path = db_dir_ / "PRIMARY.lock";
                 LockHandle h = INVALID_LOCK;
-                if (self_.coordinator_eligible()) {
-                    h = try_acquire_lock(lock_path);
-                }
+                if (self_.coordinator_eligible()) { h = try_acquire_lock(lock_path); }
 
                 if (h != INVALID_LOCK) {
                     lock_handle_ = h;
-                    if (!write_lock_file(h, self_)) {
-                        throw std::runtime_error("ClusterManager: failed to write PRIMARY.lock");
-                    }
+                    if (!write_lock_file(h, self_)) { throw std::runtime_error("ClusterManager: failed to write PRIMARY.lock"); }
                     {
                         std::lock_guard lock{primary_mutex_};
                         primary_host_ = self_.host;
@@ -340,9 +294,7 @@ namespace akkaradb::engine::cluster {
                 while (running_.load()) {
                     std::unique_lock lock{monitor_mutex_};
                     monitor_cv_.wait_for(lock, interval, [this] { return !running_.load(); });
-                    if (!running_.load()) {
-                        break;
-                    }
+                    if (!running_.load()) { break; }
                     lock.unlock();
 
                     if (role() != NodeRole::Replica) {
@@ -387,9 +339,7 @@ namespace akkaradb::engine::cluster {
     };
 
     std::unique_ptr<ClusterManager> ClusterManager::create(std::filesystem::path db_dir, ClusterConfig config, uint64_t self_node_id) {
-        return std::unique_ptr<ClusterManager>(
-            new ClusterManager(std::make_unique<Impl>(std::move(db_dir), std::move(config), self_node_id))
-        );
+        return std::unique_ptr<ClusterManager>(new ClusterManager(std::make_unique<Impl>(std::move(db_dir), std::move(config), self_node_id)));
     }
 
     ClusterManager::ClusterManager(std::unique_ptr<Impl> impl) : impl_{std::move(impl)} {}

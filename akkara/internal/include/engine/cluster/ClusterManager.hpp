@@ -58,11 +58,7 @@ namespace akkaradb::engine::cluster {
              *         non-standalone config.
              * @throws std::invalid_argument if config is invalid.
              */
-            [[nodiscard]] static std::unique_ptr<ClusterManager> create(
-                std::filesystem::path db_dir,
-                ClusterConfig config,
-                uint64_t self_node_id
-            );
+            [[nodiscard]] static std::unique_ptr<ClusterManager> create(std::filesystem::path db_dir, ClusterConfig config, uint64_t self_node_id);
 
             ~ClusterManager();
 

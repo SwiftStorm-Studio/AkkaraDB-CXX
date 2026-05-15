@@ -27,9 +27,7 @@
 
 namespace akkaradb::engine::wal {
     enum class WalSyncMode : uint8_t {
-        Sync = 0,
-        Async = 1,
-        Off = 2,
+        Sync = 0, Async = 1, Off = 2,
     };
 
     struct WalOptions {
@@ -53,13 +51,7 @@ namespace akkaradb::engine::wal {
             WalWriter(WalWriter&&) = delete;
             WalWriter& operator=(WalWriter&&) = delete;
 
-            void append(
-                std::span<const uint8_t> key,
-                std::span<const uint8_t> value,
-                uint64_t seq,
-                uint8_t flags,
-                uint64_t precomputed_fp64 = 0
-            );
+            void append(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t seq, uint8_t flags, uint64_t precomputed_fp64 = 0);
 
             void force_sync();
             void prune_until(uint64_t checkpoint_seq);

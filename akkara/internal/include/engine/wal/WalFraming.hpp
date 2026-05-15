@@ -68,13 +68,7 @@ namespace akkaradb::engine::wal {
 
         [[nodiscard]] bool verify_lengths(size_t max_entry_bytes) const noexcept;
         [[nodiscard]] bool verify_checksum(std::span<const uint8_t> key, std::span<const uint8_t> value) const noexcept;
-        [[nodiscard]] static WalEntryHeader build(
-            uint64_t seq,
-            uint64_t key_fp64,
-            uint16_t key_len,
-            uint32_t value_len,
-            uint16_t flags
-        ) noexcept;
+        [[nodiscard]] static WalEntryHeader build(uint64_t seq, uint64_t key_fp64, uint16_t key_len, uint32_t value_len, uint16_t flags) noexcept;
         void serialize(uint8_t out[SIZE]) const noexcept;
         [[nodiscard]] static WalEntryHeader deserialize(const uint8_t in[SIZE]) noexcept;
     };

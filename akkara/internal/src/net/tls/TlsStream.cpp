@@ -48,19 +48,46 @@
 
 namespace akkaradb::net {
     namespace {
-#ifdef _WIN32
-        using native_socket_t = SOCKET;
-        constexpr native_socket_t INVALID_NATIVE_SOCKET = INVALID_SOCKET;
-#else
+        #ifdef _WIN32
+        using native_socket_t = SOCKET; constexpr native_socket_t INVALID_NATIVE_SOCKET = INVALID_SOCKET;
+        #else
         using native_socket_t = int;
         constexpr native_socket_t INVALID_NATIVE_SOCKET = -1;
-#endif
+        #endif
 
         constexpr std::array<unsigned char, 32> DEFAULT_CLUSTER_PSK{
-            0x41, 0x6b, 0x6b, 0x61, 0x72, 0x61, 0x44, 0x42,
-            0x53, 0x50, 0x45, 0x43, 0x76, 0x35, 0x54, 0x4c,
-            0x53, 0x50, 0x53, 0x4b, 0x21, 0x63, 0x6c, 0x75,
-            0x73, 0x74, 0x65, 0x72, 0x21, 0x30, 0x31, 0x00,
+            0x41,
+            0x6b,
+            0x6b,
+            0x61,
+            0x72,
+            0x61,
+            0x44,
+            0x42,
+            0x53,
+            0x50,
+            0x45,
+            0x43,
+            0x76,
+            0x35,
+            0x54,
+            0x4c,
+            0x53,
+            0x50,
+            0x53,
+            0x4b,
+            0x21,
+            0x63,
+            0x6c,
+            0x75,
+            0x73,
+            0x74,
+            0x65,
+            0x72,
+            0x21,
+            0x30,
+            0x31,
+            0x00,
         };
         constexpr const char* DEFAULT_CLUSTER_IDENTITY = "akkaradb-cluster";
 
@@ -70,52 +97,46 @@ namespace akkaradb::net {
             return buf;
         }
 
-        [[noreturn]] void throw_mbedtls(const char* what, int code) {
-            throw std::runtime_error(std::string{what} + " failed: " + std::to_string(code));
-        }
+        [[noreturn]] void throw_mbedtls(const char* what, int code) { throw std::runtime_error(std::string{what} + " failed: " + std::to_string(code)); }
 
         [[nodiscard]] bool socket_valid(native_socket_t socket) noexcept {
-#ifdef _WIN32
+            #ifdef _WIN32
             return socket != INVALID_SOCKET;
-#else
+            #else
             return socket >= 0;
-#endif
+            #endif
         }
 
         void close_native_socket(native_socket_t& socket) noexcept {
-            if (!socket_valid(socket)) {
-                return;
-            }
-#ifdef _WIN32
+            if (!socket_valid(socket)) { return; }
+            #ifdef _WIN32
             ::closesocket(socket);
-#else
+            #else
             ::close(socket);
-#endif
+            #endif
             socket = INVALID_NATIVE_SOCKET;
         }
 
         void shutdown_native_socket(native_socket_t socket) noexcept {
-            if (!socket_valid(socket)) {
-                return;
-            }
-#ifdef _WIN32
+            if (!socket_valid(socket)) { return; }
+            #ifdef _WIN32
             ::shutdown(socket, SD_BOTH);
-#else
+            #else
             ::shutdown(socket, SHUT_RDWR);
-#endif
+            #endif
         }
 
         void ensure_tls_socket_runtime() {
-#ifdef _WIN32
-            static std::once_flag once;
-            std::call_once(once, [] {
-                WSADATA data{};
-                const int ret = WSAStartup(MAKEWORD(2, 2), &data);
-                if (ret != 0) {
-                    throw std::runtime_error("TlsStream: WSAStartup failed: " + std::to_string(ret));
+            #ifdef _WIN32
+            static std::once_flag once; std::call_once(
+                once,
+                [] {
+                    WSADATA data{};
+                    const int ret = WSAStartup(MAKEWORD(2, 2), &data);
+                    if (ret != 0) { throw std::runtime_error("TlsStream: WSAStartup failed: " + std::to_string(ret)); }
                 }
-            });
-#endif
+            );
+            #endif
         }
 
         [[nodiscard]] native_socket_t connect_native_socket(const char* host, uint16_t port) {
@@ -124,34 +145,30 @@ namespace akkaradb::net {
             addrinfo hints{};
             hints.ai_family = AF_UNSPEC;
             hints.ai_socktype = SOCK_STREAM;
-#ifdef _WIN32
+            #ifdef _WIN32
             hints.ai_protocol = IPPROTO_TCP;
-#else
+            #else
             hints.ai_protocol = IPPROTO_TCP;
-#endif
+            #endif
 
             addrinfo* result = nullptr;
             const auto port_s = port_to_string(port);
             const int gai = ::getaddrinfo(host, port_s.c_str(), &hints, &result);
-            if (gai != 0) {
-                throw std::runtime_error("TlsStream::connect: getaddrinfo failed");
-            }
+            if (gai != 0) { throw std::runtime_error("TlsStream::connect: getaddrinfo failed"); }
 
             native_socket_t connected = INVALID_NATIVE_SOCKET;
             for (addrinfo* it = result; it != nullptr; it = it->ai_next) {
                 const auto candidate = ::socket(it->ai_family, it->ai_socktype, it->ai_protocol);
-                if (!socket_valid(candidate)) {
-                    continue;
-                }
+                if (!socket_valid(candidate)) { continue; }
 
                 const int rc = ::connect(
                     candidate,
                     it->ai_addr,
-#ifdef _WIN32
+                    #ifdef _WIN32
                     static_cast<int>(it->ai_addrlen)
-#else
+                    #else
                     it->ai_addrlen
-#endif
+                    #endif
                 );
                 if (rc == 0) {
                     connected = candidate;
@@ -163,9 +180,7 @@ namespace akkaradb::net {
             }
 
             ::freeaddrinfo(result);
-            if (!socket_valid(connected)) {
-                throw std::runtime_error("TlsStream::connect: connect failed");
-            }
+            if (!socket_valid(connected)) { throw std::runtime_error("TlsStream::connect: connect failed"); }
             return connected;
         }
 
@@ -175,68 +190,44 @@ namespace akkaradb::net {
 
         int bio_send(void* ctx, const unsigned char* buf, size_t len) noexcept {
             auto* bio = static_cast<SocketBio*>(ctx);
-            if (bio == nullptr || !socket_valid(bio->socket)) {
-                return MBEDTLS_ERR_NET_INVALID_CONTEXT;
-            }
-#ifdef _WIN32
-            const int n = ::send(bio->socket, reinterpret_cast<const char*>(buf), static_cast<int>(len), 0);
-            if (n < 0) {
+            if (bio == nullptr || !socket_valid(bio->socket)) { return MBEDTLS_ERR_NET_INVALID_CONTEXT; }
+            #ifdef _WIN32
+            const int n = ::send(bio->socket, reinterpret_cast<const char*>(buf), static_cast<int>(len), 0); if (n < 0) {
                 const int err = WSAGetLastError();
-                if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
-                    return MBEDTLS_ERR_SSL_WANT_WRITE;
-                }
-                if (err == WSAECONNRESET || err == WSAECONNABORTED || err == WSAENOTCONN) {
-                    return MBEDTLS_ERR_NET_CONN_RESET;
-                }
+                if (err == WSAEWOULDBLOCK || err == WSAEINTR) { return MBEDTLS_ERR_SSL_WANT_WRITE; }
+                if (err == WSAECONNRESET || err == WSAECONNABORTED || err == WSAENOTCONN) { return MBEDTLS_ERR_NET_CONN_RESET; }
                 return MBEDTLS_ERR_NET_SEND_FAILED;
             }
-#else
+            #else
             const ssize_t n = ::send(bio->socket, buf, len, 0);
             if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                    return MBEDTLS_ERR_SSL_WANT_WRITE;
-                }
-                if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
-                    return MBEDTLS_ERR_NET_CONN_RESET;
-                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) { return MBEDTLS_ERR_SSL_WANT_WRITE; }
+                if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) { return MBEDTLS_ERR_NET_CONN_RESET; }
                 return MBEDTLS_ERR_NET_SEND_FAILED;
             }
-#endif
+            #endif
             return n;
         }
 
         int bio_recv(void* ctx, unsigned char* buf, size_t len) noexcept {
             auto* bio = static_cast<SocketBio*>(ctx);
-            if (bio == nullptr || !socket_valid(bio->socket)) {
-                return MBEDTLS_ERR_NET_INVALID_CONTEXT;
-            }
-#ifdef _WIN32
-            const int n = ::recv(bio->socket, reinterpret_cast<char*>(buf), static_cast<int>(len), 0);
-            if (n < 0) {
+            if (bio == nullptr || !socket_valid(bio->socket)) { return MBEDTLS_ERR_NET_INVALID_CONTEXT; }
+            #ifdef _WIN32
+            const int n = ::recv(bio->socket, reinterpret_cast<char*>(buf), static_cast<int>(len), 0); if (n < 0) {
                 const int err = WSAGetLastError();
-                if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
-                    return MBEDTLS_ERR_SSL_WANT_READ;
-                }
-                if (err == WSAECONNRESET || err == WSAECONNABORTED || err == WSAENOTCONN) {
-                    return MBEDTLS_ERR_NET_CONN_RESET;
-                }
+                if (err == WSAEWOULDBLOCK || err == WSAEINTR) { return MBEDTLS_ERR_SSL_WANT_READ; }
+                if (err == WSAECONNRESET || err == WSAECONNABORTED || err == WSAENOTCONN) { return MBEDTLS_ERR_NET_CONN_RESET; }
                 return MBEDTLS_ERR_NET_RECV_FAILED;
             }
-#else
+            #else
             const ssize_t n = ::recv(bio->socket, buf, len, 0);
             if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                    return MBEDTLS_ERR_SSL_WANT_READ;
-                }
-                if (errno == ECONNRESET || errno == ENOTCONN) {
-                    return MBEDTLS_ERR_NET_CONN_RESET;
-                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) { return MBEDTLS_ERR_SSL_WANT_READ; }
+                if (errno == ECONNRESET || errno == ENOTCONN) { return MBEDTLS_ERR_NET_CONN_RESET; }
                 return MBEDTLS_ERR_NET_RECV_FAILED;
             }
-#endif
-            if (n == 0) {
-                return MBEDTLS_ERR_NET_CONN_RESET;
-            }
+            #endif
+            if (n == 0) { return MBEDTLS_ERR_NET_CONN_RESET; }
             return n;
         }
     } // namespace
@@ -289,16 +280,12 @@ namespace akkaradb::net {
     void TlsStream::connect(const char* host, uint16_t port, const TlsConfig& config) {
         ensure_tls_socket_runtime();
         close();
-        if (host == nullptr) {
-            throw std::invalid_argument("TlsStream::connect: host is null");
-        }
+        if (host == nullptr) { throw std::invalid_argument("TlsStream::connect: host is null"); }
 
         impl_ = new Impl();
         impl_->bio.socket = connect_native_socket(host, port);
 
-        try {
-            setup(config, MBEDTLS_SSL_IS_CLIENT, host);
-        }
+        try { setup(config, MBEDTLS_SSL_IS_CLIENT, host); }
         catch (...) {
             close();
             throw;
@@ -311,9 +298,7 @@ namespace akkaradb::net {
         impl_ = new Impl();
         impl_->bio.socket = static_cast<native_socket_t>(native_socket);
 
-        try {
-            setup(config, MBEDTLS_SSL_IS_SERVER, nullptr);
-        }
+        try { setup(config, MBEDTLS_SSL_IS_SERVER, nullptr); }
         catch (...) {
             close();
             throw;
@@ -322,42 +307,29 @@ namespace akkaradb::net {
 
     void TlsStream::setup(const TlsConfig& config, int endpoint, const char* hostname) {
         int ret = mbedtls_ctr_drbg_seed(&impl_->drbg, mbedtls_entropy_func, &impl_->entropy, nullptr, 0);
-        if (ret != 0) {
-            throw_mbedtls("mbedtls_ctr_drbg_seed", ret);
-        }
+        if (ret != 0) { throw_mbedtls("mbedtls_ctr_drbg_seed", ret); }
 
         ret = mbedtls_ssl_config_defaults(&impl_->cfg, endpoint, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
-        if (ret != 0) {
-            throw_mbedtls("mbedtls_ssl_config_defaults", ret);
-        }
+        if (ret != 0) { throw_mbedtls("mbedtls_ssl_config_defaults", ret); }
 
         mbedtls_ssl_conf_rng(&impl_->cfg, mbedtls_ctr_drbg_random, &impl_->drbg);
 
-        const bool has_cert = config.cert_path != nullptr && config.cert_path[0] != '\0' &&
-                              config.key_path != nullptr && config.key_path[0] != '\0';
+        const bool has_cert = config.cert_path != nullptr && config.cert_path[0] != '\0' && config.key_path != nullptr && config.key_path[0] != '\0';
         const bool has_ca = config.ca_path != nullptr && config.ca_path[0] != '\0';
 
         if (has_ca) {
             ret = mbedtls_x509_crt_parse_file(&impl_->ca_cert, config.ca_path);
-            if (ret != 0) {
-                throw_mbedtls("mbedtls_x509_crt_parse_file(ca)", ret);
-            }
+            if (ret != 0) { throw_mbedtls("mbedtls_x509_crt_parse_file(ca)", ret); }
             mbedtls_ssl_conf_ca_chain(&impl_->cfg, &impl_->ca_cert, nullptr);
         }
 
         if (has_cert) {
             ret = mbedtls_x509_crt_parse_file(&impl_->own_cert, config.cert_path);
-            if (ret != 0) {
-                throw_mbedtls("mbedtls_x509_crt_parse_file(cert)", ret);
-            }
+            if (ret != 0) { throw_mbedtls("mbedtls_x509_crt_parse_file(cert)", ret); }
             ret = mbedtls_pk_parse_keyfile(&impl_->own_key, config.key_path, nullptr, mbedtls_ctr_drbg_random, &impl_->drbg);
-            if (ret != 0) {
-                throw_mbedtls("mbedtls_pk_parse_keyfile", ret);
-            }
+            if (ret != 0) { throw_mbedtls("mbedtls_pk_parse_keyfile", ret); }
             ret = mbedtls_ssl_conf_own_cert(&impl_->cfg, &impl_->own_cert, &impl_->own_key);
-            if (ret != 0) {
-                throw_mbedtls("mbedtls_ssl_conf_own_cert", ret);
-            }
+            if (ret != 0) { throw_mbedtls("mbedtls_ssl_conf_own_cert", ret); }
         }
 
         if (!has_cert) {
@@ -365,88 +337,58 @@ namespace akkaradb::net {
             const size_t psk_len = config.psk != nullptr ? config.psk_len : DEFAULT_CLUSTER_PSK.size();
             const char* identity = config.psk_identity != nullptr ? config.psk_identity : DEFAULT_CLUSTER_IDENTITY;
             ret = mbedtls_ssl_conf_psk(&impl_->cfg, psk, psk_len, reinterpret_cast<const unsigned char*>(identity), std::strlen(identity));
-            if (ret != 0) {
-                throw_mbedtls("mbedtls_ssl_conf_psk", ret);
-            }
+            if (ret != 0) { throw_mbedtls("mbedtls_ssl_conf_psk", ret); }
             mbedtls_ssl_conf_authmode(&impl_->cfg, MBEDTLS_SSL_VERIFY_NONE);
         }
-        else {
-            mbedtls_ssl_conf_authmode(&impl_->cfg, config.verify_peer && has_ca ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_NONE);
-        }
+        else { mbedtls_ssl_conf_authmode(&impl_->cfg, config.verify_peer && has_ca ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_NONE); }
 
         ret = mbedtls_ssl_setup(&impl_->ssl, &impl_->cfg);
-        if (ret != 0) {
-            throw_mbedtls("mbedtls_ssl_setup", ret);
-        }
+        if (ret != 0) { throw_mbedtls("mbedtls_ssl_setup", ret); }
 
         if (hostname != nullptr && has_ca) {
             ret = mbedtls_ssl_set_hostname(&impl_->ssl, hostname);
-            if (ret != 0) {
-                throw_mbedtls("mbedtls_ssl_set_hostname", ret);
-            }
+            if (ret != 0) { throw_mbedtls("mbedtls_ssl_set_hostname", ret); }
         }
 
         mbedtls_ssl_set_bio(&impl_->ssl, &impl_->bio, bio_send, bio_recv, nullptr);
 
         for (;;) {
             ret = mbedtls_ssl_handshake(&impl_->ssl);
-            if (ret == 0) {
-                break;
-            }
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-                continue;
-            }
+            if (ret == 0) { break; }
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) { continue; }
             throw_mbedtls("mbedtls_ssl_handshake", ret);
         }
 
         if (config.verify_peer && has_ca) {
             const uint32_t flags = mbedtls_ssl_get_verify_result(&impl_->ssl);
-            if (flags != 0) {
-                throw std::runtime_error("TlsStream: peer certificate verification failed");
-            }
+            if (flags != 0) { throw std::runtime_error("TlsStream: peer certificate verification failed"); }
         }
     }
 
     std::size_t TlsStream::send(const void* data, std::size_t size) {
-        if (impl_ == nullptr) {
-            throw std::runtime_error("tls send on closed stream");
-        }
+        if (impl_ == nullptr) { throw std::runtime_error("tls send on closed stream"); }
         for (;;) {
             const int ret = mbedtls_ssl_write(&impl_->ssl, static_cast<const unsigned char*>(data), size);
-            if (ret > 0) {
-                return static_cast<std::size_t>(ret);
-            }
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-                continue;
-            }
+            if (ret > 0) { return static_cast<std::size_t>(ret); }
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) { continue; }
             throw_mbedtls("mbedtls_ssl_write", ret);
         }
     }
 
     std::size_t TlsStream::recv(void* data, std::size_t size) {
-        if (impl_ == nullptr) {
-            throw std::runtime_error("tls recv on closed stream");
-        }
+        if (impl_ == nullptr) { throw std::runtime_error("tls recv on closed stream"); }
         for (;;) {
             const int ret = mbedtls_ssl_read(&impl_->ssl, static_cast<unsigned char*>(data), size);
-            if (ret > 0) {
-                return static_cast<std::size_t>(ret);
-            }
-            if (ret == 0) {
-                throw std::runtime_error("tls connection closed");
-            }
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-                continue;
-            }
+            if (ret > 0) { return static_cast<std::size_t>(ret); }
+            if (ret == 0) { throw std::runtime_error("tls connection closed"); }
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) { continue; }
             throw_mbedtls("mbedtls_ssl_read", ret);
         }
     }
 
     void TlsStream::close() noexcept {
         if (impl_ != nullptr) {
-            if (socket_valid(impl_->bio.socket)) {
-                (void)mbedtls_ssl_close_notify(&impl_->ssl);
-            }
+            if (socket_valid(impl_->bio.socket)) { (void)mbedtls_ssl_close_notify(&impl_->ssl); }
             delete impl_;
             impl_ = nullptr;
         }

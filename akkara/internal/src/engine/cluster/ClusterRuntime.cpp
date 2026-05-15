@@ -39,12 +39,12 @@ namespace akkaradb::engine::cluster {
                   self_node_id_{self_node_id},
                   callbacks_{std::move(callbacks)},
                   runtime_options_{std::move(runtime_options)} {
-                manager_->set_role_change_callback([this](NodeRole role) {
-                    install_role(role);
-                    if (callbacks_.role_change) {
-                        callbacks_.role_change(role);
+                manager_->set_role_change_callback(
+                    [this](NodeRole role) {
+                        install_role(role);
+                        if (callbacks_.role_change) { callbacks_.role_change(role); }
                     }
-                });
+                );
             }
 
             ~Impl() { close(); }
@@ -52,9 +52,7 @@ namespace akkaradb::engine::cluster {
             void start() {
                 {
                     std::lock_guard lock{mutex_};
-                    if (started_) {
-                        return;
-                    }
+                    if (started_) { return; }
                     started_ = true;
                 }
                 manager_->start();
@@ -81,16 +79,12 @@ namespace akkaradb::engine::cluster {
                 uint64_t source_node_id
             ) {
                 std::lock_guard lock{mutex_};
-                if (server_) {
-                    server_->ship_entry(seq, op, key, value, record_flags, source_node_id);
-                }
+                if (server_) { server_->ship_entry(seq, op, key, value, record_flags, source_node_id); }
             }
 
             void ship_blob(uint64_t seq, uint64_t blob_id, std::span<const uint8_t> content) {
                 std::lock_guard lock{mutex_};
-                if (server_) {
-                    server_->ship_blob(seq, blob_id, content);
-                }
+                if (server_) { server_->ship_blob(seq, blob_id, content); }
             }
 
         private:
@@ -100,17 +94,9 @@ namespace akkaradb::engine::cluster {
 
                 if (role == NodeRole::Primary) {
                     const auto* self = config_.find_by_id(self_node_id_);
-                    if (!self && !config_.is_standalone()) {
-                        throw std::runtime_error("ClusterRuntime: self node is missing from config");
-                    }
+                    if (!self && !config_.is_standalone()) { throw std::runtime_error("ClusterRuntime: self node is missing from config"); }
                     const uint16_t repl_port = self ? self->repl_port : 0;
-                    server_ = ReplicationServer::create(
-                        repl_port,
-                        self_node_id_,
-                        callbacks_.get_current_seq,
-                        config_.ack_policy(),
-                        runtime_options_
-                    );
+                    server_ = ReplicationServer::create(repl_port, self_node_id_, callbacks_.get_current_seq, config_.ack_policy(), runtime_options_);
                     server_->start();
                 }
                 else if (role == NodeRole::Replica) {
@@ -158,13 +144,9 @@ namespace akkaradb::engine::cluster {
         ClusterEngineCallbacks callbacks,
         ClusterRuntimeOptions runtime_options
     ) {
-        return std::unique_ptr<ClusterRuntime>(new ClusterRuntime(std::make_unique<Impl>(
-            std::move(db_dir),
-            std::move(config),
-            self_node_id,
-            std::move(callbacks),
-            std::move(runtime_options)
-        )));
+        return std::unique_ptr<ClusterRuntime>(
+            new ClusterRuntime(std::make_unique<Impl>(std::move(db_dir), std::move(config), self_node_id, std::move(callbacks), std::move(runtime_options)))
+        );
     }
 
     ClusterRuntime::ClusterRuntime(std::unique_ptr<Impl> impl) : impl_{std::move(impl)} {}
@@ -186,11 +168,7 @@ namespace akkaradb::engine::cluster {
         std::span<const uint8_t> value,
         uint8_t record_flags,
         uint64_t source_node_id
-    ) {
-        impl_->ship_entry(seq, op, key, value, record_flags, source_node_id);
-    }
+    ) { impl_->ship_entry(seq, op, key, value, record_flags, source_node_id); }
 
-    void ClusterRuntime::ship_blob(uint64_t seq, uint64_t blob_id, std::span<const uint8_t> content) {
-        impl_->ship_blob(seq, blob_id, content);
-    }
+    void ClusterRuntime::ship_blob(uint64_t seq, uint64_t blob_id, std::span<const uint8_t> content) { impl_->ship_blob(seq, blob_id, content); }
 } // namespace akkaradb::engine::cluster

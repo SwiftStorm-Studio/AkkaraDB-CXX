@@ -28,7 +28,6 @@
 #include "cpu/CRC32C.hpp"
 
 namespace akkaradb::engine::manifest {
-
     // ============================================================================
     // ManifestRecordType
     // ============================================================================
@@ -89,20 +88,20 @@ namespace akkaradb::engine::manifest {
      */
     #pragma pack(push, 1)
     struct ManifestFileHeader {
-        static constexpr uint32_t MAGIC   = 0x35564D41; ///< "AMV5" (Manifest v5)
+        static constexpr uint32_t MAGIC = 0x35564D41; ///< "AMV5" (Manifest v5)
         static constexpr uint16_t VERSION = 0x0001;
 
         uint32_t magic;
         uint16_t version;
         uint16_t flags;
-        uint32_t file_seq;        ///< Rotation counter
-        uint64_t created_at_us;   ///< Creation timestamp (μs since epoch)
+        uint32_t file_seq; ///< Rotation counter
+        uint64_t created_at_us; ///< Creation timestamp (μs since epoch)
         uint32_t crc32c;
-        uint8_t  reserved[8];
+        uint8_t reserved[8];
 
         static constexpr size_t SIZE = 32;
 
-        [[nodiscard]] bool verify_magic()   const noexcept { return magic == MAGIC; }
+        [[nodiscard]] bool verify_magic() const noexcept { return magic == MAGIC; }
         [[nodiscard]] bool verify_version() const noexcept { return version == VERSION; }
 
         /**
@@ -144,8 +143,8 @@ namespace akkaradb::engine::manifest {
      */
     #pragma pack(push, 1)
     struct ManifestRecordHeader {
-        uint8_t  type;
-        uint8_t  flags;
+        uint8_t type;
+        uint8_t flags;
         uint16_t payload_len;
         uint32_t crc32c;
 
@@ -154,11 +153,7 @@ namespace akkaradb::engine::manifest {
         /**
          * Builds a header for a given payload.
          */
-        [[nodiscard]] static ManifestRecordHeader build(
-            ManifestRecordType type,
-            const uint8_t* payload,
-            uint16_t payload_len
-        ) noexcept;
+        [[nodiscard]] static ManifestRecordHeader build(ManifestRecordType type, const uint8_t* payload, uint16_t payload_len) noexcept;
 
         /**
          * Serializes this header to an 8-byte output buffer.
@@ -225,11 +220,7 @@ namespace akkaradb::engine::manifest {
      * Payload fixed (12 bytes): [ts_us:u64][level:u8][input_count:u8][reserved:u16]
      * Variable: [len:u16][bytes] × input_count
      */
-    [[nodiscard]] std::vector<uint8_t> encode_compaction_start(
-        uint64_t ts_us,
-        int level,
-        const std::vector<std::string>& inputs
-    );
+    [[nodiscard]] std::vector<uint8_t> encode_compaction_start(uint64_t ts_us, int level, const std::vector<std::string>& inputs);
 
     /**
      * Encodes a CompactionEnd payload.
@@ -270,10 +261,7 @@ namespace akkaradb::engine::manifest {
      * Payload fixed (10 bytes): [ts_us:u64][reason_len:u16]
      * Variable: reason bytes
      */
-    [[nodiscard]] std::vector<uint8_t> encode_truncate(
-        uint64_t ts_us,
-        const std::optional<std::string>& reason
-    );
+    [[nodiscard]] std::vector<uint8_t> encode_truncate(uint64_t ts_us, const std::optional<std::string>& reason);
 
     /**
      * Encodes a CompactionCommit payload (atomic multi-file compaction result).
@@ -308,7 +296,7 @@ namespace akkaradb::engine::manifest {
     struct DecodedSSTSeal {
         uint64_t ts_us;
         uint64_t entries;
-        int      level;
+        int level;
         std::string name;
         std::optional<std::string> first_key_hex;
         std::optional<std::string> last_key_hex;
@@ -328,7 +316,7 @@ namespace akkaradb::engine::manifest {
     struct DecodedCompactionEnd {
         uint64_t ts_us;
         uint64_t entries;
-        int      level;
+        int level;
         std::string output;
         std::vector<std::string> inputs;
         std::optional<std::string> first_key_hex;

@@ -30,30 +30,34 @@ namespace akkaradb::engine::cluster {
      * ReplMsgType - Replication wire message discriminator.
      */
     enum class ReplMsgType : uint8_t {
-        ClientHello = 0x01, ///< Replica -> primary handshake with last applied seq.
-        ServerHello = 0x02, ///< Primary -> replica handshake response.
-        Entry = 0x10,       ///< Replicated put/remove entry.
-        BlobPut = 0x11,     ///< Replicated external blob payload.
-        Ack = 0x12,         ///< Replica acknowledgement for an Entry seq.
-        ReadRequest = 0x20, ///< Reserved point-in-time read request.
-        ReadResponse = 0x21, ///< Reserved point-in-time read response.
+        ClientHello = 0x01,
+        ///< Replica -> primary handshake with last applied seq.
+        ServerHello = 0x02,
+        ///< Primary -> replica handshake response.
+        Entry = 0x10,
+        ///< Replicated put/remove entry.
+        BlobPut = 0x11,
+        ///< Replicated external blob payload.
+        Ack = 0x12,
+        ///< Replica acknowledgement for an Entry seq.
+        ReadRequest = 0x20,
+        ///< Reserved point-in-time read request.
+        ReadResponse = 0x21,
+        ///< Reserved point-in-time read response.
     };
 
     /**
      * ReplOpType - Storage mutation represented by ReplEntry.
      */
     enum class ReplOpType : uint8_t {
-        Put = 1,
-        Remove = 2,
+        Put = 1, Remove = 2,
     };
 
     /**
      * ReadStatus - Result code for replicated read responses.
      */
     enum class ReadStatus : uint8_t {
-        Found = 0,
-        NotFound = 1,
-        Error = 2,
+        Found = 0, NotFound = 1, Error = 2,
     };
 
     /**
@@ -69,10 +73,10 @@ namespace akkaradb::engine::cluster {
         static constexpr uint32_t MAGIC = 0x35524B41; // "AKR5"
         static constexpr size_t SIZE = 14;
 
-        ReplMsgType type{};    ///< Message discriminator.
-        uint8_t flags = 0;     ///< Reserved per-frame flags.
+        ReplMsgType type{}; ///< Message discriminator.
+        uint8_t flags = 0; ///< Reserved per-frame flags.
         uint32_t payload_len = 0; ///< Payload byte length.
-        uint32_t crc32c = 0;   ///< CRC32C of the payload bytes.
+        uint32_t crc32c = 0; ///< CRC32C of the payload bytes.
     };
 
     /**
@@ -86,32 +90,32 @@ namespace akkaradb::engine::cluster {
 
     /** Replica-to-primary handshake payload. */
     struct ClientHello {
-        uint64_t node_id = 0;   ///< Replica node id.
-        uint64_t last_seq = 0;  ///< Last sequence already applied by the replica.
+        uint64_t node_id = 0; ///< Replica node id.
+        uint64_t last_seq = 0; ///< Last sequence already applied by the replica.
         NodeRole role = NodeRole::Replica; ///< Expected to be NodeRole::Replica.
     };
 
     /** Primary-to-replica handshake response payload. */
     struct ServerHello {
-        uint64_t node_id = 0;      ///< Primary node id.
-        uint64_t current_seq = 0;  ///< Primary's current sequence at handshake time.
+        uint64_t node_id = 0; ///< Primary node id.
+        uint64_t current_seq = 0; ///< Primary's current sequence at handshake time.
         NodeRole role = NodeRole::Primary; ///< Expected to be NodeRole::Primary.
     };
 
     /** Replicated key/value mutation payload. */
     struct ReplEntry {
-        uint64_t seq = 0;             ///< Monotonic sequence assigned by the source engine.
-        uint64_t source_node_id = 0;  ///< Node that originally produced the entry.
+        uint64_t seq = 0; ///< Monotonic sequence assigned by the source engine.
+        uint64_t source_node_id = 0; ///< Node that originally produced the entry.
         ReplOpType op = ReplOpType::Put; ///< Mutation type.
-        uint8_t record_flags = 0;     ///< Record flags preserved for storage apply.
-        std::vector<uint8_t> key;     ///< Raw key bytes.
-        std::vector<uint8_t> value;   ///< Raw value bytes, empty for Remove.
+        uint8_t record_flags = 0; ///< Record flags preserved for storage apply.
+        std::vector<uint8_t> key; ///< Raw key bytes.
+        std::vector<uint8_t> value; ///< Raw value bytes, empty for Remove.
     };
 
     /** Replicated blob payload. */
     struct ReplBlob {
-        uint64_t seq = 0;          ///< Sequence associated with the blob reference.
-        uint64_t blob_id = 0;      ///< Stable blob identifier.
+        uint64_t seq = 0; ///< Sequence associated with the blob reference.
+        uint64_t blob_id = 0; ///< Stable blob identifier.
         std::vector<uint8_t> content; ///< Raw blob content.
     };
 

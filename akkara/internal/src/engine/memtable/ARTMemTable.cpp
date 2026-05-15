@@ -185,12 +185,7 @@ namespace akkaradb::engine {
     }
 
     void ARTMemTable::insert_child_sorted(ChildVec& children, uint8_t edge, NodeBase* child) {
-        const auto pos = std::lower_bound(
-            children.begin(),
-            children.end(),
-            edge,
-            [](const ChildEntry& entry, uint8_t key) { return entry.first < key; }
-        );
+        const auto pos = std::lower_bound(children.begin(), children.end(), edge, [](const ChildEntry& entry, uint8_t key) { return entry.first < key; });
         children.insert(pos, ChildEntry{edge, child});
     }
 
@@ -343,7 +338,8 @@ namespace akkaradb::engine {
                 if (new_edge < existing_edge) {
                     split_children.emplace_back(new_edge, new_child);
                     split_children.emplace_back(existing_edge, existing_child);
-                } else {
+                }
+                else {
                     split_children.emplace_back(existing_edge, existing_child);
                     split_children.emplace_back(new_edge, new_child);
                 }

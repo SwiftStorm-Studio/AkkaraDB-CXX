@@ -63,7 +63,13 @@ namespace akkaradb::engine::sst {
             return 0;
         }
 
-        [[nodiscard]] bool key_equals(const core::SSTHdr32& hdr, const uint8_t* key_data, std::span<const uint8_t> target, uint64_t target_fp, uint64_t target_mini) noexcept {
+        [[nodiscard]] bool key_equals(
+            const core::SSTHdr32& hdr,
+            const uint8_t* key_data,
+            std::span<const uint8_t> target,
+            uint64_t target_fp,
+            uint64_t target_mini
+        ) noexcept {
             if (hdr.k_len != target.size()) { return false; }
             if (hdr.key_fp64 != target_fp || hdr.mini_key != target_mini) { return false; }
             if (hdr.k_len == 0) { return true; }
@@ -93,8 +99,7 @@ namespace akkaradb::engine::sst {
                 std::shared_ptr<Block> block;
             };
 
-            Impl(std::filesystem::path path, Options options)
-                : path_{std::move(path)}, options_{options} {}
+            Impl(std::filesystem::path path, Options options) : path_{std::move(path)}, options_{options} {}
 
             [[nodiscard]] bool open() {
                 try {
@@ -115,7 +120,8 @@ namespace akkaradb::engine::sst {
                     const uint32_t stored_footer = footer.footer_crc32c;
                     footer.footer_crc32c = 0;
                     const uint32_t computed_footer = cpu::CRC32C(reinterpret_cast<const std::byte*>(&footer), sizeof(footer));
-                    if (stored_footer != computed_footer || footer.magic != SST_FOOTER_MAGIC_V2 || footer.version != SST_VERSION_V2 || footer.header_crc32c != stored) { return false; }
+                    if (stored_footer != computed_footer || footer.magic != SST_FOOTER_MAGIC_V2 || footer.version != SST_VERSION_V2 || footer.header_crc32c !=
+                        stored) { return false; }
 
                     index_.resize(static_cast<size_t>(header_.block_count));
                     if (!index_.empty()) { read_at(header_.index_offset, index_.data(), index_.size() * sizeof(SSTBlockIndexEntryV2)); }
@@ -125,10 +131,14 @@ namespace akkaradb::engine::sst {
                     std::memcpy(&bloom_header_, bloom_data_.data(), sizeof(bloom_header_));
                     if (bloom_header_.bits_size + sizeof(SSTBloomHeaderV2) != bloom_data_.size()) { return false; }
                     if (!index_.empty()) {
-                        first_key_.assign(arena_key(key_arena_, index_.front().first_key_offset, index_.front().first_key_len).begin(),
-                                          arena_key(key_arena_, index_.front().first_key_offset, index_.front().first_key_len).end());
-                        last_key_.assign(arena_key(key_arena_, index_.back().last_key_offset, index_.back().last_key_len).begin(),
-                                         arena_key(key_arena_, index_.back().last_key_offset, index_.back().last_key_len).end());
+                        first_key_.assign(
+                            arena_key(key_arena_, index_.front().first_key_offset, index_.front().first_key_len).begin(),
+                            arena_key(key_arena_, index_.front().first_key_offset, index_.front().first_key_len).end()
+                        );
+                        last_key_.assign(
+                            arena_key(key_arena_, index_.back().last_key_offset, index_.back().last_key_len).begin(),
+                            arena_key(key_arena_, index_.back().last_key_offset, index_.back().last_key_len).end()
+                        );
                     }
                     cache_capacity_ = options_.block_cache_bytes;
                     return true;
@@ -293,9 +303,8 @@ namespace akkaradb::engine::sst {
                         block->data.resize(bh.uncompressed_size);
                         const size_t n = ZSTD_decompress(block->data.data(), block->data.size(), payload.data(), payload.size());
                         if (ZSTD_isError(n) || n != bh.uncompressed_size) { return nullptr; }
-                    } else {
-                        block->data.assign(payload.begin(), payload.end());
                     }
+                    else { block->data.assign(payload.begin(), payload.end()); }
                     if (offsets_bytes.size() % sizeof(uint32_t) != 0) { return nullptr; }
                     block->offsets.resize(offsets_bytes.size() / sizeof(uint32_t));
                     if (!block->offsets.empty()) { std::memcpy(block->offsets.data(), offsets_bytes.data(), offsets_bytes.size()); }
@@ -421,12 +430,11 @@ namespace akkaradb::engine::sst {
     std::optional<SSTRecord> SSTReader::get(std::span<const uint8_t> key) const { return impl_->get(key); }
     std::optional<bool> SSTReader::contains(std::span<const uint8_t> key) const { return impl_->contains(key); }
     std::optional<bool> SSTReader::get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const { return impl_->get_into(key, out); }
+
     core::ArenaGenerator<SSTRecord> SSTReader::scan(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key) const {
-        return impl_->scan(
-            std::vector<uint8_t>(start_key.begin(), start_key.end()),
-            std::vector<uint8_t>(end_key.begin(), end_key.end())
-        );
+        return impl_->scan(std::vector<uint8_t>(start_key.begin(), start_key.end()), std::vector<uint8_t>(end_key.begin(), end_key.end()));
     }
+
     bool SSTReader::key_in_range(std::span<const uint8_t> key) const noexcept { return impl_->key_in_range(key); }
     const SSTFileHeaderV2& SSTReader::header() const noexcept { return impl_->header(); }
     std::span<const uint8_t> SSTReader::first_key() const noexcept { return impl_->first_key(); }

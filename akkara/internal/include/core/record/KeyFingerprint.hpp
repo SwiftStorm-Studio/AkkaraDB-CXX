@@ -59,7 +59,5 @@ namespace akkaradb::core {
     /**
      * Builds the mini-key prefix hint from the first up to eight key bytes.
      */
-    [[nodiscard]] inline uint64_t build_mini_key(std::span<const uint8_t> key) noexcept {
-        return key.empty() ? 0ULL : build_mini_key(key.data(), key.size());
-    }
+    [[nodiscard]] inline uint64_t build_mini_key(std::span<const uint8_t> key) noexcept { return key.empty() ? 0ULL : build_mini_key(key.data(), key.size()); }
 } // namespace akkaradb::core

@@ -34,43 +34,43 @@ namespace akkaradb::engine::cluster {
      * using rendezvous hashing.
      */
     enum class ReplicationMode : uint8_t {
-        Standalone = 0,
-        Mirror = 1,
-        Stripe = 2,
+        Standalone = 0, Mirror = 1, Stripe = 2,
     };
 
     /**
      * AckPolicyMode - Durability policy for primary-to-replica shipping.
      */
     enum class AckPolicyMode : uint8_t {
-        Async = 0,  ///< Return without waiting for replica acknowledgements.
-        All = 1,    ///< Wait until all currently live replicas acknowledge.
-        Quorum = 2, ///< Wait until at least AckPolicy::quorum replicas acknowledge.
+        Async = 0,
+        ///< Return without waiting for replica acknowledgements.
+        All = 1,
+        ///< Wait until all currently live replicas acknowledge.
+        Quorum = 2,
+        ///< Wait until at least AckPolicy::quorum replicas acknowledge.
     };
 
     /**
      * TransportMode - Network transport used by replication links.
      */
     enum class TransportMode : uint8_t {
-        TLS = 0,
-        Plain = 1,
+        TLS = 0, Plain = 1,
     };
 
     /**
      * NodeRole - Runtime role selected by ClusterManager.
      */
     enum class NodeRole : uint8_t {
-        Standalone = 0,
-        Primary = 1,
-        Replica = 2,
+        Standalone = 0, Primary = 1, Replica = 2,
     };
 
     /**
      * NodeCapability - Bit flags describing what a node may do.
      */
     enum NodeCapability : uint32_t {
-        CoordinatorEligible = 1u << 0, ///< Node may acquire PRIMARY.lock and serve as primary.
-        DataBearing = 1u << 1,         ///< Node can store key/value data and receive routed writes.
+        CoordinatorEligible = 1u << 0,
+        ///< Node may acquire PRIMARY.lock and serve as primary.
+        DataBearing = 1u << 1,
+        ///< Node can store key/value data and receive routed writes.
     };
 
     /**
@@ -85,21 +85,17 @@ namespace akkaradb::engine::cluster {
      * NodeInfo - Persistent identity and connection endpoints for one node.
      */
     struct NodeInfo {
-        uint64_t node_id = 0;              ///< Stable node id.  Zero is reserved.
-        std::string host;                  ///< Hostname or address used by peer nodes.
-        uint16_t data_port = 0;            ///< Public data API port.
-        uint16_t repl_port = 0;            ///< Replication listener port.
+        uint64_t node_id = 0; ///< Stable node id.  Zero is reserved.
+        std::string host; ///< Hostname or address used by peer nodes.
+        uint16_t data_port = 0; ///< Public data API port.
+        uint16_t repl_port = 0; ///< Replication listener port.
         uint32_t capabilities = DataBearing; ///< OR-ed NodeCapability flags.
 
         /** Returns true if this node may become primary. */
-        [[nodiscard]] bool coordinator_eligible() const noexcept {
-            return (capabilities & CoordinatorEligible) != 0;
-        }
+        [[nodiscard]] bool coordinator_eligible() const noexcept { return (capabilities & CoordinatorEligible) != 0; }
 
         /** Returns true if this node participates in data placement. */
-        [[nodiscard]] bool data_bearing() const noexcept {
-            return (capabilities & DataBearing) != 0;
-        }
+        [[nodiscard]] bool data_bearing() const noexcept { return (capabilities & DataBearing) != 0; }
     };
 
     /**
@@ -107,9 +103,9 @@ namespace akkaradb::engine::cluster {
      */
     struct ClusterTlsOptions {
         std::filesystem::path cert_path; ///< Local certificate path.
-        std::filesystem::path key_path;  ///< Local private-key path.
-        std::filesystem::path ca_path;   ///< CA bundle used for peer verification.
-        bool verify_peer = true;         ///< Whether TLS peers must validate against ca_path.
+        std::filesystem::path key_path; ///< Local private-key path.
+        std::filesystem::path ca_path; ///< CA bundle used for peer verification.
+        bool verify_peer = true; ///< Whether TLS peers must validate against ca_path.
     };
 
     /**

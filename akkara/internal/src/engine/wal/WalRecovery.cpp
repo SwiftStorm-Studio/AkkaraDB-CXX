@@ -70,19 +70,18 @@ namespace akkaradb::engine::wal {
                 files.push_back(SegmentFile{entry.path(), hdr});
             }
 
-            std::sort(files.begin(), files.end(), [](const SegmentFile& a, const SegmentFile& b) {
-                if (a.header.shard_id != b.header.shard_id) { return a.header.shard_id < b.header.shard_id; }
-                return a.header.segment_id < b.header.segment_id;
-            });
+            std::sort(
+                files.begin(),
+                files.end(),
+                [](const SegmentFile& a, const SegmentFile& b) {
+                    if (a.header.shard_id != b.header.shard_id) { return a.header.shard_id < b.header.shard_id; }
+                    return a.header.segment_id < b.header.segment_id;
+                }
+            );
             return files;
         }
 
-        void recover_segment(
-            const SegmentFile& segment,
-            const WalRecoveryOptions& options,
-            const WalRecovery::Callback& callback,
-            WalRecoveryResult& result
-        ) {
+        void recover_segment(const SegmentFile& segment, const WalRecoveryOptions& options, const WalRecovery::Callback& callback, WalRecoveryResult& result) {
             std::ifstream file(segment.path, std::ios::binary);
             if (!file) { throw std::runtime_error("WAL recovery failed to open segment: " + segment.path.string()); }
             file.seekg(WalSegmentHeader::SIZE, std::ios::beg);
@@ -146,16 +145,19 @@ namespace akkaradb::engine::wal {
     }
 
     WalRecoveryResult WalRecovery::recover_into(const WalRecoveryOptions& options, memtable::MemTable& memtable) {
-        WalRecoveryResult result = recover(options, [&](const WalRecoveredEntry& entry) {
-            memtable.put(
-                std::span<const uint8_t>{entry.key.data(), entry.key.size()},
-                std::span<const uint8_t>{entry.value.data(), entry.value.size()},
-                entry.seq,
-                static_cast<uint8_t>(entry.flags & 0xffu),
-                entry.key_fp64,
-                0
-            );
-        });
+        WalRecoveryResult result = recover(
+            options,
+            [&](const WalRecoveredEntry& entry) {
+                memtable.put(
+                    std::span<const uint8_t>{entry.key.data(), entry.key.size()},
+                    std::span<const uint8_t>{entry.value.data(), entry.value.size()},
+                    entry.seq,
+                    static_cast<uint8_t>(entry.flags & 0xffu),
+                    entry.key_fp64,
+                    0
+                );
+            }
+        );
         if (result.max_seq > 0) { memtable.advance_seq(result.max_seq); }
         return result;
     }

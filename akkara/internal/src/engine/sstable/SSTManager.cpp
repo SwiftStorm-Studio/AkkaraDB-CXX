@@ -69,9 +69,7 @@ namespace akkaradb::engine::sst {
             };
         }
 
-        [[nodiscard]] uint64_t record_bytes(const SSTRecord& rec) noexcept {
-            return align_up_u64(32 + rec.key.size() + rec.value.size(), 8);
-        }
+        [[nodiscard]] uint64_t record_bytes(const SSTRecord& rec) noexcept { return align_up_u64(32 + rec.key.size() + rec.value.size(), 8); }
     } // namespace
 
     class SSTManager::Impl {
@@ -118,13 +116,15 @@ namespace akkaradb::engine::sst {
 
                 for (const auto& entry : std::filesystem::directory_iterator(options_.sst_dir)) {
                     const auto p = entry.path();
-                    if (p.extension() == ".tmp") { std::error_code ec; std::filesystem::remove(p, ec); }
+                    if (p.extension() == ".tmp") {
+                        std::error_code ec;
+                        std::filesystem::remove(p, ec);
+                    }
                 }
 
                 std::vector<std::string> files;
-                if (manifest_) {
-                    files = manifest_->live_sst();
-                } else {
+                if (manifest_) { files = manifest_->live_sst(); }
+                else {
                     for (const auto& entry : std::filesystem::directory_iterator(options_.sst_dir)) {
                         if (entry.path().extension() == ".aksst") { files.push_back(entry.path().filename().string()); }
                     }
@@ -139,8 +139,12 @@ namespace akkaradb::engine::sst {
                     levels_[static_cast<size_t>(meta.level)].push_back(std::move(meta));
                     const uint64_t observed_next = parse_file_id(file) + 1;
                     uint64_t current_next = next_file_id_.load(std::memory_order_relaxed);
-                    while (current_next < observed_next &&
-                           !next_file_id_.compare_exchange_weak(current_next, observed_next, std::memory_order_relaxed, std::memory_order_relaxed)) {}
+                    while (current_next < observed_next && !next_file_id_.compare_exchange_weak(
+                        current_next,
+                        observed_next,
+                        std::memory_order_relaxed,
+                        std::memory_order_relaxed
+                    )) {}
                 }
                 sort_all_levels_locked();
                 publish_locked();
@@ -173,15 +177,7 @@ namespace akkaradb::engine::sst {
                 if (!reader) { throw std::runtime_error("SSTManager: cannot reopen flushed SST"); }
                 Meta meta = make_meta(path, path.filename().string(), std::move(reader));
 
-                if (manifest_) {
-                    manifest_->sst_seal(
-                        0,
-                        meta.filename,
-                        meta.entry_count,
-                        hex_key(meta.first_key),
-                        hex_key(meta.last_key)
-                    );
-                }
+                if (manifest_) { manifest_->sst_seal(0, meta.filename, meta.entry_count, hex_key(meta.first_key), hex_key(meta.last_key)); }
 
                 {
                     std::unique_lock lock{levels_mu_};
@@ -245,9 +241,7 @@ namespace akkaradb::engine::sst {
                     for (const auto& meta : level) {
                         if (!meta.reader) { continue; }
                         auto rows = meta.reader->scan(start_key, end_key);
-                        for (auto&& row : rows) {
-                            all.push_back(std::move(row));
-                        }
+                        for (auto&& row : rows) { all.push_back(std::move(row)); }
                     }
                 }
                 dedupe_in_place(all, false);
@@ -268,9 +262,7 @@ namespace akkaradb::engine::sst {
                 return out;
             }
 
-            [[nodiscard]] bool compaction_pending() const noexcept {
-                return compact_requested_.load(std::memory_order_relaxed);
-            }
+            [[nodiscard]] bool compaction_pending() const noexcept { return compact_requested_.load(std::memory_order_relaxed); }
 
             [[nodiscard]] CompactionSnapshot compaction_snapshot() const noexcept {
                 return {
@@ -282,9 +274,7 @@ namespace akkaradb::engine::sst {
             }
 
         private:
-            [[nodiscard]] SSTReader::Options reader_options() const noexcept {
-                return SSTReader::Options{options_.block_cache_bytes};
-            }
+            [[nodiscard]] SSTReader::Options reader_options() const noexcept { return SSTReader::Options{options_.block_cache_bytes}; }
 
             [[nodiscard]] uint64_t level_budget(int level) const {
                 if (level <= 0) { return 0; }
@@ -335,9 +325,7 @@ namespace akkaradb::engine::sst {
             }
 
             void sort_all_levels_locked() {
-                if (!levels_.empty()) {
-                    std::sort(levels_[0].begin(), levels_[0].end(), [](const Meta& a, const Meta& b) { return a.filename > b.filename; });
-                }
+                if (!levels_.empty()) { std::sort(levels_[0].begin(), levels_[0].end(), [](const Meta& a, const Meta& b) { return a.filename > b.filename; }); }
                 for (size_t i = 1; i < levels_.size(); ++i) {
                     std::sort(levels_[i].begin(), levels_[i].end(), [](const Meta& a, const Meta& b) { return compare_bytes(a.first_key, b.first_key) < 0; });
                 }
@@ -352,9 +340,11 @@ namespace akkaradb::engine::sst {
                 while (!shutting_down_.load(std::memory_order_relaxed)) {
                     {
                         std::unique_lock lock{compact_mu_};
-                        compact_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
-                            return compact_requested_.load(std::memory_order_relaxed) || shutting_down_.load(std::memory_order_relaxed);
-                        });
+                        compact_cv_.wait_for(
+                            lock,
+                            std::chrono::milliseconds(50),
+                            [this] { return compact_requested_.load(std::memory_order_relaxed) || shutting_down_.load(std::memory_order_relaxed); }
+                        );
                     }
                     if (shutting_down_.load(std::memory_order_relaxed)) { break; }
                     for (;;) {
@@ -400,11 +390,15 @@ namespace akkaradb::engine::sst {
             }
 
             static void dedupe_in_place(std::vector<SSTRecord>& records, bool drop_tombstones) {
-                std::sort(records.begin(), records.end(), [](const SSTRecord& a, const SSTRecord& b) {
-                    const int c = compare_bytes(a.key, b.key);
-                    if (c != 0) { return c < 0; }
-                    return a.seq > b.seq;
-                });
+                std::sort(
+                    records.begin(),
+                    records.end(),
+                    [](const SSTRecord& a, const SSTRecord& b) {
+                        const int c = compare_bytes(a.key, b.key);
+                        if (c != 0) { return c < 0; }
+                        return a.seq > b.seq;
+                    }
+                );
                 std::vector<SSTRecord> out;
                 out.reserve(records.size());
                 for (size_t i = 0; i < records.size();) {
@@ -462,9 +456,7 @@ namespace akkaradb::engine::sst {
                 for (const auto& m : work.inputs) {
                     if (!m.reader) { continue; }
                     auto rows = m.reader->scan();
-                    for (auto&& row : rows) {
-                        merged.push_back(std::move(row));
-                    }
+                    for (auto&& row : rows) { merged.push_back(std::move(row)); }
                 }
                 dedupe_in_place(merged, work.dst == options_.max_levels - 1);
 
@@ -484,9 +476,7 @@ namespace akkaradb::engine::sst {
                 {
                     std::unique_lock lock{levels_mu_};
                     std::unordered_set<std::string> input_set(input_files.begin(), input_files.end());
-                    for (auto& level : levels_) {
-                        std::erase_if(level, [&](const Meta& m) { return input_set.count(m.filename) != 0; });
-                    }
+                    for (auto& level : levels_) { std::erase_if(level, [&](const Meta& m) { return input_set.count(m.filename) != 0; }); }
                     auto& dst_level = levels_[static_cast<size_t>(work.dst)];
                     dst_level.insert(dst_level.end(), std::make_move_iterator(outputs.begin()), std::make_move_iterator(outputs.end()));
                     sort_all_levels_locked();
@@ -535,6 +525,7 @@ namespace akkaradb::engine::sst {
     SSTManager::Iterator::Iterator() = default;
     SSTManager::Iterator::Iterator(std::vector<SSTRecord> records) : records_{std::move(records)} {}
     bool SSTManager::Iterator::has_next() const noexcept { return index_ < records_.size(); }
+
     std::optional<SSTRecord> SSTManager::Iterator::next() {
         if (!has_next()) { return std::nullopt; }
         return std::move(records_[index_++]);
@@ -544,8 +535,7 @@ namespace akkaradb::engine::sst {
         return std::unique_ptr<SSTManager>(new SSTManager(std::move(options), manifest));
     }
 
-    SSTManager::SSTManager(Options options, manifest::Manifest* manifest)
-        : impl_{std::make_unique<Impl>(std::move(options), manifest)} {}
+    SSTManager::SSTManager(Options options, manifest::Manifest* manifest) : impl_{std::make_unique<Impl>(std::move(options), manifest)} {}
 
     SSTManager::~SSTManager() = default;
     void SSTManager::recover() { impl_->recover(); }
@@ -554,9 +544,11 @@ namespace akkaradb::engine::sst {
     std::optional<SSTRecord> SSTManager::get(std::span<const uint8_t> key) const { return impl_->get(key); }
     std::optional<bool> SSTManager::contains(std::span<const uint8_t> key) const { return impl_->contains(key); }
     std::optional<bool> SSTManager::get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const { return impl_->get_into(key, out); }
+
     SSTManager::Iterator SSTManager::scan_iter(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key) const {
         return impl_->scan_iter(start_key, end_key);
     }
+
     std::vector<SSTManager::LevelStats> SSTManager::level_stats() const { return impl_->level_stats(); }
     bool SSTManager::compaction_pending() const noexcept { return impl_->compaction_pending(); }
     SSTManager::CompactionSnapshot SSTManager::compaction_snapshot() const noexcept { return impl_->compaction_snapshot(); }

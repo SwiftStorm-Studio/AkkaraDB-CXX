@@ -27,7 +27,6 @@
 #include <optional>
 
 namespace akkaradb::engine::manifest {
-
     /**
      * Manifest - Durable, append-only log of storage-engine state changes.
      *
@@ -63,8 +62,8 @@ namespace akkaradb::engine::manifest {
 
             struct CheckpointEvent {
                 std::optional<std::string> name;
-                std::optional<uint64_t>    stripe;
-                std::optional<uint64_t>    last_seq;
+                std::optional<uint64_t> stripe;
+                std::optional<uint64_t> last_seq;
                 uint64_t ts_us;
             };
 
@@ -80,14 +79,11 @@ namespace akkaradb::engine::manifest {
              * @param fast_mode Enable background-flusher (batched fsync) mode.
              * @throws std::runtime_error on I/O failure.
              */
-            [[nodiscard]] static std::unique_ptr<Manifest> create(
-                const std::filesystem::path& path,
-                bool fast_mode = false
-            );
+            [[nodiscard]] static std::unique_ptr<Manifest> create(const std::filesystem::path& path, bool fast_mode = false);
 
             ~Manifest();
 
-            Manifest(const Manifest&)            = delete;
+            Manifest(const Manifest&) = delete;
             Manifest& operator=(const Manifest&) = delete;
 
             /**
@@ -120,11 +116,7 @@ namespace akkaradb::engine::manifest {
             /**
              * Records a checkpoint marker.
              */
-            void checkpoint(
-                const std::optional<std::string>& name,
-                const std::optional<uint64_t>&    stripe,
-                const std::optional<uint64_t>&    last_seq
-            );
+            void checkpoint(const std::optional<std::string>& name, const std::optional<uint64_t>& stripe, const std::optional<uint64_t>& last_seq);
 
             /**
              * Records that a compaction has started on a set of input SSTs.
@@ -212,5 +204,4 @@ namespace akkaradb::engine::manifest {
             class Impl;
             std::unique_ptr<Impl> impl_;
     };
-
 } // namespace akkaradb::engine::manifest

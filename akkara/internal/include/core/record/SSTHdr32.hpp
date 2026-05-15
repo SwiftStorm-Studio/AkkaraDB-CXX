@@ -98,9 +98,7 @@ namespace akkaradb::core {
          * @param key_len Key length
          * @return 64-bit fingerprint
          */
-        [[nodiscard]] static uint64_t compute_key_fp64(const uint8_t* key, size_t key_len) noexcept {
-            return core::compute_key_fp64(key, key_len);
-        }
+        [[nodiscard]] static uint64_t compute_key_fp64(const uint8_t* key, size_t key_len) noexcept { return core::compute_key_fp64(key, key_len); }
 
         /**
          * Builds mini_key from the first 8 bytes of the key (Little-Endian packed).
@@ -111,9 +109,7 @@ namespace akkaradb::core {
          * @param key_len Key length
          * @return 64-bit mini_key value
          */
-        [[nodiscard]] static uint64_t build_mini_key(const uint8_t* key, size_t key_len) noexcept {
-            return core::build_mini_key(key, key_len);
-        }
+        [[nodiscard]] static uint64_t build_mini_key(const uint8_t* key, size_t key_len) noexcept { return core::build_mini_key(key, key_len); }
 
         /**
          * Creates an SSTHdr32 from key/value metadata. Also computes key_fp64 and mini_key.

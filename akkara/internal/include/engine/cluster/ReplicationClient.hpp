@@ -49,12 +49,12 @@ namespace akkaradb::engine::cluster {
              * callback invocation.
              */
             using ApplyCallback = std::function<void(
-                uint64_t seq,
-                ReplOpType op,
-                std::span<const uint8_t> key,
-                std::span<const uint8_t> value,
-                uint8_t record_flags,
-                uint64_t source_node_id
+uint64_t seq,
+ ReplOpType op,
+ std::span<const uint8_t> key,
+ std::span<const uint8_t> value,
+ uint8_t record_flags,
+ uint64_t source_node_id
             )>;
 
             /**
@@ -62,11 +62,7 @@ namespace akkaradb::engine::cluster {
              *
              * The content span is valid only for the duration of the callback.
              */
-            using BlobCallback = std::function<void(
-                uint64_t seq,
-                uint64_t blob_id,
-                std::span<const uint8_t> content
-            )>;
+            using BlobCallback = std::function<void(uint64_t seq, uint64_t blob_id, std::span<const uint8_t> content)>;
 
             /**
              * Creates a replica client.
