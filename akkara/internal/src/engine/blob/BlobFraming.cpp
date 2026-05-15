@@ -88,3 +88,47 @@ namespace akkaradb::engine::blob {
         header.header_size = get_u16(in + 6);
         header.flags = get_u32(in + 8);
         header.codec = get_u32(in + 12);
+        header.blob_id = get_u64(in + 16);
+        header.total_size = get_u64(in + 24);
+        header.stored_size = get_u64(in + 32);
+        header.content_crc32c = get_u32(in + 40);
+        header.header_crc32c = get_u32(in + 44);
+        return header;
+    }
+
+    AkBlobHeaderV5 build_blob_header(
+        uint64_t blob_id,
+        uint64_t total_size,
+        uint64_t stored_size,
+        BlobCodec codec,
+        uint32_t content_crc32c
+    ) noexcept {
+        AkBlobHeaderV5 header{};
+        header.magic = AKBLOB_MAGIC_V5;
+        header.version = AKBLOB_VERSION_V5;
+        header.header_size = AKBLOB_HEADER_SIZE_V5;
+        header.flags = codec == BlobCodec::Zstd ? AKBLOB_FLAG_ZSTD : 0;
+        header.codec = static_cast<uint32_t>(codec);
+        header.blob_id = blob_id;
+        header.total_size = total_size;
+        header.stored_size = stored_size;
+        header.content_crc32c = content_crc32c;
+        header.header_crc32c = 0;
+
+        uint8_t bytes[AKBLOB_HEADER_SIZE_V5]{};
+        serialize_blob_header(header, bytes);
+        header.header_crc32c = crc32c(std::span<const uint8_t>{bytes, AKBLOB_HEADER_SIZE_V5 - sizeof(uint32_t)});
+        return header;
+    }
+
+    bool verify_blob_header(const AkBlobHeaderV5& header) noexcept {
+        if (header.magic != AKBLOB_MAGIC_V5 || header.version != AKBLOB_VERSION_V5 || header.header_size != AKBLOB_HEADER_SIZE_V5) { return false; }
+        if (header.codec != static_cast<uint32_t>(BlobCodec::None) && header.codec != static_cast<uint32_t>(BlobCodec::Zstd)) { return false; }
+
+        AkBlobHeaderV5 copy = header;
+        copy.header_crc32c = 0;
+        uint8_t bytes[AKBLOB_HEADER_SIZE_V5]{};
+        serialize_blob_header(copy, bytes);
+        return crc32c(std::span<const uint8_t>{bytes, AKBLOB_HEADER_SIZE_V5 - sizeof(uint32_t)}) == header.header_crc32c;
+    }
+} // namespace akkaradb::engine::blob

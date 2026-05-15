@@ -252,6 +252,28 @@ set_target_properties(akkaradb_benchmark PROPERTIES
 
 install(TARGETS akkaradb_benchmark RUNTIME DESTINATION bin)
 
+# ==================== AkkEngine Smoke Test ====================
+add_executable(akkaradb_akkengine_smoke_test
+        benchmarks/akkengine_smoke_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_akkengine_smoke_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_akkengine_smoke_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_akkengine_smoke_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_akkengine_smoke_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # ==================== MemTable Smoke Test ====================
 add_executable(akkaradb_memtable_smoke_test
         benchmarks/memtable_smoke_test.cpp
