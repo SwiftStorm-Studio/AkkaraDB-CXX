@@ -16,6 +16,7 @@
 #include <format>
 #include <iostream>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -180,12 +181,78 @@ namespace {
         manifest.reset();
         fs::remove_all(dir);
     }
+
+    void test_manager_scan_iter_merges_lazily() {
+        auto dir = temp_dir("sst_scan_iter");
+        auto manifest = engine::manifest::Manifest::create(dir / "manifest.akmf", false);
+
+        sst::SSTManager::Options sopts;
+        sopts.sst_dir = dir / "sst";
+        sopts.max_l0_files = 100;
+        sopts.block_size = 4096;
+        auto manager = sst::SSTManager::create(sopts, manifest.get());
+        manager->recover();
+
+        auto make_view = [](std::vector<uint8_t>& key, std::vector<uint8_t>& value, uint64_t seq, uint8_t flags) {
+            const uint64_t fp = core::compute_key_fp64(key.data(), key.size());
+            const uint64_t mk = core::build_mini_key(key.data(), key.size());
+            return core::RecordView(key.data(), static_cast<uint16_t>(key.size()), value.data(), static_cast<uint16_t>(value.size()), seq, flags, fp, mk);
+        };
+
+        auto a = bytes("a");
+        auto b = bytes("b");
+        auto c = bytes("c");
+        auto d = bytes("d");
+        auto va = bytes("old-a");
+        auto vb1 = bytes("old-b");
+        auto vc1 = bytes("old-c");
+        std::vector<core::RecordView> batch1;
+        batch1.push_back(make_view(a, va, 1, core::SSTHdr32::FLAG_NORMAL));
+        batch1.push_back(make_view(b, vb1, 2, core::SSTHdr32::FLAG_NORMAL));
+        batch1.push_back(make_view(c, vc1, 3, core::SSTHdr32::FLAG_NORMAL));
+        manager->flush(batch1);
+
+        auto vb2 = bytes("new-b");
+        auto empty = bytes("");
+        auto vd = bytes("new-d");
+        std::vector<core::RecordView> batch2;
+        batch2.push_back(make_view(b, vb2, 10, core::SSTHdr32::FLAG_NORMAL));
+        batch2.push_back(make_view(c, empty, 11, core::SSTHdr32::FLAG_TOMBSTONE));
+        batch2.push_back(make_view(d, vd, 12, core::SSTHdr32::FLAG_NORMAL));
+        manager->flush(batch2);
+
+        std::vector<std::string> keys;
+        std::vector<std::string> values;
+        {
+            auto it = manager->scan_iter();
+            while (it.has_next()) {
+                auto rec = it.next();
+                if (!rec) { throw std::runtime_error("scan_iter has_next returned true but next returned nullopt"); }
+                keys.push_back(str(rec->key));
+                values.push_back(str(rec->value));
+            }
+        }
+        if (keys != std::vector<std::string>{"a", "b", "d"} || values != std::vector<std::string>{"old-a", "new-b", "new-d"}) {
+            std::string msg = "scan_iter mismatch\nkeys:";
+            for (const auto& key : keys) { msg += " " + key; }
+            msg += "\nvalues:";
+            for (const auto& value : values) { msg += " " + value; }
+            throw std::runtime_error(msg);
+        }
+
+        manager->shutdown();
+        manager.reset();
+        manifest->close();
+        manifest.reset();
+        fs::remove_all(dir);
+    }
 }
 
 int main() {
     test_writer_reader_roundtrip();
     test_memtable_flush_manager_recover();
     test_compaction_overwrite_and_tombstone();
+    test_manager_scan_iter_merges_lazily();
     std::cout << "SST v2 smoke tests passed\n";
     return 0;
 }

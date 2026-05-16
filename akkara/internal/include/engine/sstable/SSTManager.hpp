@@ -35,6 +35,9 @@
 
 namespace akkaradb::engine::sst {
     class SSTManager {
+        private:
+            class Impl;
+
         public:
             struct Options {
                 std::filesystem::path sst_dir;
@@ -67,13 +70,20 @@ namespace akkaradb::engine::sst {
             class Iterator {
                 public:
                     Iterator();
-                    explicit Iterator(std::vector<SSTRecord> records);
+                    ~Iterator();
+                    Iterator(Iterator&&) noexcept;
+                    Iterator& operator=(Iterator&&) noexcept;
+                    Iterator(const Iterator&) = delete;
+                    Iterator& operator=(const Iterator&) = delete;
+
                     [[nodiscard]] bool has_next() const noexcept;
                     [[nodiscard]] std::optional<SSTRecord> next();
 
                 private:
-                    std::vector<SSTRecord> records_;
-                    size_t index_{0};
+                    friend class Impl;
+                    class Impl;
+                    explicit Iterator(std::unique_ptr<Impl> impl);
+                    std::unique_ptr<Impl> impl_;
             };
 
             [[nodiscard]] static std::unique_ptr<SSTManager> create(Options options, manifest::Manifest* manifest = nullptr);
@@ -97,7 +107,6 @@ namespace akkaradb::engine::sst {
 
         private:
             SSTManager(Options options, manifest::Manifest* manifest);
-            class Impl;
             std::unique_ptr<Impl> impl_;
     };
 } // namespace akkaradb::engine::sst

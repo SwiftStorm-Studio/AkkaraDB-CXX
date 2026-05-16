@@ -26,6 +26,7 @@
 #include <cstring>
 #include <format>
 #include <mutex>
+#include <queue>
 #include <set>
 #include <shared_mutex>
 #include <stdexcept>
@@ -71,6 +72,89 @@ namespace akkaradb::engine::sst {
 
         [[nodiscard]] uint64_t record_bytes(const SSTRecord& rec) noexcept { return align_up_u64(32 + rec.key.size() + rec.value.size(), 8); }
     } // namespace
+
+    class SSTManager::Iterator::Impl {
+        public:
+            Impl(std::vector<std::shared_ptr<SSTReader>> readers, std::span<const uint8_t> start_key, std::span<const uint8_t> end_key)
+                : start_key_{start_key.begin(), start_key.end()}, end_key_{end_key.begin(), end_key.end()} {
+                sources_.reserve(readers.size());
+                for (auto& reader : readers) {
+                    if (!reader) { continue; }
+                    Source source;
+                    source.reader = std::move(reader);
+                    source.rows = source.reader->scan(start_key_, end_key_);
+                    source.it = source.rows.begin();
+                    const size_t source_idx = sources_.size();
+                    sources_.push_back(std::move(source));
+                    push_current(source_idx);
+                }
+                advance();
+            }
+
+            [[nodiscard]] bool has_next() const noexcept { return pending_.has_value(); }
+
+            [[nodiscard]] std::optional<SSTRecord> next() {
+                if (!pending_) { return std::nullopt; }
+                auto out = std::move(pending_);
+                pending_.reset();
+                advance();
+                return out;
+            }
+
+        private:
+            struct Source {
+                std::shared_ptr<SSTReader> reader;
+                core::ArenaGenerator<SSTRecord> rows;
+                core::ArenaGenerator<SSTRecord>::iterator it;
+            };
+
+            struct HeapEntry {
+                SSTRecord rec;
+                size_t source_idx = 0;
+            };
+
+            struct HeapGreater {
+                bool operator()(const HeapEntry& a, const HeapEntry& b) const noexcept {
+                    const int c = compare_bytes(a.rec.key, b.rec.key);
+                    if (c != 0) { return c > 0; }
+                    return a.rec.seq < b.rec.seq;
+                }
+            };
+
+            void push_current(size_t source_idx) {
+                auto& source = sources_[source_idx];
+                if (source.it == std::default_sentinel) { return; }
+                heap_.push(HeapEntry{*source.it, source_idx});
+                ++source.it;
+            }
+
+            void advance() {
+                pending_.reset();
+                while (!heap_.empty()) {
+                    HeapEntry best = heap_.top();
+                    heap_.pop();
+                    push_current(best.source_idx);
+
+                    while (!heap_.empty() && compare_bytes(heap_.top().rec.key, best.rec.key) == 0) {
+                        HeapEntry next = heap_.top();
+                        heap_.pop();
+                        push_current(next.source_idx);
+                        if (next.rec.seq > best.rec.seq) { best.rec = std::move(next.rec); }
+                    }
+
+                    if (!best.rec.is_tombstone()) {
+                        pending_ = std::move(best.rec);
+                        return;
+                    }
+                }
+            }
+
+            std::vector<uint8_t> start_key_;
+            std::vector<uint8_t> end_key_;
+            std::vector<Source> sources_;
+            std::priority_queue<HeapEntry, std::vector<HeapEntry>, HeapGreater> heap_;
+            std::optional<SSTRecord> pending_;
+    };
 
     class SSTManager::Impl {
         public:
@@ -236,17 +320,13 @@ namespace akkaradb::engine::sst {
                 auto snap = snapshot_.load(std::memory_order_acquire);
                 if (!snap) { return Iterator{}; }
 
-                std::vector<SSTRecord> all;
+                std::vector<std::shared_ptr<SSTReader>> readers;
                 for (const auto& level : *snap) {
                     for (const auto& meta : level) {
-                        if (!meta.reader) { continue; }
-                        auto rows = meta.reader->scan(start_key, end_key);
-                        for (auto&& row : rows) { all.push_back(std::move(row)); }
+                        if (meta.reader) { readers.push_back(meta.reader); }
                     }
                 }
-                dedupe_in_place(all, false);
-                std::erase_if(all, [](const SSTRecord& rec) { return rec.is_tombstone(); });
-                return Iterator{std::move(all)};
+                return Iterator{std::make_unique<Iterator::Impl>(std::move(readers), start_key, end_key)};
             }
 
             [[nodiscard]] std::vector<LevelStats> level_stats() const {
@@ -523,12 +603,15 @@ namespace akkaradb::engine::sst {
     };
 
     SSTManager::Iterator::Iterator() = default;
-    SSTManager::Iterator::Iterator(std::vector<SSTRecord> records) : records_{std::move(records)} {}
-    bool SSTManager::Iterator::has_next() const noexcept { return index_ < records_.size(); }
+    SSTManager::Iterator::Iterator(std::unique_ptr<Impl> impl) : impl_{std::move(impl)} {}
+    SSTManager::Iterator::~Iterator() = default;
+    SSTManager::Iterator::Iterator(Iterator&&) noexcept = default;
+    SSTManager::Iterator& SSTManager::Iterator::operator=(Iterator&&) noexcept = default;
+    bool SSTManager::Iterator::has_next() const noexcept { return impl_ && impl_->has_next(); }
 
     std::optional<SSTRecord> SSTManager::Iterator::next() {
         if (!has_next()) { return std::nullopt; }
-        return std::move(records_[index_++]);
+        return impl_->next();
     }
 
     std::unique_ptr<SSTManager> SSTManager::create(Options options, manifest::Manifest* manifest) {
