@@ -224,7 +224,7 @@ endif ()
 message(STATUS "Building AkkaraDB benchmarks")
 
 add_executable(akkaradb_benchmark
-        benchmarks/benchmark.cpp
+        benchmarks/suite/benchmark.cpp
 )
 
 if (MSVC)
@@ -252,9 +252,53 @@ set_target_properties(akkaradb_benchmark PROPERTIES
 
 install(TARGETS akkaradb_benchmark RUNTIME DESTINATION bin)
 
+# ==================== API Server Smoke Test ====================
+add_executable(akkaradb_api_server_smoke_test
+        benchmarks/api/api_server_smoke_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_api_server_smoke_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_api_server_smoke_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_api_server_smoke_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_api_server_smoke_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# ==================== API Server Interactive Runner ====================
+add_executable(akkaradb_api_server_test
+        benchmarks/api/api_server_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_api_server_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_api_server_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_api_server_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_api_server_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # ==================== AkkEngine Smoke Test ====================
 add_executable(akkaradb_akkengine_smoke_test
-        benchmarks/akkengine_smoke_test.cpp
+        benchmarks/smoke/akkengine_smoke_test.cpp
 )
 
 if(MSVC)
@@ -274,9 +318,31 @@ set_target_properties(akkaradb_akkengine_smoke_test PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# ==================== Typed API Smoke Test ====================
+add_executable(akkaradb_typed_api_smoke_test
+        benchmarks/smoke/typed_api_smoke_test.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_typed_api_smoke_test PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_typed_api_smoke_test PRIVATE akkaradb)
+
+target_include_directories(akkaradb_typed_api_smoke_test
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_typed_api_smoke_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # ==================== MemTable Smoke Test ====================
 add_executable(akkaradb_memtable_smoke_test
-        benchmarks/memtable_smoke_test.cpp
+        benchmarks/smoke/memtable_smoke_test.cpp
 )
 
 if(MSVC)
@@ -298,7 +364,7 @@ set_target_properties(akkaradb_memtable_smoke_test PROPERTIES
 
 # ==================== MemTable Throughput Benchmark ====================
 add_executable(akkaradb_memtable_throughput_benchmark
-        benchmarks/memtable_throughput_benchmark.cpp
+        benchmarks/throughput/memtable_throughput_benchmark.cpp
 )
 
 if(MSVC)
@@ -320,7 +386,7 @@ set_target_properties(akkaradb_memtable_throughput_benchmark PROPERTIES
 
 # ==================== WAL Throughput Benchmark ====================
 add_executable(akkaradb_wal_throughput_benchmark
-        benchmarks/wal_throughput_benchmark.cpp
+        benchmarks/throughput/wal_throughput_benchmark.cpp
 )
 
 if(MSVC)
@@ -342,7 +408,7 @@ set_target_properties(akkaradb_wal_throughput_benchmark PROPERTIES
 
 # ==================== SSTable Throughput Benchmark ====================
 add_executable(akkaradb_sstable_throughput_benchmark
-        benchmarks/sstable_throughput_benchmark.cpp
+        benchmarks/throughput/sstable_throughput_benchmark.cpp
 )
 
 if(MSVC)
@@ -362,9 +428,31 @@ set_target_properties(akkaradb_sstable_throughput_benchmark PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+# ==================== SSTable Bloom Negative Lookup Benchmark ====================
+add_executable(akkaradb_sstable_bloom_negative_lookup_benchmark
+        benchmarks/throughput/sstable_bloom_negative_lookup_benchmark.cpp
+)
+
+if(MSVC)
+    target_compile_options(akkaradb_sstable_bloom_negative_lookup_benchmark PRIVATE /WX-)
+endif()
+
+target_link_libraries(akkaradb_sstable_bloom_negative_lookup_benchmark PRIVATE akkaradb)
+
+target_include_directories(akkaradb_sstable_bloom_negative_lookup_benchmark
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks
+        ${AKKARADB_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+set_target_properties(akkaradb_sstable_bloom_negative_lookup_benchmark PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
 # ==================== VersionLog Smoke Test ====================
 add_executable(akkaradb_versionlog_smoke_test
-        benchmarks/versionlog_smoke_test.cpp
+        benchmarks/smoke/versionlog_smoke_test.cpp
 )
 
 if(MSVC)
@@ -386,7 +474,7 @@ set_target_properties(akkaradb_versionlog_smoke_test PROPERTIES
 
 # ==================== Manifest Smoke Test ====================
 add_executable(akkaradb_manifest_smoke_test
-        benchmarks/manifest_smoke_test.cpp
+        benchmarks/smoke/manifest_smoke_test.cpp
 )
 
 if(MSVC)
@@ -408,7 +496,7 @@ set_target_properties(akkaradb_manifest_smoke_test PROPERTIES
 
 # ==================== Cluster Smoke Test ====================
 add_executable(akkaradb_cluster_smoke_test
-        benchmarks/cluster_smoke_test.cpp
+        benchmarks/smoke/cluster_smoke_test.cpp
 )
 
 if(MSVC)
@@ -430,7 +518,7 @@ set_target_properties(akkaradb_cluster_smoke_test PROPERTIES
 
 # ==================== Blob Smoke Test ====================
 add_executable(akkaradb_blob_smoke_test
-        benchmarks/blob_smoke_test.cpp
+        benchmarks/smoke/blob_smoke_test.cpp
 )
 
 if(MSVC)
@@ -452,7 +540,7 @@ set_target_properties(akkaradb_blob_smoke_test PROPERTIES
 
 # ==================== SSTable Smoke Test ====================
 add_executable(akkaradb_sstable_smoke_test
-        benchmarks/sstable_smoke_test.cpp
+        benchmarks/smoke/sstable_smoke_test.cpp
 )
 
 if(MSVC)
@@ -474,7 +562,7 @@ set_target_properties(akkaradb_sstable_smoke_test PROPERTIES
 
 # ==================== WAL Smoke Test ====================
 add_executable(akkaradb_wal_smoke_test
-        benchmarks/wal_smoke_test.cpp
+        benchmarks/smoke/wal_smoke_test.cpp
 )
 
 if(MSVC)

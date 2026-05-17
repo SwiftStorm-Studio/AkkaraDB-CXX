@@ -10,22 +10,30 @@
 // internal/include/engine/AkkEngine.hpp
 #pragma once
 
+#include "akkaradb/Stats.hpp"
 #include "engine/blob/BlobManager.hpp"
 #include "engine/cluster/ClusterConfig.hpp"
 #include "engine/memtable/MemTable.hpp"
 #include "engine/sstable/SSTManager.hpp"
 #include "engine/vlog/VersionLog.hpp"
 #include "engine/wal/WalWriter.hpp"
+#include "core/buffer/BufferArena.hpp"
 
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace akkaradb::engine {
     using VersionEntry = vlog::VersionEntry;
+
+    enum class Codec : uint8_t {
+        None = 0,
+        Zstd = 1,
+    };
 
     struct AkkEngineOptions {
         struct Paths {
@@ -46,6 +54,7 @@ namespace akkaradb::engine {
             bool sst_enabled = true;
             bool version_log_enabled = false;
             bool cluster_enabled = false;
+            bool api_enabled = false;
         } components;
 
         struct ManifestOptions {
@@ -57,6 +66,29 @@ namespace akkaradb::engine {
             cluster::ClusterRuntimeOptions runtime;
         } cluster;
 
+        enum class ApiBackend : uint8_t {
+            Http = 0,
+            Tcp = 1,
+        };
+
+        struct ApiTlsOptions {
+            std::filesystem::path cert_path;
+            std::filesystem::path key_path;
+            std::filesystem::path ca_path;
+            std::vector<uint8_t> psk;
+            std::string psk_identity;
+            bool verify_peer = true;
+        };
+
+        struct ApiOptions {
+            std::vector<ApiBackend> backends;
+            std::string bind_host;
+            uint16_t http_port = 7070;
+            uint16_t tcp_port = 7071;
+            cluster::TransportMode transport_mode = cluster::TransportMode::TLS;
+            ApiTlsOptions tls;
+        } api;
+
         struct RuntimeOptions {
             uint32_t writer_threads = 0;
             bool recover_wal = true;
@@ -64,6 +96,7 @@ namespace akkaradb::engine {
             bool prune_wal_on_flush = true;
             bool force_flush_on_close = true;
             bool force_sync_on_close = true;
+            bool sst_promote_reads = false;
         } runtime;
 
         memtable::MemTable::Options memtable;
@@ -102,17 +135,23 @@ namespace akkaradb::engine {
             AkkEngine& operator=(AkkEngine&&) = delete;
 
             void put(std::span<const uint8_t> key, std::span<const uint8_t> value);
+            void put_hinted(std::span<const uint8_t> key, std::span<const uint8_t> value, uint64_t fp64, uint64_t mini_key);
             void remove(std::span<const uint8_t> key);
+            void remove_hinted(std::span<const uint8_t> key, uint64_t fp64, uint64_t mini_key);
 
             [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::span<const uint8_t> key) const;
             [[nodiscard]] bool exists(std::span<const uint8_t> key) const;
             [[nodiscard]] bool get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const;
+            [[nodiscard]] bool get_into_arena(std::span<const uint8_t> key, core::BufferArena& arena, std::span<const uint8_t>& out) const;
+            [[nodiscard]] size_t count(std::span<const uint8_t> start_key = {}, std::span<const uint8_t> end_key = {}) const;
             [[nodiscard]] ScanIterator scan(std::span<const uint8_t> start_key = {}, std::span<const uint8_t> end_key = {}) const;
 
             [[nodiscard]] std::optional<std::vector<uint8_t>> get_at(std::span<const uint8_t> key, uint64_t at_seq) const;
             [[nodiscard]] std::vector<VersionEntry> history(std::span<const uint8_t> key) const;
             void rollback_to(uint64_t target_seq);
             void rollback_key(std::span<const uint8_t> key, uint64_t target_seq);
+
+            [[nodiscard]] EngineStats stats() const noexcept;
 
             void force_sync();
             void force_flush();

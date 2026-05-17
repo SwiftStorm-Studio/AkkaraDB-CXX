@@ -8,12 +8,12 @@
  *
  * Usage:
  *   akkaradb_sstable_throughput_benchmark [ops_per_case]
- *       [--readers=N] [--codec=none|zstd]
+ *       [--readers=N|--writers=N] [--codec=none|zstd]
  *       [--block-size=N] [--cache-bytes=N|NKiB|NMiB|NGiB]
- *       [--max-case-bytes=N|NKiB|NMiB|NGiB] [--fixed-ops]
+ *       [--max-case-bytes=N|NKiB|NMiB|NGiB] [--fixed-ops|--same-ops]
  *
  * Default:
- *   ops_per_case = 200000
+ *   ops_per_case = 500000
  *   readers      = 16
  *   codec        = zstd
  *   max payload   = 512 MiB per case unless --fixed-ops is set
@@ -47,6 +47,7 @@ namespace {
     namespace fs = std::filesystem;
 
     constexpr uint32_t kLatencySampleMask = 0x3F; // sample 1 / 64 ops to reduce benchmark perturbation
+    constexpr size_t kScanSampleWindow = 32; // amortize clock resolution/overhead for iterator scan()
 
     struct CaseSpec {
         int key_size;
@@ -238,8 +239,8 @@ namespace {
         for (int i = 0; i < count; ++i) {
             const auto& key = records.keys[static_cast<size_t>(i)];
             const auto key_span = as_u8(key);
-            const uint64_t fp = core::compute_key_fp64(key_span.data(), key_span.size());
-            const uint64_t mk = core::build_mini_key(key_span.data(), key_span.size());
+            const uint64_t fp = compute_key_fp64(key_span.data(), key_span.size());
+            const uint64_t mk = build_mini_key(key_span.data(), key_span.size());
             records.views.emplace_back(
                 key_span.data(),
                 static_cast<uint16_t>(key_span.size()),
@@ -335,15 +336,38 @@ namespace {
     ) {
         if (latency_samples_ns) {
             latency_samples_ns->clear();
+            latency_samples_ns->reserve((expected_records + kLatencySampleMask) / (kLatencySampleMask + 1));
         }
 
         uint64_t scanned = 0;
         auto rows = reader.scan();
-        for (auto&& row : rows) {
-            if (row.key.empty()) {
+        auto it = rows.begin();
+        const auto end = rows.end();
+        while (it != end) {
+            const bool do_sample = ((static_cast<uint32_t>(scanned) & kLatencySampleMask) == 0);
+            if (do_sample && latency_samples_ns) {
+                const auto t0 = Clock::now();
+                size_t window_count = 0;
+                while (window_count < kScanSampleWindow && it != end) {
+                    if (it->key.empty()) {
+                        std::fprintf(stderr, "SCAN returned an empty key at i=%llu\n", static_cast<unsigned long long>(scanned));
+                        std::exit(5);
+                    }
+                    ++it;
+                    ++window_count;
+                    ++scanned;
+                }
+                const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+                const int64_t per_record_ns = window_count > 0 ? (dt / static_cast<int64_t>(window_count)) : 0;
+                latency_samples_ns->push_back(static_cast<uint32_t>(std::min<int64_t>(per_record_ns, INT32_MAX)));
+                continue;
+            }
+
+            if (it->key.empty()) {
                 std::fprintf(stderr, "SCAN returned an empty key at i=%llu\n", static_cast<unsigned long long>(scanned));
                 std::exit(5);
             }
+            ++it;
             ++scanned;
         }
         if (scanned != expected_records) {
@@ -423,10 +447,6 @@ namespace {
         const auto scan_t0 = Clock::now();
         const uint64_t scanned = run_scan(*reader, records.keys.size(), &scan_latency_ns);
         const auto scan_ms = std::chrono::duration<double, std::milli>(Clock::now() - scan_t0).count();
-        if (scanned > 0) {
-            const double per_record_ns = scan_ms * 1000000.0 / static_cast<double>(scanned);
-            scan_latency_ns.push_back(static_cast<uint32_t>(std::min<double>(per_record_ns, static_cast<double>(INT32_MAX))));
-        }
 
         reader.reset();
         remove_temp_dir(dir);
@@ -463,7 +483,7 @@ int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg.rfind("--readers=", 0) == 0) {
+        if (arg.rfind("--readers=", 0) == 0 || arg.rfind("--writers=", 0) == 0) {
             config.reader_threads = std::max(0, std::atoi(arg.substr(10).c_str()));
             continue;
         }
@@ -507,7 +527,7 @@ int main(int argc, char** argv) {
             config.max_case_payload_bytes = parsed;
             continue;
         }
-        if (arg == "--fixed-ops") {
+        if (arg == "--fixed-ops" || arg == "--same-ops") {
             config.fixed_ops = true;
             continue;
         }
@@ -531,7 +551,7 @@ int main(int argc, char** argv) {
     std::printf("block_size = %u\n", config.block_size);
     std::printf("block_cache_bytes = %.2f MiB\n", bytes_to_mib(config.block_cache_bytes));
     if (config.fixed_ops || config.max_case_payload_bytes == 0) {
-        std::printf("max_case_payload_bytes = disabled (--fixed-ops)\n");
+        std::printf("max_case_payload_bytes = disabled (--fixed-ops/--same-ops)\n");
     } else {
         std::printf("max_case_payload_bytes = %.2f MiB\n", bytes_to_mib(config.max_case_payload_bytes));
     }

@@ -36,6 +36,14 @@ namespace akkaradb::engine::blob {
                 BlobCodec codec = BlobCodec::None;
             };
 
+            struct Snapshot {
+                uint64_t blobs_written = 0;
+                uint64_t bytes_uncompressed = 0;
+                uint64_t bytes_on_disk = 0;
+                uint64_t blobs_deleted = 0;
+                uint64_t gc_cycles = 0;
+            };
+
             [[nodiscard]] static std::unique_ptr<BlobManager> create(Options options);
 
             ~BlobManager();
@@ -58,6 +66,7 @@ namespace akkaradb::engine::blob {
 
             void schedule_delete(uint64_t blob_id);
             void scan_orphans(std::function<bool(uint64_t)> is_referenced);
+            [[nodiscard]] Snapshot snapshot() const noexcept;
 
         private:
             BlobManager() = default;

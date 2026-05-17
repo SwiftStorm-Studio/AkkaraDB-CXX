@@ -50,6 +50,18 @@ namespace {
         engine->remove(bytes("k"));
         assert(!engine->get(bytes("k")));
         assert(!engine->exists(bytes("k")));
+
+        engine->put(bytes("a"), bytes("1"));
+        engine->put(bytes("b"), bytes("2"));
+        assert(engine->count(bytes("a"), bytes("c")) == 2);
+
+        const auto stats = engine->stats();
+        assert(stats.puts_total >= 4);
+        assert(stats.removes_total >= 1);
+        assert(stats.gets_total >= 3);
+        assert(stats.exists_total >= 2);
+        assert(stats.memtable.shard_count > 0);
+
         engine->close();
         engine->close();
     }

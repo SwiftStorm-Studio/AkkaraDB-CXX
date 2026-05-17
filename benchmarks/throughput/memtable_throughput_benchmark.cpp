@@ -536,8 +536,8 @@ namespace {
                 const auto& key = keys[static_cast<size_t>(i)];
                 const uint8_t* ptr = reinterpret_cast<const uint8_t*>(key.data());
                 const size_t len = key.size();
-                key_fp64[static_cast<size_t>(i)] = core::compute_key_fp64(ptr, len);
-                key_mk[static_cast<size_t>(i)] = core::build_mini_key(ptr, len);
+                key_fp64[static_cast<size_t>(i)] = compute_key_fp64(ptr, len);
+                key_mk[static_cast<size_t>(i)] = build_mini_key(ptr, len);
             }
             fp_ptr = &key_fp64;
             mk_ptr = &key_mk;

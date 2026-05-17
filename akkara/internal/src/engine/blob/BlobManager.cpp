@@ -201,6 +201,11 @@ namespace akkaradb::engine::blob {
             std::thread gc_thread;
             std::atomic<bool> running{false};
             std::atomic<bool> started{false};
+            mutable std::atomic<uint64_t> blobs_written{0};
+            mutable std::atomic<uint64_t> bytes_uncompressed{0};
+            mutable std::atomic<uint64_t> bytes_on_disk{0};
+            mutable std::atomic<uint64_t> blobs_deleted{0};
+            mutable std::atomic<uint64_t> gc_cycles{0};
 
             [[nodiscard]] fs::path path_for(uint64_t blob_id) const {
                 const uint8_t hi = static_cast<uint8_t>(blob_id >> 56u);
@@ -255,6 +260,9 @@ namespace akkaradb::engine::blob {
                 uint8_t header_buf[AKBLOB_HEADER_SIZE_V5]{};
                 serialize_blob_header(header, header_buf);
                 write_atomic_split(path, header_buf, sizeof(header_buf), payload, payload_size);
+                blobs_written.fetch_add(1, std::memory_order_relaxed);
+                bytes_uncompressed.fetch_add(static_cast<uint64_t>(content.size()), std::memory_order_relaxed);
+                bytes_on_disk.fetch_add(static_cast<uint64_t>(sizeof(header_buf)) + static_cast<uint64_t>(payload_size), std::memory_order_relaxed);
             }
 
             void gc_loop() {
@@ -270,11 +278,15 @@ namespace akkaradb::engine::blob {
                         batch.swap(del_queue);
                     }
 
+                    if (!batch.empty()) { gc_cycles.fetch_add(1, std::memory_order_relaxed); }
                     for (uint64_t id : batch) {
                         const auto src = path_for(id);
                         auto dst = src;
                         dst += ".del";
-                        if (rename_quiet(src, dst)) { (void)remove_quiet(dst); }
+                        if (rename_quiet(src, dst)) {
+                            (void)remove_quiet(dst);
+                            blobs_deleted.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
                 }
 
@@ -283,12 +295,26 @@ namespace akkaradb::engine::blob {
                     std::lock_guard lock(del_mu);
                     final_batch.swap(del_queue);
                 }
+                if (!final_batch.empty()) { gc_cycles.fetch_add(1, std::memory_order_relaxed); }
                 for (uint64_t id : final_batch) {
                     const auto src = path_for(id);
                     auto dst = src;
                     dst += ".del";
-                    if (rename_quiet(src, dst)) { (void)remove_quiet(dst); }
+                    if (rename_quiet(src, dst)) {
+                        (void)remove_quiet(dst);
+                        blobs_deleted.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
+            }
+
+            [[nodiscard]] Snapshot snapshot() const noexcept {
+                return {
+                    blobs_written.load(std::memory_order_relaxed),
+                    bytes_uncompressed.load(std::memory_order_relaxed),
+                    bytes_on_disk.load(std::memory_order_relaxed),
+                    blobs_deleted.load(std::memory_order_relaxed),
+                    gc_cycles.load(std::memory_order_relaxed)
+                };
             }
     };
 
@@ -404,4 +430,6 @@ namespace akkaradb::engine::blob {
         }
         impl_->del_cv.notify_one();
     }
+
+    BlobManager::Snapshot BlobManager::snapshot() const noexcept { return impl_ ? impl_->snapshot() : Snapshot{}; }
 } // namespace akkaradb::engine::blob

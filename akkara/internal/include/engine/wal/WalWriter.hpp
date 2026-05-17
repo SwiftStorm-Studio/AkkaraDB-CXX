@@ -41,6 +41,15 @@ namespace akkaradb::engine::wal {
         uint64_t async_max_pending_bytes = 64ULL * 1024ULL * 1024ULL;
     };
 
+    struct WalWriterSnapshot {
+        uint32_t shard_count = 0;
+        uint64_t entries_written = 0;
+        uint64_t bytes_written = 0;
+        uint64_t batches_flushed = 0;
+        uint64_t syncs_executed = 0;
+        uint64_t segment_rotations = 0;
+    };
+
     class WalWriter {
         public:
             [[nodiscard]] static std::unique_ptr<WalWriter> create(WalOptions options);
@@ -55,6 +64,7 @@ namespace akkaradb::engine::wal {
 
             void force_sync();
             void prune_until(uint64_t checkpoint_seq);
+            [[nodiscard]] WalWriterSnapshot snapshot() const noexcept;
             void close();
 
         private:

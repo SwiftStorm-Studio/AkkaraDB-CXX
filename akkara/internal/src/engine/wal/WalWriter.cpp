@@ -24,6 +24,7 @@
 #include "engine/wal/WalFraming.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -231,7 +232,11 @@ namespace akkaradb::engine::wal {
                         std::lock_guard file_lock{file_mutex_};
                         write_one_locked(entry);
                         std::fflush(file_);
-                        if (options_.sync_mode == WalSyncMode::Sync) { do_fdatasync(file_); }
+                        batches_flushed_.fetch_add(1, std::memory_order_relaxed);
+                        if (options_.sync_mode == WalSyncMode::Sync) {
+                            do_fdatasync(file_);
+                            syncs_executed_.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
 
                     void force_sync() {
@@ -242,6 +247,7 @@ namespace akkaradb::engine::wal {
                         update_header_locked();
                         std::fflush(file_);
                         do_fdatasync(file_);
+                        syncs_executed_.fetch_add(1, std::memory_order_relaxed);
                     }
 
                     void prune_until(uint64_t checkpoint_seq) {
@@ -284,10 +290,24 @@ namespace akkaradb::engine::wal {
                         if (file_ != nullptr) {
                             update_header_locked();
                             std::fflush(file_);
-                            if (options_.sync_mode != WalSyncMode::Off) { do_fdatasync(file_); }
+                            if (options_.sync_mode != WalSyncMode::Off) {
+                                do_fdatasync(file_);
+                                syncs_executed_.fetch_add(1, std::memory_order_relaxed);
+                            }
                             close_file(file_);
                         }
                         closed_ = true;
+                    }
+
+                    [[nodiscard]] WalWriterSnapshot snapshot() const noexcept {
+                        return {
+                            1,
+                            entries_written_.load(std::memory_order_relaxed),
+                            bytes_written_.load(std::memory_order_relaxed),
+                            batches_flushed_.load(std::memory_order_relaxed),
+                            syncs_executed_.load(std::memory_order_relaxed),
+                            segment_rotations_.load(std::memory_order_relaxed)
+                        };
                     }
 
                 private:
@@ -333,9 +353,13 @@ namespace akkaradb::engine::wal {
                     void rotate_locked() {
                         update_header_locked();
                         std::fflush(file_);
-                        if (options_.sync_mode != WalSyncMode::Off) { do_fdatasync(file_); }
+                        if (options_.sync_mode != WalSyncMode::Off) {
+                            do_fdatasync(file_);
+                            syncs_executed_.fetch_add(1, std::memory_order_relaxed);
+                        }
                         close_file(file_);
                         ++segment_id_;
+                        segment_rotations_.fetch_add(1, std::memory_order_relaxed);
                         open_segment(segment_id_);
                     }
 
@@ -357,6 +381,8 @@ namespace akkaradb::engine::wal {
                         if (entry.seq > header_.last_seq) { header_.last_seq = entry.seq; }
                         write_all(file_, entry.bytes.data(), entry.bytes.size());
                         current_size_ += entry.bytes.size();
+                        entries_written_.fetch_add(1, std::memory_order_relaxed);
+                        bytes_written_.fetch_add(static_cast<uint64_t>(entry.bytes.size()), std::memory_order_relaxed);
                     }
 
                     void run_flusher() {
@@ -389,6 +415,8 @@ namespace akkaradb::engine::wal {
                                         for (const PendingEntry& entry : batch) { write_one_locked(entry); }
                                         std::fflush(file_);
                                         do_fdatasync(file_);
+                                        batches_flushed_.fetch_add(1, std::memory_order_relaxed);
+                                        syncs_executed_.fetch_add(1, std::memory_order_relaxed);
                                     }
                                     batch.clear();
                                 }
@@ -447,6 +475,12 @@ namespace akkaradb::engine::wal {
                     uint64_t in_flight_bytes_ = 0;
                     std::exception_ptr async_error_;
                     std::thread thread_;
+
+                    std::atomic<uint64_t> entries_written_{0};
+                    std::atomic<uint64_t> bytes_written_{0};
+                    std::atomic<uint64_t> batches_flushed_{0};
+                    std::atomic<uint64_t> syncs_executed_{0};
+                    std::atomic<uint64_t> segment_rotations_{0};
             };
 
             explicit Impl(WalOptions options)
@@ -477,6 +511,20 @@ namespace akkaradb::engine::wal {
 
             void prune_until(uint64_t checkpoint_seq) { for (const auto& shard : shards_) { shard->prune_until(checkpoint_seq); } }
 
+            [[nodiscard]] WalWriterSnapshot snapshot() const noexcept {
+                WalWriterSnapshot out;
+                out.shard_count = static_cast<uint32_t>(shards_.size());
+                for (const auto& shard : shards_) {
+                    const auto snap = shard->snapshot();
+                    out.entries_written += snap.entries_written;
+                    out.bytes_written += snap.bytes_written;
+                    out.batches_flushed += snap.batches_flushed;
+                    out.syncs_executed += snap.syncs_executed;
+                    out.segment_rotations += snap.segment_rotations;
+                }
+                return out;
+            }
+
             void close() {
                 if (closed_) { return; }
                 for (const auto& shard : shards_) { shard->close(); }
@@ -506,6 +554,8 @@ namespace akkaradb::engine::wal {
     void WalWriter::force_sync() { impl_->force_sync(); }
 
     void WalWriter::prune_until(uint64_t checkpoint_seq) { impl_->prune_until(checkpoint_seq); }
+
+    WalWriterSnapshot WalWriter::snapshot() const noexcept { return impl_ ? impl_->snapshot() : WalWriterSnapshot{}; }
 
     void WalWriter::close() { if (impl_) { impl_->close(); } }
 } // namespace akkaradb::engine::wal

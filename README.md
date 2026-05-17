@@ -18,7 +18,7 @@
 | **History**      | Optional per-key version log; point-in-time reads; rollback                                                 |
 | **API servers**  | HTTP REST + binary TCP, both with optional TLS (mbedTLS 3.x)                                                |
 | **Clustering**   | Standalone / Mirror / Stripe replication modes                                                              |
-| **ORM layer**    | `PackedTable<&T::field>`: typed tables, zero-config BinPack serialization, secondary indexes, query builder |
+| **ORM layer**    | `PackedTable<&T::field>`: typed tables, fast trivial-aggregate storage, BinPack serialization, non-unique secondary indexes |
 | **Portability**  | Windows (MSVC) and Linux (GCC/Clang)                                                                        |
 
 ---
@@ -76,28 +76,44 @@ struct User {
 auto db    = AkkaraDB::open("/path/to/data", StartupMode::FAST);
 
 // Primary key is &User::id — entity and key types inferred automatically
-auto users = db->table<&User::id>("users")
-                 .index<&User::name>()   // optional secondary indexes
-                 .index<&User::age>();
+auto users = db->table<&User::id>("users");
+auto by_age = users.index<&User::age>();     // non-unique secondary index
 
 users.put({1, "Alice", 30});
-users.put({2, "Bob",   25});
+users.put({2, "Bob",   30});
 
 auto alice = users.get(1ULL);                          // std::optional<User>
-auto u     = users.find_by<&User::name>("Alice");      // secondary index lookup
-users.upsert(1ULL, [](User& u) { u.age++; });
 
-// Range scan
-for (const auto& [id, user] : users.scan_all()) {
-    // ...
+User out{};
+if (users.get_into(2ULL, out)) {
+    // out contains Bob without constructing an optional
 }
 
-// Query builder
+auto age30 = by_age.find(30);                          // lazy exact-match range
+while (age30.has_next()) {
+    auto [id, user] = age30.next();
+}
+
+// Range scan
+auto scan = users.scan_all();
+while (scan.has_next()) {
+    auto [id, user] = scan.next();
+}
+
 auto adults = users
-    .query([](const User& u) { return u.age >= 18; })
+    .query([](const User& user) { return user.age >= 18; })
     .limit(100)
     .to_vector();
+
+users.remove(1ULL);
 ```
+
+SPECv5 native C++ is the canonical typed-table layout. The current C++ API keeps
+`db->table<&User::id>("users")`, adds `get_into(pk, out)` for the hot read path,
+and uses non-unique secondary indexes via handles returned from
+`auto by_age = users.index<&User::age>();`. The SPECv4 local query helpers are
+also available: `query(lambda)`, `query().where(...).limit(...)`, `upsert`,
+`find_by`, and primary-key range `scan(start, end)`.
 
 ---
 
@@ -143,6 +159,7 @@ opts.mode     = StartupMode::FAST;
 opts.overrides.blob_threshold_bytes         = 32 * 1024;   // 32 KiB externalize threshold
 opts.overrides.sst_codec                    = Codec::Zstd;  // compress SST files
 opts.overrides.blob_codec                   = Codec::Zstd;  // compress blob files
+opts.overrides.sst_promote_reads            = true;         // cache SST hits in MemTable
 opts.overrides.memtable_threshold_per_shard = 128ULL << 20; // 128 MiB/shard
 opts.overrides.sst_bloom_bits_per_key       = 10;           // ~1% false-positive
 
@@ -234,7 +251,7 @@ All dependencies are fetched automatically via CMake `FetchContent`.
 - **Blob read**: disk I/O latency + optional Zstd decompression
 - **Shard selection**: `fp64 & mask` — ~1 ns, branchless
 
-For benchmark setup and results, see `benchmarks/benchmark.cpp`.
+For benchmark setup and results, see `benchmarks/suite/benchmark.cpp`.
 
 ---
 
