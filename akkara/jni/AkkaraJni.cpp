@@ -21,22 +21,16 @@ namespace {
     using akkaradb::core::BufferArena;
     using akkaradb::engine::AkkEngine;
 
-    [[nodiscard]] AkkaraDB* db_from(jlong handle) noexcept {
-        return reinterpret_cast<AkkaraDB*>(static_cast<std::uintptr_t>(handle));
-    }
+    [[nodiscard]] AkkaraDB* db_from(jlong handle) noexcept { return reinterpret_cast<AkkaraDB*>(static_cast<std::uintptr_t>(handle)); }
 
-    [[nodiscard]] jlong to_handle(void* ptr) noexcept {
-        return static_cast<jlong>(reinterpret_cast<std::uintptr_t>(ptr));
-    }
+    [[nodiscard]] jlong to_handle(void* ptr) noexcept { return static_cast<jlong>(reinterpret_cast<std::uintptr_t>(ptr)); }
 
     void throw_java(JNIEnv* env, const char* class_name, const char* message) {
         jclass cls = env->FindClass(class_name);
         if (cls != nullptr) { env->ThrowNew(cls, message); }
     }
 
-    void throw_runtime(JNIEnv* env, const std::exception& ex) {
-        throw_java(env, "java/lang/RuntimeException", ex.what());
-    }
+    void throw_runtime(JNIEnv* env, const std::exception& ex) { throw_java(env, "java/lang/RuntimeException", ex.what()); }
 
     [[nodiscard]] std::vector<uint8_t> read_bytes(JNIEnv* env, jbyteArray array) {
         if (array == nullptr) { return {}; }
@@ -90,76 +84,73 @@ namespace {
     void assign_optional_bool(std::optional<bool>& target, jint value, const char* name) {
         switch (value) {
             case -1: return;
-            case 0: target = false; return;
-            case 1: target = true; return;
+            case 0: target = false;
+                return;
+            case 1: target = true;
+                return;
             default: throw std::runtime_error(std::string("Invalid boolean override for ") + name);
         }
     }
 
     class BytesReader {
-    public:
-        explicit BytesReader(std::span<const uint8_t> bytes) : bytes_(bytes) {}
+        public:
+            explicit BytesReader(std::span<const uint8_t> bytes) : bytes_(bytes) {}
 
-        [[nodiscard]] bool eof() const noexcept { return pos_ == bytes_.size(); }
+            [[nodiscard]] bool eof() const noexcept { return pos_ == bytes_.size(); }
 
-        [[nodiscard]] uint8_t u8() {
-            ensure(1);
-            return bytes_[pos_++];
-        }
+            [[nodiscard]] uint8_t u8() {
+                ensure(1);
+                return bytes_[pos_++];
+            }
 
-        [[nodiscard]] uint16_t u16() {
-            ensure(2);
-            const uint16_t out = static_cast<uint16_t>((static_cast<uint16_t>(bytes_[pos_]) << 8) |
-                                                       static_cast<uint16_t>(bytes_[pos_ + 1]));
-            pos_ += 2;
-            return out;
-        }
+            [[nodiscard]] uint16_t u16() {
+                ensure(2);
+                const uint16_t out = static_cast<uint16_t>((static_cast<uint16_t>(bytes_[pos_]) << 8) | static_cast<uint16_t>(bytes_[pos_ + 1]));
+                pos_ += 2;
+                return out;
+            }
 
-        [[nodiscard]] uint32_t u32() {
-            ensure(4);
-            const uint32_t out = (static_cast<uint32_t>(bytes_[pos_]) << 24) |
-                                 (static_cast<uint32_t>(bytes_[pos_ + 1]) << 16) |
-                                 (static_cast<uint32_t>(bytes_[pos_ + 2]) << 8) |
-                                 static_cast<uint32_t>(bytes_[pos_ + 3]);
-            pos_ += 4;
-            return out;
-        }
+            [[nodiscard]] uint32_t u32() {
+                ensure(4);
+                const uint32_t out = (static_cast<uint32_t>(bytes_[pos_]) << 24) | (static_cast<uint32_t>(bytes_[pos_ + 1]) << 16) | (static_cast<uint32_t>(
+                    bytes_[pos_ + 2]) << 8) | static_cast<uint32_t>(bytes_[pos_ + 3]);
+                pos_ += 4;
+                return out;
+            }
 
-        [[nodiscard]] uint64_t u64() {
-            const uint64_t hi = u32();
-            const uint64_t lo = u32();
-            return (hi << 32) | lo;
-        }
+            [[nodiscard]] uint64_t u64() {
+                const uint64_t hi = u32();
+                const uint64_t lo = u32();
+                return (hi << 32) | lo;
+            }
 
-        [[nodiscard]] std::string str_u16() {
-            const auto len = static_cast<size_t>(u16());
-            ensure(len);
-            std::string out(reinterpret_cast<const char*>(bytes_.data() + pos_), len);
-            pos_ += len;
-            return out;
-        }
+            [[nodiscard]] std::string str_u16() {
+                const auto len = static_cast<size_t>(u16());
+                ensure(len);
+                std::string out(reinterpret_cast<const char*>(bytes_.data() + pos_), len);
+                pos_ += len;
+                return out;
+            }
 
-        [[nodiscard]] std::string str_i32() {
-            const auto len = static_cast<int32_t>(u32());
-            if (len < 0) { throw std::runtime_error("Negative string length in AkkaraDB query payload"); }
-            ensure(static_cast<size_t>(len));
-            std::string out(reinterpret_cast<const char*>(bytes_.data() + pos_), static_cast<size_t>(len));
-            pos_ += static_cast<size_t>(len);
-            return out;
-        }
+            [[nodiscard]] std::string str_i32() {
+                const auto len = static_cast<int32_t>(u32());
+                if (len < 0) { throw std::runtime_error("Negative string length in AkkaraDB query payload"); }
+                ensure(static_cast<size_t>(len));
+                std::string out(reinterpret_cast<const char*>(bytes_.data() + pos_), static_cast<size_t>(len));
+                pos_ += static_cast<size_t>(len);
+                return out;
+            }
 
-        void skip(size_t len) {
-            ensure(len);
-            pos_ += len;
-        }
+            void skip(size_t len) {
+                ensure(len);
+                pos_ += len;
+            }
 
-    private:
-        void ensure(size_t len) const {
-            if (len > bytes_.size() - pos_) { throw std::runtime_error("Truncated AkkaraDB query payload"); }
-        }
+        private:
+            void ensure(size_t len) const { if (len > bytes_.size() - pos_) { throw std::runtime_error("Truncated AkkaraDB query payload"); } }
 
-        std::span<const uint8_t> bytes_;
-        size_t pos_ = 0;
+            std::span<const uint8_t> bytes_;
+            size_t pos_ = 0;
     };
 
     struct TypeDesc;
@@ -183,8 +174,7 @@ namespace {
             List = 0x0A,
             Map = 0x0B,
             Struct = 0x0C,
-            Nullable = 0x0D,
-        };
+            Nullable = 0x0D, };
 
         Kind kind;
         std::vector<FieldDesc> fields;
@@ -198,9 +188,7 @@ namespace {
     void parse_struct_fields(BytesReader& in, TypeDesc& out) {
         const auto count = in.u8();
         out.fields.reserve(count);
-        for (uint8_t i = 0; i < count; ++i) {
-            out.fields.push_back(FieldDesc{in.str_u16(), parse_type(in)});
-        }
+        for (uint8_t i = 0; i < count; ++i) { out.fields.push_back(FieldDesc{in.str_u16(), parse_type(in)}); }
     }
 
     [[nodiscard]] TypePtr parse_type(BytesReader& in) {
@@ -214,23 +202,17 @@ namespace {
             case TypeDesc::Int64:
             case TypeDesc::Float:
             case TypeDesc::Double:
-            case TypeDesc::String:
+            case TypeDesc::String: break;
+            case TypeDesc::List: out->elem = parse_type(in);
                 break;
-            case TypeDesc::List:
-                out->elem = parse_type(in);
-                break;
-            case TypeDesc::Map:
-                out->key = parse_type(in);
+            case TypeDesc::Map: out->key = parse_type(in);
                 out->value = parse_type(in);
                 break;
-            case TypeDesc::Struct:
-                parse_struct_fields(in, *out);
+            case TypeDesc::Struct: parse_struct_fields(in, *out);
                 break;
-            case TypeDesc::Nullable:
-                out->elem = parse_type(in);
+            case TypeDesc::Nullable: out->elem = parse_type(in);
                 break;
-            default:
-                throw std::runtime_error("Unknown AkkaraDB schema kind");
+            default: throw std::runtime_error("Unknown AkkaraDB schema kind");
         }
         return out;
     }
@@ -244,18 +226,50 @@ namespace {
     }
 
     struct Value {
-        enum Kind { Missing, Null, Bool, Int, Double, String } kind = Missing;
+        enum Kind {
+            Missing, Null, Bool, Int, Double, String
+        } kind = Missing;
+
         bool b = false;
         int64_t i = 0;
         double d = 0.0;
         std::string s;
 
         [[nodiscard]] static Value missing() { return {}; }
-        [[nodiscard]] static Value null() { Value v; v.kind = Null; return v; }
-        [[nodiscard]] static Value boolean(bool value) { Value v; v.kind = Bool; v.b = value; return v; }
-        [[nodiscard]] static Value integer(int64_t value) { Value v; v.kind = Int; v.i = value; return v; }
-        [[nodiscard]] static Value floating(double value) { Value v; v.kind = Double; v.d = value; return v; }
-        [[nodiscard]] static Value string(std::string value) { Value v; v.kind = String; v.s = std::move(value); return v; }
+
+        [[nodiscard]] static Value null() {
+            Value v;
+            v.kind = Null;
+            return v;
+        }
+
+        [[nodiscard]] static Value boolean(bool value) {
+            Value v;
+            v.kind = Bool;
+            v.b = value;
+            return v;
+        }
+
+        [[nodiscard]] static Value integer(int64_t value) {
+            Value v;
+            v.kind = Int;
+            v.i = value;
+            return v;
+        }
+
+        [[nodiscard]] static Value floating(double value) {
+            Value v;
+            v.kind = Double;
+            v.d = value;
+            return v;
+        }
+
+        [[nodiscard]] static Value string(std::string value) {
+            Value v;
+            v.kind = String;
+            v.s = std::move(value);
+            return v;
+        }
 
         [[nodiscard]] bool is_numeric() const noexcept { return kind == Int || kind == Double; }
         [[nodiscard]] double as_double() const noexcept { return kind == Int ? static_cast<double>(i) : d; }
@@ -266,28 +280,21 @@ namespace {
     void skip_binpack_value(BytesReader& in, const TypeDesc& type) {
         switch (type.kind) {
             case TypeDesc::Bool:
-            case TypeDesc::Int8:
-                in.skip(1);
+            case TypeDesc::Int8: in.skip(1);
                 break;
-            case TypeDesc::Int16:
-                in.skip(2);
+            case TypeDesc::Int16: in.skip(2);
                 break;
             case TypeDesc::Int32:
-            case TypeDesc::Float:
-                in.skip(4);
+            case TypeDesc::Float: in.skip(4);
                 break;
             case TypeDesc::Int64:
-            case TypeDesc::Double:
-                in.skip(8);
+            case TypeDesc::Double: in.skip(8);
                 break;
-            case TypeDesc::String:
-                in.skip(static_cast<size_t>(in.u32()));
+            case TypeDesc::String: in.skip(static_cast<size_t>(in.u32()));
                 break;
-            case TypeDesc::Nullable:
-                if (in.u8() != 0) { skip_binpack_value(in, *type.elem); }
+            case TypeDesc::Nullable: if (in.u8() != 0) { skip_binpack_value(in, *type.elem); }
                 break;
-            case TypeDesc::Struct:
-                for (const auto& field : type.fields) { skip_binpack_value(in, *field.type); }
+            case TypeDesc::Struct: for (const auto& field : type.fields) { skip_binpack_value(in, *field.type); }
                 break;
             case TypeDesc::List: {
                 const auto count = in.u32();
@@ -302,8 +309,7 @@ namespace {
                 }
                 break;
             }
-            default:
-                throw std::runtime_error("Unknown AkkaraDB schema kind while skipping value");
+            default: throw std::runtime_error("Unknown AkkaraDB schema kind while skipping value");
         }
     }
 
@@ -321,31 +327,20 @@ namespace {
 
     [[nodiscard]] Value read_binpack_value(BytesReader& in, const TypeDesc& type) {
         switch (type.kind) {
-            case TypeDesc::Bool:
-                return Value::boolean(in.u8() != 0);
-            case TypeDesc::Int8:
-                return Value::integer(static_cast<int8_t>(in.u8()));
-            case TypeDesc::Int16:
-                return Value::integer(static_cast<int16_t>(in.u16()));
-            case TypeDesc::Int32:
-                return Value::integer(static_cast<int32_t>(in.u32()));
-            case TypeDesc::Int64:
-                return Value::integer(static_cast<int64_t>(in.u64()));
-            case TypeDesc::Float:
-                return Value::floating(static_cast<double>(bits_to_float(in.u32())));
-            case TypeDesc::Double:
-                return Value::floating(bits_to_double(in.u64()));
-            case TypeDesc::String:
-                return Value::string(in.str_i32());
-            case TypeDesc::Nullable:
-                return in.u8() == 0 ? Value::null() : read_binpack_value(in, *type.elem);
+            case TypeDesc::Bool: return Value::boolean(in.u8() != 0);
+            case TypeDesc::Int8: return Value::integer(static_cast<int8_t>(in.u8()));
+            case TypeDesc::Int16: return Value::integer(static_cast<int16_t>(in.u16()));
+            case TypeDesc::Int32: return Value::integer(static_cast<int32_t>(in.u32()));
+            case TypeDesc::Int64: return Value::integer(static_cast<int64_t>(in.u64()));
+            case TypeDesc::Float: return Value::floating(static_cast<double>(bits_to_float(in.u32())));
+            case TypeDesc::Double: return Value::floating(bits_to_double(in.u64()));
+            case TypeDesc::String: return Value::string(in.str_i32());
+            case TypeDesc::Nullable: return in.u8() == 0 ? Value::null() : read_binpack_value(in, *type.elem);
             case TypeDesc::Struct:
             case TypeDesc::List:
-            case TypeDesc::Map:
-                skip_binpack_value(in, type);
+            case TypeDesc::Map: skip_binpack_value(in, type);
                 return Value::missing();
-            default:
-                throw std::runtime_error("Unknown AkkaraDB schema kind while reading value");
+            default: throw std::runtime_error("Unknown AkkaraDB schema kind while reading value");
         }
     }
 
@@ -369,9 +364,7 @@ namespace {
             if (in.u8() == 0) { return Value::null(); }
             return extract_nested(in, *type.elem, path, part);
         }
-        if (type.kind != TypeDesc::Struct) {
-            throw std::runtime_error("AkkaraDB query column path descends into a non-struct field");
-        }
+        if (type.kind != TypeDesc::Struct) { throw std::runtime_error("AkkaraDB query column path descends into a non-struct field"); }
         return extract_from_struct(in, type, path, part);
     }
 
@@ -395,7 +388,9 @@ namespace {
     }
 
     struct Expr {
-        enum Tag : uint8_t { Bin = 0x01, Un = 0x02, Lit = 0x03, Col = 0x04, Cap = 0x05 };
+        enum Tag : uint8_t {
+            Bin = 0x01, Un = 0x02, Lit = 0x03, Col = 0x04, Cap = 0x05
+        };
 
         Tag tag = Lit;
         uint8_t op = 0;
@@ -414,26 +409,16 @@ namespace {
 
     [[nodiscard]] Value parse_literal(BytesReader& in) {
         switch (in.u8()) {
-            case 0x01:
-                return Value::boolean(in.u8() != 0);
-            case 0x02:
-                return Value::integer(static_cast<int8_t>(in.u8()));
-            case 0x03:
-                return Value::integer(static_cast<int16_t>(in.u16()));
-            case 0x04:
-                return Value::integer(static_cast<int32_t>(in.u32()));
-            case 0x05:
-                return Value::integer(static_cast<int64_t>(in.u64()));
-            case 0x06:
-                return Value::floating(static_cast<double>(bits_to_float(in.u32())));
-            case 0x07:
-                return Value::floating(bits_to_double(in.u64()));
-            case 0x08:
-                return Value::string(in.str_i32());
-            case 0x09:
-                return Value::null();
-            default:
-                throw std::runtime_error("Unknown AkkaraDB query literal tag");
+            case 0x01: return Value::boolean(in.u8() != 0);
+            case 0x02: return Value::integer(static_cast<int8_t>(in.u8()));
+            case 0x03: return Value::integer(static_cast<int16_t>(in.u16()));
+            case 0x04: return Value::integer(static_cast<int32_t>(in.u32()));
+            case 0x05: return Value::integer(static_cast<int64_t>(in.u64()));
+            case 0x06: return Value::floating(static_cast<double>(bits_to_float(in.u32())));
+            case 0x07: return Value::floating(bits_to_double(in.u64()));
+            case 0x08: return Value::string(in.str_i32());
+            case 0x09: return Value::null();
+            default: throw std::runtime_error("Unknown AkkaraDB query literal tag");
         }
     }
 
@@ -441,26 +426,20 @@ namespace {
         Expr expr;
         expr.tag = static_cast<Expr::Tag>(in.u8());
         switch (expr.tag) {
-            case Expr::Bin:
-                expr.op = in.u8();
+            case Expr::Bin: expr.op = in.u8();
                 expr.lhs = std::make_unique<Expr>(parse_expr(in));
                 expr.rhs = std::make_unique<Expr>(parse_expr(in));
                 break;
-            case Expr::Un:
-                expr.op = in.u8();
+            case Expr::Un: expr.op = in.u8();
                 expr.lhs = std::make_unique<Expr>(parse_expr(in));
                 break;
-            case Expr::Lit:
-                expr.literal = parse_literal(in);
+            case Expr::Lit: expr.literal = parse_literal(in);
                 break;
-            case Expr::Col:
-                expr.column = in.str_u16();
+            case Expr::Col: expr.column = in.str_u16();
                 break;
-            case Expr::Cap:
-                expr.capture = in.u32();
+            case Expr::Cap: expr.capture = in.u32();
                 break;
-            default:
-                throw std::runtime_error("Unknown AkkaraDB query expression tag");
+            default: throw std::runtime_error("Unknown AkkaraDB query expression tag");
         }
         return expr;
     }
@@ -469,9 +448,7 @@ namespace {
         BytesReader in(query_bytes);
         QueryProgram program;
         const auto capture_count = in.u32();
-        if (capture_count > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
-            throw std::runtime_error("Too many AkkaraDB query captures");
-        }
+        if (capture_count > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) { throw std::runtime_error("Too many AkkaraDB query captures"); }
         program.captures.reserve(static_cast<size_t>(capture_count));
         for (uint32_t i = 0; i < capture_count; ++i) { program.captures.push_back(parse_literal(in)); }
         program.where = parse_expr(in);
@@ -480,9 +457,7 @@ namespace {
         return program;
     }
 
-    [[nodiscard]] bool value_is_true(const Value& value) noexcept {
-        return value.kind == Value::Bool && value.b;
-    }
+    [[nodiscard]] bool value_is_true(const Value& value) noexcept { return value.kind == Value::Bool && value.b; }
 
     [[nodiscard]] int compare_values(const Value& lhs, const Value& rhs) {
         if (lhs.is_numeric() && rhs.is_numeric()) {
@@ -490,12 +465,8 @@ namespace {
             const double b = rhs.as_double();
             return (a > b) - (a < b);
         }
-        if (lhs.kind == Value::String && rhs.kind == Value::String) {
-            return (lhs.s > rhs.s) - (lhs.s < rhs.s);
-        }
-        if (lhs.kind == Value::Bool && rhs.kind == Value::Bool) {
-            return (lhs.b > rhs.b) - (lhs.b < rhs.b);
-        }
+        if (lhs.kind == Value::String && rhs.kind == Value::String) { return (lhs.s > rhs.s) - (lhs.s < rhs.s); }
+        if (lhs.kind == Value::Bool && rhs.kind == Value::Bool) { return (lhs.b > rhs.b) - (lhs.b < rhs.b); }
         throw std::runtime_error("AkkaraDB query comparison between incompatible values");
     }
 
@@ -505,39 +476,27 @@ namespace {
         if (lhs.is_numeric() && rhs.is_numeric()) { return compare_values(lhs, rhs) == 0; }
         if (lhs.kind != rhs.kind) { return false; }
         switch (lhs.kind) {
-            case Value::Bool:
-                return lhs.b == rhs.b;
-            case Value::Int:
-                return lhs.i == rhs.i;
-            case Value::Double:
-                return lhs.d == rhs.d;
-            case Value::String:
-                return lhs.s == rhs.s;
-            default:
-                return false;
+            case Value::Bool: return lhs.b == rhs.b;
+            case Value::Int: return lhs.i == rhs.i;
+            case Value::Double: return lhs.d == rhs.d;
+            case Value::String: return lhs.s == rhs.s;
+            default: return false;
         }
     }
 
     [[nodiscard]] Value eval_expr(const QueryProgram& program, const Expr& expr, std::span<const uint8_t> row_value) {
         switch (expr.tag) {
-            case Expr::Lit:
-                return expr.literal;
-            case Expr::Cap:
-                if (expr.capture >= program.captures.size()) { throw std::runtime_error("AkkaraDB query capture index out of range"); }
+            case Expr::Lit: return expr.literal;
+            case Expr::Cap: if (expr.capture >= program.captures.size()) { throw std::runtime_error("AkkaraDB query capture index out of range"); }
                 return program.captures[expr.capture];
-            case Expr::Col:
-                return read_column(row_value, program.schema, expr.column);
+            case Expr::Col: return read_column(row_value, program.schema, expr.column);
             case Expr::Un: {
                 const Value x = eval_expr(program, *expr.lhs, row_value);
                 switch (expr.op) {
-                    case 9:
-                        return Value::boolean(!value_is_true(x));
-                    case 12:
-                        return Value::boolean(x.kind == Value::Null);
-                    case 13:
-                        return Value::boolean(x.kind != Value::Null);
-                    default:
-                        throw std::runtime_error("Unsupported AkkaraDB unary query operator");
+                    case 9: return Value::boolean(!value_is_true(x));
+                    case 12: return Value::boolean(x.kind == Value::Null);
+                    case 13: return Value::boolean(x.kind != Value::Null);
+                    default: throw std::runtime_error("Unsupported AkkaraDB unary query operator");
                 }
             }
             case Expr::Bin: {
@@ -553,34 +512,22 @@ namespace {
                 const Value lhs = eval_expr(program, *expr.lhs, row_value);
                 const Value rhs = eval_expr(program, *expr.rhs, row_value);
                 switch (expr.op) {
-                    case 1:
-                        return Value::boolean(compare_values(lhs, rhs) > 0);
-                    case 2:
-                        return Value::boolean(compare_values(lhs, rhs) >= 0);
-                    case 3:
-                        return Value::boolean(compare_values(lhs, rhs) < 0);
-                    case 4:
-                        return Value::boolean(compare_values(lhs, rhs) <= 0);
-                    case 5:
-                        return Value::boolean(values_equal(lhs, rhs));
-                    case 6:
-                        return Value::boolean(!values_equal(lhs, rhs));
-                    case 9:
-                        return Value::boolean(!value_is_true(lhs));
-                    case 12:
-                        return Value::boolean(lhs.kind == Value::Null);
-                    case 13:
-                        return Value::boolean(lhs.kind != Value::Null);
+                    case 1: return Value::boolean(compare_values(lhs, rhs) > 0);
+                    case 2: return Value::boolean(compare_values(lhs, rhs) >= 0);
+                    case 3: return Value::boolean(compare_values(lhs, rhs) < 0);
+                    case 4: return Value::boolean(compare_values(lhs, rhs) <= 0);
+                    case 5: return Value::boolean(values_equal(lhs, rhs));
+                    case 6: return Value::boolean(!values_equal(lhs, rhs));
+                    case 9: return Value::boolean(!value_is_true(lhs));
+                    case 12: return Value::boolean(lhs.kind == Value::Null);
+                    case 13: return Value::boolean(lhs.kind != Value::Null);
                     case 10:
                     case 11:
-                    case 14:
-                        throw std::runtime_error("AkkaraDB native query operator is not supported yet");
-                    default:
-                        throw std::runtime_error("Unsupported AkkaraDB binary query operator");
+                    case 14: throw std::runtime_error("AkkaraDB native query operator is not supported yet");
+                    default: throw std::runtime_error("Unsupported AkkaraDB binary query operator");
                 }
             }
-            default:
-                throw std::runtime_error("Unknown AkkaraDB query expression tag");
+            default: throw std::runtime_error("Unknown AkkaraDB query expression tag");
         }
     }
 
@@ -596,9 +543,7 @@ namespace {
         std::unique_ptr<QueryProgram> query;
     };
 
-    [[nodiscard]] ScanCursor* cursor_from(jlong handle) noexcept {
-        return reinterpret_cast<ScanCursor*>(static_cast<std::uintptr_t>(handle));
-    }
+    [[nodiscard]] ScanCursor* cursor_from(jlong handle) noexcept { return reinterpret_cast<ScanCursor*>(static_cast<std::uintptr_t>(handle)); }
 
     [[nodiscard]] jobject make_row(JNIEnv* env, std::span<const uint8_t> key, std::span<const uint8_t> value) {
         jclass byte_buffer_cls = env->FindClass("java/nio/ByteBuffer");
@@ -608,11 +553,7 @@ namespace {
 
         jclass row_cls = env->FindClass("dev/swiftstorm/akkaradb/engine/RowView");
         if (row_cls == nullptr) { return nullptr; }
-        jmethodID ctor = env->GetMethodID(
-            row_cls,
-            "<init>",
-            "(Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Lkotlin/jvm/internal/DefaultConstructorMarker;)V"
-        );
+        jmethodID ctor = env->GetMethodID(row_cls, "<init>", "(Ljava/nio/ByteBuffer;Ljava/nio/ByteBuffer;Lkotlin/jvm/internal/DefaultConstructorMarker;)V");
         if (ctor == nullptr) { return nullptr; }
         jbyteArray key_array = make_bytes(env, key);
         if (key_array == nullptr) { return nullptr; }
@@ -652,64 +593,79 @@ extern "C" {
         jlong sst_bloom_bits_per_key,
         jlong max_l0_sst_files
     ) {
-        return guard(env, [&]() -> jlong {
-            AkkaraDB::Options options;
-            options.data_dir = read_string(env, path);
-            options.mode = startup_mode_from_ordinal(mode);
+        return guard(
+            env,
+            [&]() -> jlong {
+                AkkaraDB::Options options;
+                options.data_dir = read_string(env, path);
+                options.mode = startup_mode_from_ordinal(mode);
 
-            assign_optional_non_negative(options.overrides.memtable_threshold_per_shard, memtable_threshold_per_shard);
-            assign_optional_bool(options.overrides.version_log_enabled, version_log_enabled, "versionLogEnabled");
-            if (sst_codec >= 0) { options.overrides.sst_codec = codec_from_ordinal(sst_codec); }
-            if (blob_codec >= 0) { options.overrides.blob_codec = codec_from_ordinal(blob_codec); }
-            assign_optional_non_negative(options.overrides.blob_threshold_bytes, blob_threshold_bytes);
-            assign_optional_bool(options.overrides.sst_promote_reads, sst_promote_reads, "sstPromoteReads");
-            assign_optional_non_negative(options.overrides.sst_bloom_bits_per_key, sst_bloom_bits_per_key);
-            assign_optional_non_negative(options.overrides.max_l0_sst_files, max_l0_sst_files);
+                assign_optional_non_negative(options.overrides.memtable_threshold_per_shard, memtable_threshold_per_shard);
+                assign_optional_bool(options.overrides.version_log_enabled, version_log_enabled, "versionLogEnabled");
+                if (sst_codec >= 0) { options.overrides.sst_codec = codec_from_ordinal(sst_codec); }
+                if (blob_codec >= 0) { options.overrides.blob_codec = codec_from_ordinal(blob_codec); }
+                assign_optional_non_negative(options.overrides.blob_threshold_bytes, blob_threshold_bytes);
+                assign_optional_bool(options.overrides.sst_promote_reads, sst_promote_reads, "sstPromoteReads");
+                assign_optional_non_negative(options.overrides.sst_bloom_bits_per_key, sst_bloom_bits_per_key);
+                assign_optional_non_negative(options.overrides.max_l0_sst_files, max_l0_sst_files);
 
-            auto db = AkkaraDB::open(std::move(options));
-            return to_handle(db.release());
-        });
+                auto db = AkkaraDB::open(std::move(options));
+                return to_handle(db.release());
+            }
+        );
     }
 
     JNIEXPORT void JNICALL Java_dev_swiftstorm_akkaradb_engine_AkkEngine_nativePut(JNIEnv* env, jobject, jlong handle, jbyteArray key, jbyteArray value) {
-        guard(env, [&]() {
-            auto* db = db_from(handle);
-            if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
-            const auto k = read_bytes(env, key);
-            const auto v = read_bytes(env, value);
-            db->engine().put(k, v);
-            return 0;
-        });
+        guard(
+            env,
+            [&]() {
+                auto* db = db_from(handle);
+                if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
+                const auto k = read_bytes(env, key);
+                const auto v = read_bytes(env, value);
+                db->engine().put(k, v);
+                return 0;
+            }
+        );
     }
 
     JNIEXPORT jbyteArray JNICALL Java_dev_swiftstorm_akkaradb_engine_AkkEngine_nativeGet(JNIEnv* env, jobject, jlong handle, jbyteArray key) {
-        return guard(env, [&]() -> jbyteArray {
-            auto* db = db_from(handle);
-            if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
-            const auto k = read_bytes(env, key);
-            auto value = db->engine().get(k);
-            if (!value) { return nullptr; }
-            return make_bytes(env, *value);
-        });
+        return guard(
+            env,
+            [&]() -> jbyteArray {
+                auto* db = db_from(handle);
+                if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
+                const auto k = read_bytes(env, key);
+                auto value = db->engine().get(k);
+                if (!value) { return nullptr; }
+                return make_bytes(env, *value);
+            }
+        );
     }
 
     JNIEXPORT void JNICALL Java_dev_swiftstorm_akkaradb_engine_AkkEngine_nativeRemove(JNIEnv* env, jobject, jlong handle, jbyteArray key) {
-        guard(env, [&]() {
-            auto* db = db_from(handle);
-            if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
-            const auto k = read_bytes(env, key);
-            db->engine().remove(k);
-            return 0;
-        });
+        guard(
+            env,
+            [&]() {
+                auto* db = db_from(handle);
+                if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
+                const auto k = read_bytes(env, key);
+                db->engine().remove(k);
+                return 0;
+            }
+        );
     }
 
     JNIEXPORT jboolean JNICALL Java_dev_swiftstorm_akkaradb_engine_AkkEngine_nativeExists(JNIEnv* env, jobject, jlong handle, jbyteArray key) {
-        return guard(env, [&]() -> jboolean {
-            auto* db = db_from(handle);
-            if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
-            const auto k = read_bytes(env, key);
-            return db->engine().exists(k) ? JNI_TRUE : JNI_FALSE;
-        });
+        return guard(
+            env,
+            [&]() -> jboolean {
+                auto* db = db_from(handle);
+                if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
+                const auto k = read_bytes(env, key);
+                return db->engine().exists(k) ? JNI_TRUE : JNI_FALSE;
+            }
+        );
     }
 
     JNIEXPORT jlong JNICALL Java_dev_swiftstorm_akkaradb_engine_AkkEngine_nativeCount(
@@ -719,13 +675,16 @@ extern "C" {
         jbyteArray start_key,
         jbyteArray end_key
     ) {
-        return guard(env, [&]() -> jlong {
-            auto* db = db_from(handle);
-            if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
-            const auto start = read_bytes(env, start_key);
-            const auto end = read_bytes(env, end_key);
-            return static_cast<jlong>(db->engine().count(start, end));
-        });
+        return guard(
+            env,
+            [&]() -> jlong {
+                auto* db = db_from(handle);
+                if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
+                const auto start = read_bytes(env, start_key);
+                const auto end = read_bytes(env, end_key);
+                return static_cast<jlong>(db->engine().count(start, end));
+            }
+        );
     }
 
     JNIEXPORT jlong JNICALL Java_dev_swiftstorm_akkaradb_engine_AkkEngine_nativeOpenScan(
@@ -735,18 +694,21 @@ extern "C" {
         jbyteArray start_key,
         jbyteArray end_key
     ) {
-        return guard(env, [&]() -> jlong {
-            auto* db = db_from(handle);
-            if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
-            const auto start = read_bytes(env, start_key);
-            const auto end = read_bytes(env, end_key);
+        return guard(
+            env,
+            [&]() -> jlong {
+                auto* db = db_from(handle);
+                if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
+                const auto start = read_bytes(env, start_key);
+                const auto end = read_bytes(env, end_key);
 
-            auto cursor = std::make_unique<ScanCursor>();
-            cursor->db = db;
-            cursor->rows = db->engine().scan(cursor->arena, start, end);
-            cursor->it = cursor->rows.begin();
-            return to_handle(cursor.release());
-        });
+                auto cursor = std::make_unique<ScanCursor>();
+                cursor->db = db;
+                cursor->rows = db->engine().scan(cursor->arena, start, end);
+                cursor->it = cursor->rows.begin();
+                return to_handle(cursor.release());
+            }
+        );
     }
 
     JNIEXPORT jlong JNICALL Java_dev_swiftstorm_akkaradb_engine_AkkEngine_nativeOpenQueryScan(
@@ -758,58 +720,73 @@ extern "C" {
         jbyteArray query_bytes,
         jbyteArray schema_bytes
     ) {
-        return guard(env, [&]() -> jlong {
-            auto* db = db_from(handle);
-            if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
-            const auto start = read_bytes(env, start_key);
-            const auto end = read_bytes(env, end_key);
-            const auto query = read_bytes(env, query_bytes);
-            const auto schema = read_bytes(env, schema_bytes);
+        return guard(
+            env,
+            [&]() -> jlong {
+                auto* db = db_from(handle);
+                if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
+                const auto start = read_bytes(env, start_key);
+                const auto end = read_bytes(env, end_key);
+                const auto query = read_bytes(env, query_bytes);
+                const auto schema = read_bytes(env, schema_bytes);
 
-            auto cursor = std::make_unique<ScanCursor>();
-            cursor->db = db;
-            cursor->query = std::make_unique<QueryProgram>(parse_query(query, schema));
-            cursor->rows = db->engine().scan(cursor->arena, start, end);
-            cursor->it = cursor->rows.begin();
-            return to_handle(cursor.release());
-        });
+                auto cursor = std::make_unique<ScanCursor>();
+                cursor->db = db;
+                cursor->query = std::make_unique<QueryProgram>(parse_query(query, schema));
+                cursor->rows = db->engine().scan(cursor->arena, start, end);
+                cursor->it = cursor->rows.begin();
+                return to_handle(cursor.release());
+            }
+        );
     }
 
     JNIEXPORT void JNICALL Java_dev_swiftstorm_akkaradb_engine_AkkEngine_nativeRollbackTo(JNIEnv* env, jobject, jlong handle, jlong target_seq) {
-        guard(env, [&]() {
-            auto* db = db_from(handle);
-            if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
-            db->engine().rollback_to(static_cast<uint64_t>(target_seq));
-            return 0;
-        });
+        guard(
+            env,
+            [&]() {
+                auto* db = db_from(handle);
+                if (db == nullptr) { throw std::runtime_error("AkkEngine handle is null"); }
+                db->engine().rollback_to(static_cast<uint64_t>(target_seq));
+                return 0;
+            }
+        );
     }
 
     JNIEXPORT void JNICALL Java_dev_swiftstorm_akkaradb_engine_AkkEngine_nativeClose(JNIEnv* env, jobject, jlong handle) {
-        guard(env, [&]() {
-            std::unique_ptr<AkkaraDB> db{db_from(handle)};
-            if (db) { db->close(); }
-            return 0;
-        });
+        guard(
+            env,
+            [&]() {
+                std::unique_ptr<AkkaraDB> db{db_from(handle)};
+                if (db) { db->close(); }
+                return 0;
+            }
+        );
     }
 
     JNIEXPORT jobject JNICALL Java_dev_swiftstorm_akkaradb_engine_NativeScanCursor_nativeNext(JNIEnv* env, jobject, jlong handle) {
-        return guard(env, [&]() -> jobject {
-            auto* cursor = cursor_from(handle);
-            if (cursor == nullptr) { throw std::runtime_error("NativeScanCursor handle is null"); }
-            while (cursor->it != cursor->rows.end()) {
-                const auto& row = *cursor->it;
-                const bool matched = cursor->query == nullptr || matches_query(*cursor->query, row.value);
-                ++cursor->it;
-                if (matched) { return make_row(env, row.key, row.value); }
+        return guard(
+            env,
+            [&]() -> jobject {
+                auto* cursor = cursor_from(handle);
+                if (cursor == nullptr) { throw std::runtime_error("NativeScanCursor handle is null"); }
+                while (cursor->it != cursor->rows.end()) {
+                    const auto& row = *cursor->it;
+                    const bool matched = cursor->query == nullptr || matches_query(*cursor->query, row.value);
+                    ++cursor->it;
+                    if (matched) { return make_row(env, row.key, row.value); }
+                }
+                return nullptr;
             }
-            return nullptr;
-        });
+        );
     }
 
     JNIEXPORT void JNICALL Java_dev_swiftstorm_akkaradb_engine_NativeScanCursor_nativeClose(JNIEnv* env, jobject, jlong handle) {
-        guard(env, [&]() {
-            std::unique_ptr<ScanCursor> cursor{cursor_from(handle)};
-            return 0;
-        });
+        guard(
+            env,
+            [&]() {
+                std::unique_ptr<ScanCursor> cursor{cursor_from(handle)};
+                return 0;
+            }
+        );
     }
 }

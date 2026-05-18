@@ -16,9 +16,7 @@
 #include <cstring>
 
 namespace akkaradb::engine::server {
-    uint32_t crc32c(std::span<const uint8_t> data) noexcept {
-        return cpu::CRC32C(reinterpret_cast<const std::byte*>(data.data()), data.size());
-    }
+    uint32_t crc32c(std::span<const uint8_t> data) noexcept { return cpu::CRC32C(reinterpret_cast<const std::byte*>(data.data()), data.size()); }
 
     uint32_t crc32c(std::span<const uint8_t> first, std::span<const uint8_t> second) {
         if (first.empty()) { return crc32c(second); }
@@ -51,7 +49,5 @@ namespace akkaradb::engine::server {
         std::memcpy(p, &checksum, sizeof(checksum));
     }
 
-    void encode_error(uint32_t request_id, std::vector<uint8_t>& out) {
-        encode_response(ApiStatus::Error, request_id, {}, out);
-    }
+    void encode_error(uint32_t request_id, std::vector<uint8_t>& out) { encode_response(ApiStatus::Error, request_id, {}, out); }
 }

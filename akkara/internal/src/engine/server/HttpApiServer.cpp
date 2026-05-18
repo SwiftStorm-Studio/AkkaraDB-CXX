@@ -60,7 +60,10 @@ namespace akkaradb::engine::server {
     HttpApiServer::HttpApiServer(AkkEngine& engine, AkkEngineOptions::ApiOptions options) : engine_{engine}, options_{std::move(options)} {}
 
     std::unique_ptr<HttpApiServer> HttpApiServer::create(AkkEngine& engine, AkkEngineOptions::ApiOptions options) {
-        return std::unique_ptr<HttpApiServer>{new HttpApiServer{engine, std::move(options)}};
+        return std::unique_ptr < HttpApiServer >
+        {
+            new HttpApiServer{engine, std::move(options)}
+        };
     }
 
     HttpApiServer::~HttpApiServer() { close(); }
@@ -84,15 +87,17 @@ namespace akkaradb::engine::server {
             const detail::socket_t client = ::accept(listen_socket_, nullptr, nullptr);
             if (!detail::socket_ok(client)) { break; }
 
-            std::thread([this, client] {
-                detail::Connection connection{client};
-                if (options_.transport_mode == cluster::TransportMode::TLS) {
-                    try { connection.enable_tls(options_.tls); }
-                    catch (...) { return; }
+            std::thread(
+                [this, client] {
+                    detail::Connection connection{client};
+                    if (options_.transport_mode == cluster::TransportMode::TLS) {
+                        try { connection.enable_tls(options_.tls); }
+                        catch (...) { return; }
+                    }
+                    handle_connection(connection);
+                    connection.shutdown();
                 }
-                handle_connection(connection);
-                connection.shutdown();
-            }).detach();
+            ).detach();
         }
     }
 
@@ -206,18 +211,13 @@ namespace akkaradb::engine::server {
     }
 
     bool HttpApiServer::send_response(detail::Connection& connection, int status_code, std::span<const uint8_t> body) {
-        const std::string header =
-            "HTTP/1.1 " + std::to_string(status_code) + " " + std::string{reason_phrase(status_code)} + "\r\n"
-            "Content-Type: application/octet-stream\r\n"
-            "Content-Length: " + std::to_string(body.size()) + "\r\n"
-            "\r\n";
+        const std::string header = "HTTP/1.1 " + std::to_string(status_code) + " " + std::string{reason_phrase(status_code)} + "\r\n"
+            "Content-Type: application/octet-stream\r\n" "Content-Length: " + std::to_string(body.size()) + "\r\n" "\r\n";
         if (!connection.send_all(reinterpret_cast<const uint8_t*>(header.data()), header.size())) { return false; }
         return body.empty() || connection.send_all(body.data(), body.size());
     }
 
-    bool HttpApiServer::send_empty(detail::Connection& connection, int status_code) {
-        return send_response(connection, status_code, {});
-    }
+    bool HttpApiServer::send_empty(detail::Connection& connection, int status_code) { return send_response(connection, status_code, {}); }
 
     bool HttpApiServer::route(detail::Connection& connection, const ParsedRequest& request, std::vector<uint8_t>& value_buffer) {
         const std::string raw_key = query_param(request.query, "key");
@@ -235,7 +235,9 @@ namespace akkaradb::engine::server {
         }
         else if (request.path == "/v1/get" && request.method == "GET") {
             value_buffer.clear();
-            if (engine_.get_into(key_span, value_buffer)) { send_response(connection, 200, std::span<const uint8_t>{value_buffer.data(), value_buffer.size()}); }
+            if (engine_.get_into(key_span, value_buffer)) {
+                send_response(connection, 200, std::span<const uint8_t>{value_buffer.data(), value_buffer.size()});
+            }
             else { send_empty(connection, 404); }
         }
         else if (request.path == "/v1/remove" && request.method == "DELETE") {

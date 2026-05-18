@@ -51,9 +51,7 @@ namespace akkaradb::engine {
             return std::min(next_pow2(std::max(raw, 2u)), cap);
         }
 
-        void ensure_dir(const fs::path& path) {
-            if (!path.empty()) { fs::create_directories(path); }
-        }
+        void ensure_dir(const fs::path& path) { if (!path.empty()) { fs::create_directories(path); } }
 
         [[nodiscard]] uint64_t load_or_create_node_id(const fs::path& path) {
             if (path.empty()) { return 0; }
@@ -78,9 +76,11 @@ namespace akkaradb::engine {
         }
 
         [[nodiscard]] int compare_key(std::span<const uint8_t> a, std::span<const uint8_t> b) {
-            const int cmp = std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end()) ? -1
-                : std::lexicographical_compare(b.begin(), b.end(), a.begin(), a.end()) ? 1
-                : 0;
+            const int cmp = std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end())
+                                ? -1
+                                : std::lexicographical_compare(b.begin(), b.end(), a.begin(), a.end())
+                                ? 1
+                                : 0;
             return cmp;
         }
 
@@ -173,7 +173,9 @@ namespace akkaradb::engine {
 
             [[nodiscard]] uint64_t snapshot_seq() const noexcept { return memtable ? memtable->last_seq() : 0; }
 
-            [[nodiscard]] bool persistent() const noexcept { return opts.components.wal_enabled || opts.components.sst_enabled || opts.components.manifest_enabled; }
+            [[nodiscard]] bool persistent() const noexcept {
+                return opts.components.wal_enabled || opts.components.sst_enabled || opts.components.manifest_enabled;
+            }
 
             [[nodiscard]] std::vector<uint8_t> maybe_externalize(uint64_t seq, std::span<const uint8_t> value, uint8_t& flags) {
                 if (!blob_manager || value.size() < blob_manager->threshold()) { return {value.begin(), value.end()}; }
@@ -269,7 +271,10 @@ namespace akkaradb::engine {
             throw std::invalid_argument("AkkEngine: api.bind_host is required when components.api_enabled is true");
         }
 
-        auto engine = std::unique_ptr<AkkEngine>{new AkkEngine()};
+        auto engine = std::unique_ptr < AkkEngine >
+        {
+            new AkkEngine()
+        };
         engine->impl_ = std::make_unique<Impl>();
         Impl& impl = *engine->impl_;
         impl.opts = std::move(options);
@@ -309,19 +314,21 @@ namespace akkaradb::engine {
 
         if (impl.opts.components.cluster_enabled) {
             cluster::ClusterConfig cfg = impl.opts.cluster.config.has_value()
-                ? *impl.opts.cluster.config
-                : cluster::ClusterConfig::load(impl.opts.paths.cluster_config_path);
+                                             ? *impl.opts.cluster.config
+                                             : cluster::ClusterConfig::load(impl.opts.paths.cluster_config_path);
             cluster::ClusterEngineCallbacks callbacks;
             callbacks.get_current_seq = [&impl] { return impl.snapshot_seq(); };
             callbacks.get_last_seq = [&impl] { return impl.snapshot_seq(); };
             callbacks.apply = [&impl](
-                                  uint64_t seq,
-                                  cluster::ReplOpType op,
-                                  std::span<const uint8_t> key,
-                                  std::span<const uint8_t> value,
-                                  uint8_t record_flags,
-                                  uint64_t source_node_id
-                              ) { impl.apply_replica_record(seq, op, key, value, record_flags, source_node_id); };
+                uint64_t seq,
+                cluster::ReplOpType op,
+                std::span<const uint8_t> key,
+                std::span<const uint8_t> value,
+                uint8_t record_flags,
+                uint64_t source_node_id
+            ) {
+                    impl.apply_replica_record(seq, op, key, value, record_flags, source_node_id);
+                };
             callbacks.apply_blob = [&impl](uint64_t /*seq*/, uint64_t blob_id, std::span<const uint8_t> content) {
                 if (impl.blob_manager) { impl.blob_manager->write(blob_id, content); }
             };
@@ -434,9 +441,7 @@ namespace akkaradb::engine {
         impl_->exists_total.fetch_add(1, std::memory_order_relaxed);
         const uint64_t seq = impl_->snapshot_seq();
         if (const auto mt = impl_->memtable->contains(key, seq); mt.has_value()) { return *mt; }
-        if (impl_->sst_manager) {
-            if (const auto sst = impl_->sst_manager->contains(key); sst.has_value()) { return *sst; }
-        }
+        if (impl_->sst_manager) { if (const auto sst = impl_->sst_manager->contains(key); sst.has_value()) { return *sst; } }
         return false;
     }
 
@@ -687,11 +692,23 @@ namespace akkaradb::engine {
     }
 
     void AkkEngine::force_sync() {
-        if (impl_ && impl_->wal_writer) { impl_->wal_writer->force_sync(); }
+        if (impl_&& impl_
+        ->
+        wal_writer
+        )
+        {
+            impl_->wal_writer->force_sync();
+        }
     }
 
     void AkkEngine::force_flush() {
-        if (impl_ && impl_->memtable) { impl_->memtable->force_flush(); }
+        if (impl_&& impl_
+        ->
+        memtable
+        )
+        {
+            impl_->memtable->force_flush();
+        }
     }
 
     void AkkEngine::close() {

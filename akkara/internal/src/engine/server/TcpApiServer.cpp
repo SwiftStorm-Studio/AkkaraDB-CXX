@@ -19,14 +19,18 @@ namespace akkaradb::engine::server {
         constexpr uint32_t kMaxValueBytes = 64u * 1024u * 1024u;
 
         [[nodiscard]] bool valid_header(const ApiRequestHeader& header) {
-            return std::memcmp(header.magic, REQUEST_MAGIC, sizeof(header.magic)) == 0 && header.version == PROTOCOL_VERSION && header.val_len <= kMaxValueBytes;
+            return std::memcmp(header.magic, REQUEST_MAGIC, sizeof(header.magic)) == 0 && header.version == PROTOCOL_VERSION && header.val_len <=
+                kMaxValueBytes;
         }
     }
 
     TcpApiServer::TcpApiServer(AkkEngine& engine, AkkEngineOptions::ApiOptions options) : engine_{engine}, options_{std::move(options)} {}
 
     std::unique_ptr<TcpApiServer> TcpApiServer::create(AkkEngine& engine, AkkEngineOptions::ApiOptions options) {
-        return std::unique_ptr<TcpApiServer>{new TcpApiServer{engine, std::move(options)}};
+        return std::unique_ptr < TcpApiServer >
+        {
+            new TcpApiServer{engine, std::move(options)}
+        };
     }
 
     TcpApiServer::~TcpApiServer() { close(); }
@@ -50,15 +54,17 @@ namespace akkaradb::engine::server {
             const detail::socket_t client = ::accept(listen_socket_, nullptr, nullptr);
             if (!detail::socket_ok(client)) { break; }
 
-            std::thread([this, client] {
-                detail::Connection connection{client};
-                if (options_.transport_mode == cluster::TransportMode::TLS) {
-                    try { connection.enable_tls(options_.tls); }
-                    catch (...) { return; }
+            std::thread(
+                [this, client] {
+                    detail::Connection connection{client};
+                    if (options_.transport_mode == cluster::TransportMode::TLS) {
+                        try { connection.enable_tls(options_.tls); }
+                        catch (...) { return; }
+                    }
+                    handle_connection(connection);
+                    connection.shutdown();
                 }
-                handle_connection(connection);
-                connection.shutdown();
-            }).detach();
+            ).detach();
         }
     }
 
@@ -94,19 +100,21 @@ namespace akkaradb::engine::server {
             }
 
             switch (header.opcode) {
-                case ApiOp::Put:
-                    engine_.put(key, value);
+                case ApiOp::Put: engine_.put(key, value);
                     encode_response(ApiStatus::Ok, header.request_id, {}, response_buffer);
                     break;
-                case ApiOp::Get:
-                    output_buffer.clear();
+                case ApiOp::Get: output_buffer.clear();
                     if (engine_.get_into(key, output_buffer)) {
-                        encode_response(ApiStatus::Ok, header.request_id, std::span<const uint8_t>{output_buffer.data(), output_buffer.size()}, response_buffer);
+                        encode_response(
+                            ApiStatus::Ok,
+                            header.request_id,
+                            std::span<const uint8_t>{output_buffer.data(), output_buffer.size()},
+                            response_buffer
+                        );
                     }
                     else { encode_response(ApiStatus::NotFound, header.request_id, {}, response_buffer); }
                     break;
-                case ApiOp::Remove:
-                    engine_.remove(key);
+                case ApiOp::Remove: engine_.remove(key);
                     encode_response(ApiStatus::Ok, header.request_id, {}, response_buffer);
                     break;
                 case ApiOp::GetAt: {
@@ -118,13 +126,17 @@ namespace akkaradb::engine::server {
                     std::memcpy(&seq, value_buffer.data(), sizeof(seq));
                     auto historical_value = engine_.get_at(key, seq);
                     if (historical_value) {
-                        encode_response(ApiStatus::Ok, header.request_id, std::span<const uint8_t>{historical_value->data(), historical_value->size()}, response_buffer);
+                        encode_response(
+                            ApiStatus::Ok,
+                            header.request_id,
+                            std::span<const uint8_t>{historical_value->data(), historical_value->size()},
+                            response_buffer
+                        );
                     }
                     else { encode_response(ApiStatus::NotFound, header.request_id, {}, response_buffer); }
                     break;
                 }
-                default:
-                    encode_error(header.request_id, response_buffer);
+                default: encode_error(header.request_id, response_buffer);
                     break;
             }
 

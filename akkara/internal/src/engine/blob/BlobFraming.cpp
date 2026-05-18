@@ -96,13 +96,7 @@ namespace akkaradb::engine::blob {
         return header;
     }
 
-    AkBlobHeaderV5 build_blob_header(
-        uint64_t blob_id,
-        uint64_t total_size,
-        uint64_t stored_size,
-        BlobCodec codec,
-        uint32_t content_crc32c
-    ) noexcept {
+    AkBlobHeaderV5 build_blob_header(uint64_t blob_id, uint64_t total_size, uint64_t stored_size, BlobCodec codec, uint32_t content_crc32c) noexcept {
         AkBlobHeaderV5 header{};
         header.magic = AKBLOB_MAGIC_V5;
         header.version = AKBLOB_VERSION_V5;

@@ -34,14 +34,7 @@ namespace akkaradb {
         struct ProxyTag {};
 
         enum class Op {
-            Eq,
-            Ne,
-            Gt,
-            Ge,
-            Lt,
-            Le,
-            And,
-            Or
+            Eq, Ne, Gt, Ge, Lt, Le, And, Or
         };
 
         struct AlwaysTrue {};
@@ -100,34 +93,24 @@ namespace akkaradb {
         inline constexpr bool is_expr_v = is_expr<std::remove_cvref_t<T>>::value;
 
         template <typename T>
-        using literal_storage_t = std::conditional_t<
-            std::is_convertible_v<T, std::string_view> && !std::is_arithmetic_v<std::remove_cvref_t<T>>,
-            std::string,
-            std::remove_cvref_t<T>
-        >;
+        using literal_storage_t = std::conditional_t<std::is_convertible_v<T, std::string_view> && !std::is_arithmetic_v<std::remove_cvref_t<T>>, std::string,
+                                                     std::remove_cvref_t<T>>;
 
         template <typename T>
         [[nodiscard]] auto normalize_literal(T&& value) {
             if constexpr (std::is_convertible_v<T, std::string_view> && !std::is_arithmetic_v<std::remove_cvref_t<T>>) {
                 return std::string{std::string_view{value}};
             }
-            else {
-                return std::forward<T>(value);
-            }
+            else { return std::forward<T>(value); }
         }
 
         template <typename T>
         [[nodiscard]] auto as_expr(T&& value) {
-            if constexpr (is_expr_v<T>) {
-                return std::forward<T>(value);
-            }
-            else {
-                return Literal<literal_storage_t<T>>{normalize_literal(std::forward<T>(value))};
-            }
+            if constexpr (is_expr_v<T>) { return std::forward<T>(value); }
+            else { return Literal<literal_storage_t<T>>{normalize_literal(std::forward<T>(value))}; }
         }
 
-        template <typename L, typename R>
-            requires(is_expr_v<L> || is_expr_v<R>)
+        template <typename L, typename R> requires(is_expr_v<L> || is_expr_v<R>)
         [[nodiscard]] auto operator==(L&& lhs, R&& rhs) {
             return Compare<Op::Eq, decltype(as_expr(std::forward<L>(lhs))), decltype(as_expr(std::forward<R>(rhs)))>{
                 as_expr(std::forward<L>(lhs)),
@@ -135,8 +118,7 @@ namespace akkaradb {
             };
         }
 
-        template <typename L, typename R>
-            requires(is_expr_v<L> || is_expr_v<R>)
+        template <typename L, typename R> requires(is_expr_v<L> || is_expr_v<R>)
         [[nodiscard]] auto operator!=(L&& lhs, R&& rhs) {
             return Compare<Op::Ne, decltype(as_expr(std::forward<L>(lhs))), decltype(as_expr(std::forward<R>(rhs)))>{
                 as_expr(std::forward<L>(lhs)),
@@ -144,8 +126,7 @@ namespace akkaradb {
             };
         }
 
-        template <typename L, typename R>
-            requires(is_expr_v<L> || is_expr_v<R>)
+        template <typename L, typename R> requires(is_expr_v<L> || is_expr_v<R>)
         [[nodiscard]] auto operator>(L&& lhs, R&& rhs) {
             return Compare<Op::Gt, decltype(as_expr(std::forward<L>(lhs))), decltype(as_expr(std::forward<R>(rhs)))>{
                 as_expr(std::forward<L>(lhs)),
@@ -153,8 +134,7 @@ namespace akkaradb {
             };
         }
 
-        template <typename L, typename R>
-            requires(is_expr_v<L> || is_expr_v<R>)
+        template <typename L, typename R> requires(is_expr_v<L> || is_expr_v<R>)
         [[nodiscard]] auto operator>=(L&& lhs, R&& rhs) {
             return Compare<Op::Ge, decltype(as_expr(std::forward<L>(lhs))), decltype(as_expr(std::forward<R>(rhs)))>{
                 as_expr(std::forward<L>(lhs)),
@@ -162,8 +142,7 @@ namespace akkaradb {
             };
         }
 
-        template <typename L, typename R>
-            requires(is_expr_v<L> || is_expr_v<R>)
+        template <typename L, typename R> requires(is_expr_v<L> || is_expr_v<R>)
         [[nodiscard]] auto operator<(L&& lhs, R&& rhs) {
             return Compare<Op::Lt, decltype(as_expr(std::forward<L>(lhs))), decltype(as_expr(std::forward<R>(rhs)))>{
                 as_expr(std::forward<L>(lhs)),
@@ -171,8 +150,7 @@ namespace akkaradb {
             };
         }
 
-        template <typename L, typename R>
-            requires(is_expr_v<L> || is_expr_v<R>)
+        template <typename L, typename R> requires(is_expr_v<L> || is_expr_v<R>)
         [[nodiscard]] auto operator<=(L&& lhs, R&& rhs) {
             return Compare<Op::Le, decltype(as_expr(std::forward<L>(lhs))), decltype(as_expr(std::forward<R>(rhs)))>{
                 as_expr(std::forward<L>(lhs)),
@@ -180,28 +158,21 @@ namespace akkaradb {
             };
         }
 
-        template <typename L, typename R>
-            requires(is_expr_v<L> && is_expr_v<R>)
+        template <typename L, typename R> requires(is_expr_v<L> && is_expr_v<R>)
         [[nodiscard]] auto operator&&(L&& lhs, R&& rhs) {
             return Logical<Op::And, std::remove_cvref_t<L>, std::remove_cvref_t<R>>{std::forward<L>(lhs), std::forward<R>(rhs)};
         }
 
-        template <typename L, typename R>
-            requires(is_expr_v<L> && is_expr_v<R>)
+        template <typename L, typename R> requires(is_expr_v<L> && is_expr_v<R>)
         [[nodiscard]] auto operator||(L&& lhs, R&& rhs) {
             return Logical<Op::Or, std::remove_cvref_t<L>, std::remove_cvref_t<R>>{std::forward<L>(lhs), std::forward<R>(rhs)};
         }
 
-        template <typename X>
-            requires(is_expr_v<X>)
-        [[nodiscard]] auto operator!(X&& x) {
-            return Not<std::remove_cvref_t<X>>{std::forward<X>(x)};
-        }
+        template <typename X> requires(is_expr_v<X>)
+        [[nodiscard]] auto operator!(X&& x) { return Not<std::remove_cvref_t<X>>{std::forward<X>(x)}; }
 
         template <typename Entity>
-        [[nodiscard]] auto make_proxy() {
-            return akkaradb_query_proxy(ProxyTag<Entity>{});
-        }
+        [[nodiscard]] auto make_proxy() { return akkaradb_query_proxy(ProxyTag<Entity>{}); }
 
         template <typename Entity>
         using QueryProxy = decltype(make_proxy<Entity>());
@@ -258,24 +229,16 @@ namespace akkaradb {
         inline constexpr Op swapped_compare_op<Op::Le> = Op::Ge;
 
         template <typename T>
-        [[nodiscard]] const auto& literal_value(const Literal<T>& literal) noexcept {
-            return literal.value;
-        }
+        [[nodiscard]] const auto& literal_value(const Literal<T>& literal) noexcept { return literal.value; }
 
         template <typename Entity>
-        [[nodiscard]] bool eval(const AlwaysTrue&, const Entity&) {
-            return true;
-        }
+        [[nodiscard]] bool eval(const AlwaysTrue&, const Entity&) { return true; }
 
         template <auto FieldPtr, typename Entity>
-        [[nodiscard]] auto eval(const Column<FieldPtr>&, const Entity& entity) {
-            return entity.*FieldPtr;
-        }
+        [[nodiscard]] auto eval(const Column<FieldPtr>&, const Entity& entity) { return entity.*FieldPtr; }
 
         template <typename T, typename Entity>
-        [[nodiscard]] const T& eval(const Literal<T>& literal, const Entity&) {
-            return literal.value;
-        }
+        [[nodiscard]] const T& eval(const Literal<T>& literal, const Entity&) { return literal.value; }
 
         template <Op Operator, typename L, typename R, typename Entity>
         [[nodiscard]] bool eval(const Compare<Operator, L, R>& expr, const Entity& entity) {
@@ -296,9 +259,7 @@ namespace akkaradb {
         }
 
         template <typename X, typename Entity>
-        [[nodiscard]] bool eval(const Not<X>& expr, const Entity& entity) {
-            return !eval(expr.x, entity);
-        }
+        [[nodiscard]] bool eval(const Not<X>& expr, const Entity& entity) { return !eval(expr.x, entity); }
     } // namespace query
 
     #define AKKARADB_QUERYABLE_FIELD(Type, Field) ::akkaradb::query::Column<&Type::Field> Field{};
@@ -619,8 +580,7 @@ namespace akkaradb {
             }
 
             enum class QuerySourceKind {
-                Table,
-                Index
+                Table, Index
             };
 
             struct QueryPlan {
@@ -653,12 +613,13 @@ namespace akkaradb {
                         size_t index_search_prefix_size,
                         std::span<const uint8_t> start_key,
                         std::span<const uint8_t> end_key
-                    ) : table_{table},
-                        kind_{kind},
-                        index_search_prefix_size_{index_search_prefix_size},
-                        scan_arena_{std::make_unique<core::BufferArena>()},
-                        rows_{table_->engine_->scan(*scan_arena_, start_key, end_key)},
-                        it_{rows_.begin()} { advance(); }
+                    )
+                        : table_{table},
+                          kind_{kind},
+                          index_search_prefix_size_{index_search_prefix_size},
+                          scan_arena_{std::make_unique<core::BufferArena>()},
+                          rows_{table_->engine_->scan(*scan_arena_, start_key, end_key)},
+                          it_{rows_.begin()} { advance(); }
 
                     void advance() {
                         pending_.reset();
@@ -668,9 +629,11 @@ namespace akkaradb {
                             Entry entry;
                             if (kind_ == QuerySourceKind::Table) {
                                 const auto key = raw.key;
-                                if (key.size() < table_->pk_prefix_.size() || std::memcmp(key.data(), table_->pk_prefix_.data(), table_->pk_prefix_.size()) != 0) {
-                                    return;
-                                }
+                                if (key.size() < table_->pk_prefix_.size() || std::memcmp(
+                                    key.data(),
+                                    table_->pk_prefix_.data(),
+                                    table_->pk_prefix_.size()
+                                ) != 0) { return; }
 
                                 std::span<const uint8_t> pk_bytes{key.data() + table_->pk_prefix_.size(), key.size() - table_->pk_prefix_.size()};
                                 entry = Entry{binpack::BinPack::decode<PK>(pk_bytes), binpack::BinPack::decode<Entity>(raw.value)};
@@ -701,6 +664,7 @@ namespace akkaradb {
                     class Iterator {
                         public:
                             struct Sentinel {};
+
                             using value_type = Entry;
                             using difference_type = std::ptrdiff_t;
                             using iterator_category = std::input_iterator_tag;
@@ -809,9 +773,7 @@ namespace akkaradb {
             [[nodiscard]] QueryView<query::AlwaysTrue> query() const { return QueryView<query::AlwaysTrue>{this, query::AlwaysTrue{}}; }
 
             template <typename Pred>
-            [[nodiscard]] auto query(Pred&& predicate) const {
-                return query().where(std::forward<Pred>(predicate));
-            }
+            [[nodiscard]] auto query(Pred&& predicate) const { return query().where(std::forward<Pred>(predicate)); }
 
             [[nodiscard]] std::string_view table_name() const noexcept { return table_name_; }
             [[nodiscard]] engine::AkkEngine& engine() noexcept { return *engine_; }
@@ -841,16 +803,12 @@ namespace akkaradb {
                         private:
                             friend class Index;
 
-                            FindRange(
-                                PackedTable* table,
-                                size_t search_prefix_size,
-                                std::span<const uint8_t> start_key,
-                                std::span<const uint8_t> end_key
-                            ) : table_{table},
-                                search_prefix_size_{search_prefix_size},
-                                scan_arena_{std::make_unique<core::BufferArena>()},
-                                rows_{table_->engine_->scan(*scan_arena_, start_key, end_key)},
-                                it_{rows_.begin()} { advance(); }
+                            FindRange(PackedTable* table, size_t search_prefix_size, std::span<const uint8_t> start_key, std::span<const uint8_t> end_key)
+                                : table_{table},
+                                  search_prefix_size_{search_prefix_size},
+                                  scan_arena_{std::make_unique<core::BufferArena>()},
+                                  rows_{table_->engine_->scan(*scan_arena_, start_key, end_key)},
+                                  it_{rows_.begin()} { advance(); }
 
                             void advance() {
                                 pending_.reset();
@@ -888,12 +846,7 @@ namespace akkaradb {
                         table_->make_index_search_prefix(prefix_, table_->field_buffer_, table_->scan_start_buffer_);
                         table_->scan_end_buffer_ = table_->scan_start_buffer_;
                         if (!detail::increment_be_bytes(table_->scan_end_buffer_.data(), table_->scan_end_buffer_.size())) { table_->scan_end_buffer_.clear(); }
-                        return FindRange{
-                            table_,
-                            table_->scan_start_buffer_.size(),
-                            table_->scan_start_buffer_,
-                            table_->scan_end_buffer_
-                        };
+                        return FindRange{table_, table_->scan_start_buffer_.size(), table_->scan_start_buffer_, table_->scan_end_buffer_};
                     }
 
                 private:
@@ -951,15 +904,9 @@ namespace akkaradb {
             template <typename Expr>
             [[nodiscard]] bool try_make_index_plan(const Expr& expr, QueryPlan& plan) const {
                 using E = std::remove_cvref_t<Expr>;
-                if constexpr (query::is_and_v<E>) {
-                    return try_make_index_plan(expr.lhs, plan) || try_make_index_plan(expr.rhs, plan);
-                }
-                else if constexpr (query::is_compare_v<E>) {
-                    return try_make_compare_index_plan(expr, plan);
-                }
-                else {
-                    return false;
-                }
+                if constexpr (query::is_and_v<E>) { return try_make_index_plan(expr.lhs, plan) || try_make_index_plan(expr.rhs, plan); }
+                else if constexpr (query::is_compare_v<E>) { return try_make_compare_index_plan(expr, plan); }
+                else { return false; }
             }
 
             template <query::Op Operator, typename L, typename R>
@@ -968,19 +915,18 @@ namespace akkaradb {
                     return try_make_field_index_plan<Operator, std::remove_cvref_t<L>::field_ptr>(query::literal_value(expr.rhs), plan);
                 }
                 else if constexpr (query::is_literal_v<L> && query::is_column_v<R>) {
-                    return try_make_field_index_plan<query::swapped_compare_op<Operator>, std::remove_cvref_t<R>::field_ptr>(query::literal_value(expr.lhs), plan);
+                    return try_make_field_index_plan<query::swapped_compare_op<Operator>, std::remove_cvref_t<R>::field_ptr>(
+                        query::literal_value(expr.lhs),
+                        plan
+                    );
                 }
-                else {
-                    return false;
-                }
+                else { return false; }
             }
 
             template <auto FieldPtr>
             [[nodiscard]] const IndexDef* find_index_def_for() const {
                 const std::string_view field_name = binpack::detail::member_name<FieldPtr>();
-                for (const auto& idx : indexes_) {
-                    if (idx.field_name == field_name) { return &idx; }
-                }
+                for (const auto& idx : indexes_) { if (idx.field_name == field_name) { return &idx; } }
                 return nullptr;
             }
 
@@ -991,19 +937,13 @@ namespace akkaradb {
                         out = std::string{std::string_view{literal}};
                         return true;
                     }
-                    else {
-                        return false;
-                    }
+                    else { return false; }
                 }
                 else if constexpr (std::is_arithmetic_v<Field> && std::is_arithmetic_v<Lit>) {
-                    if constexpr (std::is_unsigned_v<Field> && std::is_signed_v<Lit>) {
-                        if (literal < 0) { return false; }
-                    }
+                    if constexpr (std::is_unsigned_v<Field> && std::is_signed_v<Lit>) { if (literal < 0) { return false; } }
                     const auto value = static_cast<long double>(literal);
-                    if (value < static_cast<long double>(std::numeric_limits<Field>::lowest()) ||
-                        value > static_cast<long double>(std::numeric_limits<Field>::max())) {
-                        return false;
-                    }
+                    if (value < static_cast<long double>(std::numeric_limits<Field>::lowest()) || value > static_cast<long double>(std::numeric_limits<
+                        Field>::max())) { return false; }
                     out = static_cast<Field>(literal);
                     return true;
                 }
@@ -1015,9 +955,7 @@ namespace akkaradb {
                     out = literal;
                     return true;
                 }
-                else {
-                    return false;
-                }
+                else { return false; }
             }
 
             template <query::Op Operator, auto FieldPtr, typename Lit>
@@ -1039,10 +977,8 @@ namespace akkaradb {
                     plan.index_search_prefix_size = scan_start_buffer_.size();
                     return true;
                 }
-                else if constexpr (
-                    (Operator == query::Op::Gt || Operator == query::Op::Ge || Operator == query::Op::Lt || Operator == query::Op::Le) &&
-                    std::is_integral_v<Field> && std::is_unsigned_v<Field>
-                ) {
+                else if constexpr ((Operator == query::Op::Gt || Operator == query::Op::Ge || Operator == query::Op::Lt || Operator == query::Op::Le) &&
+                    std::is_integral_v<Field> && std::is_unsigned_v<Field>) {
                     make_prefix_start_end(idx->prefix, scan_start_buffer_, scan_end_buffer_);
                     field_buffer_.clear();
 
@@ -1067,18 +1003,14 @@ namespace akkaradb {
                             binpack::BinPack::encode_into(upper, field_buffer_);
                             make_index_search_prefix(idx->prefix, field_buffer_, scan_end_buffer_);
                         }
-                        else {
-                            binpack::BinPack::encode_into(value, field_buffer_);
-                        }
+                        else { binpack::BinPack::encode_into(value, field_buffer_); }
                     }
 
                     plan.kind = QuerySourceKind::Index;
                     plan.index_search_prefix_size = 12 + field_buffer_.size();
                     return true;
                 }
-                else {
-                    return false;
-                }
+                else { return false; }
             }
 
             void make_pk_key(const PK& pk, ArenaByteBuffer& out) const {

@@ -32,8 +32,7 @@ namespace akkaradb::engine {
     using VersionEntry = vlog::VersionEntry;
 
     enum class Codec : uint8_t {
-        None = 0,
-        Zstd = 1,
+        None = 0, Zstd = 1,
     };
 
     struct AkkEngineOptions {
@@ -68,8 +67,7 @@ namespace akkaradb::engine {
         } cluster;
 
         enum class ApiBackend : uint8_t {
-            Http = 0,
-            Tcp = 1,
+            Http = 0, Tcp = 1,
         };
 
         struct ApiTlsOptions {

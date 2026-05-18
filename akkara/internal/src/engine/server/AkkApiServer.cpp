@@ -24,11 +24,9 @@ namespace akkaradb::engine::server {
 
         for (const auto backend : backends) {
             switch (backend) {
-                case AkkEngineOptions::ApiBackend::Http:
-                    server->http_ = HttpApiServer::create(engine, options);
+                case AkkEngineOptions::ApiBackend::Http: server->http_ = HttpApiServer::create(engine, options);
                     break;
-                case AkkEngineOptions::ApiBackend::Tcp:
-                    server->tcp_ = TcpApiServer::create(engine, options);
+                case AkkEngineOptions::ApiBackend::Tcp: server->tcp_ = TcpApiServer::create(engine, options);
                     break;
             }
         }

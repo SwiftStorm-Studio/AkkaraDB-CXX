@@ -321,11 +321,7 @@ namespace akkaradb::engine::sst {
                 if (!snap) { return Iterator{}; }
 
                 std::vector<std::shared_ptr<SSTReader>> readers;
-                for (const auto& level : *snap) {
-                    for (const auto& meta : level) {
-                        if (meta.reader) { readers.push_back(meta.reader); }
-                    }
-                }
+                for (const auto& level : *snap) { for (const auto& meta : level) { if (meta.reader) { readers.push_back(meta.reader); } } }
                 return Iterator{std::make_unique<Iterator::Impl>(std::move(readers), start_key, end_key)};
             }
 

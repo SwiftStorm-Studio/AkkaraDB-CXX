@@ -32,38 +32,28 @@
 #include <vector>
 
 namespace akkaradb::engine::server::detail {
-#ifdef _WIN32
-    using socket_t = SOCKET;
-    inline constexpr socket_t BAD_SOCKET_VALUE = INVALID_SOCKET;
-
-    inline void net_init() {
+    #ifdef _WIN32
+    using socket_t = SOCKET; inline constexpr socket_t BAD_SOCKET_VALUE = INVALID_SOCKET; inline void net_init() {
         static std::once_flag flag;
-        std::call_once(flag, [] {
-            WSADATA data{};
-            if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) { throw std::runtime_error("ApiServer: WSAStartup failed"); }
-        });
-    }
-
-    inline bool socket_ok(socket_t s) noexcept { return s != INVALID_SOCKET; }
-    inline void close_socket(socket_t s) noexcept {
+        std::call_once(
+            flag,
+            [] {
+                WSADATA data{};
+                if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) { throw std::runtime_error("ApiServer: WSAStartup failed"); }
+            }
+        );
+    } inline bool socket_ok(socket_t s) noexcept { return s != INVALID_SOCKET; } inline void close_socket(socket_t s) noexcept {
         if (socket_ok(s)) { ::closesocket(s); }
-    }
-    inline void shutdown_socket(socket_t s) noexcept {
-        if (socket_ok(s)) { ::shutdown(s, SD_BOTH); }
-    }
-#else
+    } inline void shutdown_socket(socket_t s) noexcept { if (socket_ok(s)) { ::shutdown(s, SD_BOTH); } }
+    #else
     using socket_t = int;
     inline constexpr socket_t BAD_SOCKET_VALUE = -1;
 
     inline void net_init() {}
     inline bool socket_ok(socket_t s) noexcept { return s >= 0; }
-    inline void close_socket(socket_t s) noexcept {
-        if (socket_ok(s)) { ::close(s); }
-    }
-    inline void shutdown_socket(socket_t s) noexcept {
-        if (socket_ok(s)) { ::shutdown(s, SHUT_RDWR); }
-    }
-#endif
+    inline void close_socket(socket_t s) noexcept { if (socket_ok(s)) { ::close(s); } }
+    inline void shutdown_socket(socket_t s) noexcept { if (socket_ok(s)) { ::shutdown(s, SHUT_RDWR); } }
+    #endif
 
     struct TlsConfigStorage {
         std::string cert_path;
@@ -128,11 +118,11 @@ namespace akkaradb::engine::server::detail {
     inline bool send_all(socket_t s, const uint8_t* data, size_t size) {
         size_t sent = 0;
         while (sent < size) {
-#ifdef _WIN32
+            #ifdef _WIN32
             const int rc = ::send(s, reinterpret_cast<const char*>(data + sent), static_cast<int>(size - sent), 0);
-#else
+            #else
             const ssize_t rc = ::send(s, data + sent, size - sent, 0);
-#endif
+            #endif
             if (rc <= 0) { return false; }
             sent += static_cast<size_t>(rc);
         }
@@ -142,11 +132,11 @@ namespace akkaradb::engine::server::detail {
     inline bool recv_all(socket_t s, uint8_t* data, size_t size) {
         size_t got = 0;
         while (got < size) {
-#ifdef _WIN32
+            #ifdef _WIN32
             const int rc = ::recv(s, reinterpret_cast<char*>(data + got), static_cast<int>(size - got), 0);
-#else
+            #else
             const ssize_t rc = ::recv(s, data + got, size - got, 0);
-#endif
+            #endif
             if (rc <= 0) { return false; }
             got += static_cast<size_t>(rc);
         }
@@ -154,11 +144,11 @@ namespace akkaradb::engine::server::detail {
     }
 
     inline size_t recv_some(socket_t s, uint8_t* data, size_t size) {
-#ifdef _WIN32
+        #ifdef _WIN32
         const int rc = ::recv(s, reinterpret_cast<char*>(data), static_cast<int>(size), 0);
-#else
+        #else
         const ssize_t rc = ::recv(s, data, size, 0);
-#endif
+        #endif
         return rc > 0 ? static_cast<size_t>(rc) : 0;
     }
 
@@ -174,9 +164,7 @@ namespace akkaradb::engine::server::detail {
         return true;
     }
 
-    inline size_t recv_some(net::TlsStream& stream, uint8_t* data, size_t size) {
-        return stream.recv(data, size);
-    }
+    inline size_t recv_some(net::TlsStream& stream, uint8_t* data, size_t size) { return stream.recv(data, size); }
 
     class Connection {
         public:

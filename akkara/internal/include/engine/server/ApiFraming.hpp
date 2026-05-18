@@ -16,19 +16,14 @@
 
 namespace akkaradb::engine::server {
     enum class ApiOp : uint8_t {
-        Get = 0x01,
-        Put = 0x02,
-        Remove = 0x03,
-        GetAt = 0x04,
+        Get = 0x01, Put = 0x02, Remove = 0x03, GetAt = 0x04,
     };
 
     enum class ApiStatus : uint8_t {
-        Ok = 0x00,
-        NotFound = 0x01,
-        Error = 0xFF,
+        Ok = 0x00, NotFound = 0x01, Error = 0xFF,
     };
 
-#pragma pack(push, 1)
+    #pragma pack(push, 1)
     struct ApiRequestHeader {
         char magic[4];
         uint8_t version;
@@ -44,7 +39,7 @@ namespace akkaradb::engine::server {
         uint32_t request_id;
         uint32_t val_len;
     };
-#pragma pack(pop)
+    #pragma pack(pop)
 
     static_assert(sizeof(ApiRequestHeader) == 16);
     static_assert(sizeof(ApiResponseHeader) == 13);
