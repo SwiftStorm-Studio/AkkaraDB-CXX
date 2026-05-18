@@ -40,6 +40,8 @@ namespace {
         uint32_t age;
     };
 
+    AKKARADB_QUERYABLE(Profile, id, email, name, age)
+
     void test_trivial_crud() {
         using namespace akkaradb;
         auto db = AkkaraDB::open({}, StartupMode::ULTRA_FAST);
@@ -162,7 +164,7 @@ namespace {
         using namespace akkaradb;
         auto db = AkkaraDB::open({}, StartupMode::ULTRA_FAST);
         auto profiles = db->table<&Profile::id>("query_profiles");
-        (void)profiles.index<&Profile::email>();
+        profiles.indexed<&Profile::email>().indexed<&Profile::age>();
 
         profiles.put({1, "a@example.test", "Alice", 17});
         profiles.put({2, "b@example.test", "Bob", 30});
@@ -181,17 +183,32 @@ namespace {
         assert(by_email.has_value());
         assert(by_email->id == 2);
 
-        auto adults = profiles.query([](const Profile& profile) { return profile.age >= 18; }).limit(2).to_vector();
+        auto adults = profiles.query([](auto profile) { return profile.age >= 18; }).limit(2).to_vector();
         assert(adults.size() == 2);
 
         auto senior = profiles.query()
-            .where([](const Profile& profile) { return profile.age >= 18; })
-            .where([](const Profile& profile) { return profile.name == "Carol"; })
+            .where([](auto profile) { return profile.age >= 18; })
+            .where([](auto profile) { return profile.name == "Carol"; })
             .first();
         assert(senior.has_value());
         assert(senior->id == 3);
-        assert(profiles.query([](const Profile& profile) { return profile.age > 40; }).any());
-        assert(profiles.query([](const Profile& profile) { return profile.age >= 18; }).count() == 2);
+        assert(profiles.query([](auto profile) { return profile.age > 40; }).any());
+        assert(profiles.query([](auto profile) { return profile.age >= 18; }).count() == 2);
+
+        auto indexed_email = profiles.query([](auto profile) { return profile.email == "b@example.test"; }).first();
+        assert(indexed_email.has_value());
+        assert(indexed_email->id == 2);
+
+        auto indexed_residual = profiles.query([](auto profile) {
+            return profile.email == "b@example.test" && profile.age >= 18;
+        }).first();
+        assert(indexed_residual.has_value());
+        assert(indexed_residual->id == 2);
+
+        auto fallback_or = profiles.query([](auto profile) {
+            return profile.name == "Alice" || profile.age > 40;
+        }).to_vector();
+        assert(fallback_or.size() == 2);
 
         size_t ranged = 0;
         auto range = profiles.scan(2ULL, 4ULL);

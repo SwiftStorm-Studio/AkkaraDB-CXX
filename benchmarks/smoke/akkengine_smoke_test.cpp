@@ -23,6 +23,10 @@ namespace {
         return {reinterpret_cast<const char*>(value.data()), value.size()};
     }
 
+    [[nodiscard]] std::string text(std::span<const uint8_t> value) {
+        return {reinterpret_cast<const char*>(value.data()), value.size()};
+    }
+
     [[nodiscard]] fs::path temp_dir(std::string_view name) {
         auto path = fs::temp_directory_path() / "akkaradb_akkengine_smoke" / std::string{name};
         fs::remove_all(path);
@@ -120,12 +124,16 @@ namespace {
         assert(!engine->get(bytes("a")));
         assert(text(*engine->get(bytes("b"))) == "2");
 
-        auto it = engine->scan();
+        akkaradb::core::BufferArena scan_arena;
+        auto rows = engine->scan(scan_arena);
+        auto it = rows.begin();
         int count = 0;
-        while (it.has_next()) {
-            auto item = it.next();
-            assert(item.has_value());
+        while (!(it == rows.end())) {
+            const auto& item = *it;
+            assert(text(item.key) == "b");
+            assert(text(item.value) == "2");
             ++count;
+            ++it;
         }
         assert(count == 1);
     }

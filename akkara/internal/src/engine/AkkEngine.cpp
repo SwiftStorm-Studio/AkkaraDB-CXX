@@ -84,10 +84,6 @@ namespace akkaradb::engine {
             return cmp;
         }
 
-        void copy_span(std::span<const uint8_t> in, std::vector<uint8_t>& out) {
-            out.assign(in.begin(), in.end());
-        }
-
         [[nodiscard]] std::span<const uint8_t> copy_span_to_arena(std::span<const uint8_t> in, core::BufferArena& arena) {
             if (in.empty()) { return {}; }
             std::byte* raw = arena.allocate(in.size(), alignof(uint8_t));
@@ -97,90 +93,56 @@ namespace akkaradb::engine {
         }
     } // namespace
 
-    class AkkEngine::ScanIterator::Impl {
-        public:
-            Impl(
-                memtable::MemTable::RangeIterator memtable_iter,
-                sst::SSTManager::Iterator sst_iter,
-                blob::BlobManager* blob_manager
-            ) : memtable_iter_{std::move(memtable_iter)}, sst_iter_{std::move(sst_iter)}, blob_manager_{blob_manager} {
-                advance_memtable();
-                advance_sst();
-                advance_pending();
-            }
+    [[nodiscard]] std::optional<std::span<const uint8_t>> resolve_scan_value(
+        uint8_t flags,
+        std::span<const uint8_t> value,
+        blob::BlobManager* blob_manager,
+        core::BufferArena& arena
+    ) {
+        if ((flags & core::MemHdr16::FLAG_BLOB) == 0) { return value; }
+        if (!blob_manager || value.size() < blob::BLOB_REF_SIZE) { return std::nullopt; }
+        const blob::BlobRef ref = blob::decode_blob_ref(value.data());
+        auto out = blob_manager->read(ref.blob_id, ref.content_crc32c);
+        if (out.empty() && ref.total_size != 0) { return std::nullopt; }
+        return copy_span_to_arena(std::span<const uint8_t>{out.data(), out.size()}, arena);
+    }
 
-            [[nodiscard]] bool has_next() const noexcept { return pending_.has_value(); }
+    [[nodiscard]] core::ArenaGenerator<AkkEngine::ScanRecordView> scan_generator(
+        core::BufferArena& arena,
+        memtable::MemTable::RangeIterator memtable_iter,
+        sst::SSTManager::Iterator sst_iter,
+        blob::BlobManager* blob_manager
+    ) {
+        auto memtable_cur = memtable_iter.has_next() ? memtable_iter.next() : std::optional<core::RecordView>{};
+        auto sst_cur = sst_iter.has_next() ? sst_iter.next() : std::optional<sst::SSTRecord>{};
 
-            [[nodiscard]] std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> next() {
-                auto out = std::move(pending_);
-                advance_pending();
-                return out;
-            }
+        while (memtable_cur || sst_cur) {
+            const bool has_mt = memtable_cur.has_value();
+            const bool has_sst = sst_cur.has_value();
+            int cmp = 0;
+            if (has_mt && has_sst) { cmp = compare_key(memtable_cur->key(), sst_cur->key); }
+            else { cmp = has_mt ? -1 : 1; }
 
-        private:
-            memtable::MemTable::RangeIterator memtable_iter_;
-            sst::SSTManager::Iterator sst_iter_;
-            std::optional<core::RecordView> memtable_cur_;
-            std::optional<sst::SSTRecord> sst_cur_;
-            blob::BlobManager* blob_manager_ = nullptr;
-            std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> pending_;
-
-            void advance_memtable() { memtable_cur_ = memtable_iter_.has_next() ? memtable_iter_.next() : std::optional<core::RecordView>{}; }
-            void advance_sst() { sst_cur_ = sst_iter_.has_next() ? sst_iter_.next() : std::optional<sst::SSTRecord>{}; }
-
-            [[nodiscard]] std::optional<std::vector<uint8_t>> resolve(uint8_t flags, std::span<const uint8_t> value) const {
-                if ((flags & core::MemHdr16::FLAG_BLOB) == 0) { return std::vector<uint8_t>{value.begin(), value.end()}; }
-                if (!blob_manager_ || value.size() < blob::BLOB_REF_SIZE) { return std::nullopt; }
-                const blob::BlobRef ref = blob::decode_blob_ref(value.data());
-                auto out = blob_manager_->read(ref.blob_id, ref.content_crc32c);
-                if (out.empty() && ref.total_size != 0) { return std::nullopt; }
-                return out;
-            }
-
-            void advance_pending() {
-                pending_.reset();
-                while (memtable_cur_ || sst_cur_) {
-                    const bool has_mt = memtable_cur_.has_value();
-                    const bool has_sst = sst_cur_.has_value();
-                    int cmp = 0;
-                    if (has_mt && has_sst) { cmp = compare_key(memtable_cur_->key(), sst_cur_->key); }
-                    else { cmp = has_mt ? -1 : 1; }
-
-                    std::vector<uint8_t> key;
-                    std::optional<std::vector<uint8_t>> value;
-                    bool tombstone = false;
-
-                    if (cmp <= 0) {
-                        const auto record = *memtable_cur_;
-                        copy_span(record.key(), key);
-                        tombstone = record.is_tombstone();
-                        if (!tombstone) { value = resolve(record.flags(), record.value()); }
-                        advance_memtable();
-                        if (cmp == 0) { advance_sst(); }
-                    }
-                    else {
-                        const auto record = std::move(*sst_cur_);
-                        key = record.key;
-                        tombstone = record.is_tombstone();
-                        if (!tombstone) { value = resolve(record.flags, record.value); }
-                        advance_sst();
-                    }
-
-                    if (!tombstone && value) {
-                        pending_ = std::make_pair(std::move(key), std::move(*value));
-                        return;
-                    }
+            if (cmp <= 0) {
+                const auto record = *memtable_cur;
+                const bool tombstone = record.is_tombstone();
+                if (!tombstone) {
+                    auto value = resolve_scan_value(record.flags(), record.value(), blob_manager, arena);
+                    if (value) { co_yield AkkEngine::ScanRecordView{record.key(), *value}; }
                 }
+                memtable_cur = memtable_iter.has_next() ? memtable_iter.next() : std::optional<core::RecordView>{};
+                if (cmp == 0) { sst_cur = sst_iter.has_next() ? sst_iter.next() : std::optional<sst::SSTRecord>{}; }
             }
-    };
-
-    AkkEngine::ScanIterator::ScanIterator(std::unique_ptr<Impl> impl) : impl_{std::move(impl)} {}
-    AkkEngine::ScanIterator::~ScanIterator() = default;
-    AkkEngine::ScanIterator::ScanIterator(ScanIterator&&) noexcept = default;
-    AkkEngine::ScanIterator& AkkEngine::ScanIterator::operator=(ScanIterator&&) noexcept = default;
-    bool AkkEngine::ScanIterator::has_next() const noexcept { return impl_ && impl_->has_next(); }
-    std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> AkkEngine::ScanIterator::next() {
-        return impl_ ? impl_->next() : std::nullopt;
+            else {
+                const auto record = std::move(*sst_cur);
+                const bool tombstone = record.is_tombstone();
+                if (!tombstone) {
+                    auto value = resolve_scan_value(record.flags, record.value, blob_manager, arena);
+                    if (value) { co_yield AkkEngine::ScanRecordView{record.key, *value}; }
+                }
+                sst_cur = sst_iter.has_next() ? sst_iter.next() : std::optional<sst::SSTRecord>{};
+            }
+        }
     }
 
     class AkkEngine::Impl {
@@ -593,7 +555,11 @@ namespace akkaradb::engine {
         return n;
     }
 
-    AkkEngine::ScanIterator AkkEngine::scan(std::span<const uint8_t> start_key, std::span<const uint8_t> end_key) const {
+    core::ArenaGenerator<AkkEngine::ScanRecordView> AkkEngine::scan(
+        core::BufferArena& arena,
+        std::span<const uint8_t> start_key,
+        std::span<const uint8_t> end_key
+    ) const {
         if (!impl_ || impl_->closed.load(std::memory_order_acquire)) { throw std::runtime_error("AkkEngine: engine is closed"); }
         impl_->scans_total.fetch_add(1, std::memory_order_relaxed);
 
@@ -603,7 +569,12 @@ namespace akkaradb::engine {
         auto mt = impl_->memtable->iterator(range, impl_->snapshot_seq());
         sst::SSTManager::Iterator st;
         if (impl_->sst_manager) { st = impl_->sst_manager->scan_iter(start_key, end_key); }
-        return ScanIterator{std::make_unique<ScanIterator::Impl>(std::move(mt), std::move(st), impl_->blob_manager.get())};
+        return core::ArenaGenerator<ScanRecordView>::with_arena(
+            arena,
+            [&arena, mt = std::move(mt), st = std::move(st), blob_manager = impl_->blob_manager.get()]() mutable {
+                return scan_generator(arena, std::move(mt), std::move(st), blob_manager);
+            }
+        );
     }
 
     std::optional<std::vector<uint8_t>> AkkEngine::get_at(std::span<const uint8_t> key, uint64_t at_seq) const {

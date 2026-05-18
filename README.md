@@ -1,25 +1,26 @@
 # AkkaraDB
 
-**The all-purpose KV store: blazing fast and reliably durable, scaling from tiny embedded cache to large-scale distributed database.**
+**A low-latency embedded KV engine with WAL, LSM storage, typed tables, JNI access, and optional clustering.**
 
-> C++23 · LSM-tree · WAL · Multi-shard · Optional TLS · AGPL-3.0
+> C++23 | LSM-tree | WAL | SST | Blob store | Version history | HTTP/TCP API | JNI | AGPL-3.0
 
 ---
 
 ## Features
 
-| Category         | Capability                                                                                                  |
-|------------------|-------------------------------------------------------------------------------------------------------------|
-| **Storage**      | LSM-tree (MemTable + WAL + SST), Bloom filters, leveled compaction                                          |
-| **Durability**   | CRC32C on every record; crash-safe atomic writes (tmp+rename)                                               |
-| **Large values** | Automatic blob externalization for values ≥ 16 KiB                                                          |
-| **Compression**  | Per-file Zstandard (Zstd), self-describing, mixed-codec safe                                                |
-| **Concurrency**  | Multi-shard MemTable; all engine operations fully thread-safe                                               |
-| **History**      | Optional per-key version log; point-in-time reads; rollback                                                 |
-| **API servers**  | HTTP REST + binary TCP, both with optional TLS (mbedTLS 3.x)                                                |
-| **Clustering**   | Standalone / Mirror / Stripe replication modes                                                              |
-| **ORM layer**    | `PackedTable<&T::field>`: typed tables, fast trivial-aggregate storage, BinPack serialization, non-unique secondary indexes |
-| **Portability**  | Windows (MSVC) and Linux (GCC/Clang)                                                                        |
+| Category     | Capability                                                                              |
+|--------------|-----------------------------------------------------------------------------------------|
+| Storage      | Multi-shard MemTable, WAL, SST levels, Bloom filters, leveled compaction                |
+| Durability   | CRC32C-protected records, sync or async WAL, manifest-backed SST lifecycle              |
+| Large values | Automatic blob externalization with 20-byte blob references                             |
+| Compression  | Zstandard for SST and blob payloads, with per-file codec metadata                       |
+| Reads        | MemTable-first lookup, SST fallback, optional SST read promotion                        |
+| History      | Optional per-key version log, point-in-time read, global and per-key rollback           |
+| API servers  | HTTP REST and binary TCP backends, default ports 7070 and 7071                          |
+| Typed tables | `PackedTable<&T::id>` with BinPack serialization, scans, helpers, and secondary indexes |
+| JVM bridge   | Kotlin/JVM wrapper over JNI using `ByteBufferL` at the public low-level API             |
+| Clustering   | Standalone, mirror, and stripe replication configuration primitives                     |
+| Portability  | Windows/MSVC and Linux/GCC/Clang                                                        |
 
 ---
 
@@ -32,72 +33,134 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-Optional flags:
+Common flags:
 
 ```cmake
--DAKKARADB_ENABLE_TLS=ON      # Enable TLS support via mbedTLS 3.x
--DAKKARADB_ENABLE_SIMD=OFF    # Disable SSE4.2/AVX2
--DBUILD_SHARED_LIBS=OFF       # Build as static library
+-DBUILD_SHARED_LIBS=ON        # Build shared library, default ON
+-DBUILD_SHARED_LIBS=OFF       # Build static library
+-DAKKARADB_BUILD_TESTS=ON     # Add tests/
+-DAKKARADB_BUILD_JNI=ON       # Build akkaradb_jni for the JVM wrapper
 ```
 
-> **Windows**: Build from within a Visual Studio / MSVC environment. Do not use plain `bash` without initializing the MSVC toolchain.
+TLS and SIMD are currently enabled by the native CMake configuration. The build links mbedTLS and adds SSE4.2/AVX2 compiler flags on supported compilers.
 
-### Minimal Usage (C++ API)
+On Windows, build from a Visual Studio/MSVC environment so the compiler, linker, and Windows SDK are initialized.
+
+### Install Target
+
+```cmake
+find_package(AkkaraDB REQUIRED)
+target_link_libraries(my_app PRIVATE AkkaraDB::akkaradb)
+```
+
+---
+
+## C++ Low-Level API
+
+Use `AkkEngine` directly when you want byte-oriented control over keys, values, scans, durability, and history.
+
+```cpp
+#include "engine/AkkEngine.hpp"
+
+#include <span>
+#include <string_view>
+
+using namespace akkaradb::engine;
+
+std::span<const uint8_t> bytes(std::string_view s) {
+    return {reinterpret_cast<const uint8_t*>(s.data()), s.size()};
+}
+
+AkkEngineOptions opts;
+opts.paths.data_dir = "data";
+opts.components.version_log_enabled = true;
+opts.wal.sync_mode = wal::WalSyncMode::Async;
+opts.blob.threshold_bytes = 16 * 1024;
+opts.runtime.sst_promote_reads = true;
+
+auto engine = AkkEngine::open(std::move(opts));
+
+engine->put(bytes("user:1"), bytes("Alice"));
+
+auto value = engine->get(bytes("user:1"));
+if (value) {
+    // value is std::vector<uint8_t>
+}
+
+std::vector<uint8_t> out;
+if (engine->get_into(bytes("user:1"), out)) {
+    // hot read path without optional allocation
+}
+
+engine->remove(bytes("user:1"));
+engine->force_sync();
+engine->close();
+```
+
+Range scans use a caller-owned arena:
+
+```cpp
+akkaradb::core::BufferArena arena;
+auto rows = engine->scan(arena, bytes("user:"), bytes("user;"));
+
+for (auto it = rows.begin(); !(it == rows.end()); ++it) {
+    auto key = it->key;
+    auto value = it->value;
+}
+```
+
+Version history is available when `version_log_enabled` is on:
+
+```cpp
+auto at = engine->get_at(bytes("user:1"), target_seq);
+auto history = engine->history(bytes("user:1"));
+
+engine->rollback_key(bytes("user:1"), target_seq);
+engine->rollback_to(target_seq);
+```
+
+---
+
+## C++ High-Level API
+
+Use `AkkaraDB` and `PackedTable` when you want typed entities with automatic BinPack serialization and table-scoped keys.
 
 ```cpp
 #include <akkaradb/AkkaraDB.hpp>
 
-auto db = AkkaraDB::open("/path/to/data", StartupMode::NORMAL);
-auto& eng = db->engine();
+#include <cstdint>
+#include <string>
 
-// Raw bytes API
-std::vector<uint8_t> key   = {'h','e','l','l','o'};
-std::vector<uint8_t> value = {'w','o','r','l','d'};
-
-eng.put(key, value);
-auto result = eng.get(key);  // std::optional<std::vector<uint8_t>>
-
-eng.remove(key);
-db->close();
-```
-
-### Typed Tables (ORM Layer)
-
-```cpp
-#include <akkaradb/AkkaraDB.hpp>
-
-// No serializer needed — BinPack handles it automatically
 struct User {
-    uint64_t    id;
+    uint64_t id;
+    std::string email;
     std::string name;
-    int32_t     age;
+    uint32_t age;
 };
 
-auto db    = AkkaraDB::open("/path/to/data", StartupMode::FAST);
+AKKARADB_QUERYABLE(User, id, email, name, age)
 
-// Primary key is &User::id — entity and key types inferred automatically
+auto db = akkaradb::AkkaraDB::open("data", akkaradb::StartupMode::FAST);
 auto users = db->table<&User::id>("users");
-auto by_age = users.index<&User::age>();     // non-unique secondary index
 
-users.put({1, "Alice", 30});
-users.put({2, "Bob",   30});
+auto by_age = users.index<&User::age>();
+auto by_email = users.index<&User::email>();
 
-auto alice = users.get(1ULL);                          // std::optional<User>
+users.put({1, "alice@example.test", "Alice", 30});
+users.put({2, "bob@example.test", "Bob", 30});
+
+auto alice = users.get(1ULL);
 
 User out{};
 if (users.get_into(2ULL, out)) {
-    // out contains Bob without constructing an optional
+    // out contains Bob
 }
 
-auto age30 = by_age.find(30);                          // lazy exact-match range
+auto age30 = by_age.find(30U);
 while (age30.has_next()) {
-    auto [id, user] = age30.next();
-}
-
-// Range scan
-auto scan = users.scan_all();
-while (scan.has_next()) {
-    auto [id, user] = scan.next();
+    auto entry = age30.next();
+    auto id = entry.id;
+    auto user = entry.value;
 }
 
 auto adults = users
@@ -105,159 +168,283 @@ auto adults = users
     .limit(100)
     .to_vector();
 
+auto first_bob = users.find_by<&User::email>(std::string{"bob@example.test"});
+
+users.upsert(2ULL, [](User& user) {
+    user.name = "Bobby";
+});
+
 users.remove(1ULL);
+db->close();
 ```
 
-SPECv5 native C++ is the canonical typed-table layout. The current C++ API keeps
-`db->table<&User::id>("users")`, adds `get_into(pk, out)` for the hot read path,
-and uses non-unique secondary indexes via handles returned from
-`auto by_age = users.index<&User::age>();`. The SPECv4 local query helpers are
-also available: `query(lambda)`, `query().where(...).limit(...)`, `upsert`,
-`find_by`, and primary-key range `scan(start, end)`.
+Typed table keys are table-scoped. The primary key layout is an 8-byte FNV-1a table prefix followed by the encoded primary key. Secondary indexes use
+`table_name + ":idx:" + field_name` as their namespace.
+
+---
+
+## JVM Low-Level API
+
+The JVM wrapper exposes low-level byte access through `ByteBufferL`, not raw `ByteArray`, at the public API boundary.
+
+```kotlin
+import dev.swiftstorm.akkaradb.core.buffer.ByteBufferL
+import dev.swiftstorm.akkaradb.engine.AkkEngine
+import dev.swiftstorm.akkaradb.engine.AkkaraOptions
+import dev.swiftstorm.akkaradb.engine.Codec
+import dev.swiftstorm.akkaradb.engine.StartupMode
+
+val engine = AkkEngine.open(
+    AkkaraOptions(
+        dataDir = "data",
+        mode = StartupMode.FAST,
+        overrides = AkkaraOptions.Overrides(
+            blobThresholdBytes = 32L * 1024L,
+            sstCodec = Codec.ZSTD,
+            blobCodec = Codec.ZSTD,
+            sstPromoteReads = true,
+            sstBloomBitsPerKey = 10,
+            maxL0SstFiles = 8
+        )
+    )
+)
+
+val key = ByteBufferL.wrap(byteArrayOf(1, 2, 3))
+val value = ByteBufferL.wrap("hello".encodeToByteArray())
+
+engine.put(key, value)
+
+val got: ByteBufferL? = engine.get(key)
+val exists: Boolean = engine.exists(key)
+val count: Long = engine.count()
+
+for (row in engine.scan()) {
+    val rowKey = row.key
+    val rowValue = row.value
+}
+
+engine.remove(key)
+engine.close()
+```
+
+`ByteBufferL.allocate(capacity, direct = true)` creates a little-endian direct buffer. `ByteBufferL.wrap(ByteArray)` is useful for heap-backed inputs and tests.
+
+---
+
+## JVM High-Level API
+
+Use `AkkaraDB.table<T, ID>()` for Kotlin entities. The JVM high-level table mirrors the C++ table namespace and index key layout.
+
+```kotlin
+import dev.swiftstorm.akkaradb.engine.AkkaraDB
+import dev.swiftstorm.akkaradb.engine.AkkaraOptions
+import dev.swiftstorm.akkaradb.engine.StartupMode
+
+data class User(
+    val id: Long,
+    val name: String,
+    val age: Int
+)
+
+val db = AkkaraDB.open(AkkaraOptions("data", StartupMode.FAST))
+val users = db.table<User, Long>("users") { it.id }
+
+val byName = users.index("name") { it.name }
+val byAge = users.index("age") { it.age }
+
+users.put(User(1L, "Alice", 30))
+users.put(User(2L, "Bob", 25))
+
+val alice: User? = users.get(1L)
+val alices: List<User> = byName.find("Alice").toList()
+val adults: List<User> = users.filter { it.age >= 18 }.toList()
+val allRows: List<User> = users.scanAll().toList()
+
+users.remove(2L)
+db.close()
+```
+
+Manual query execution is available with `runQ(AkkQuery(...))`. The DSL functions such as `query { ... }`, `firstOrNull { ... }`, and `runToList { ... }` are
+intended to be rewritten by the compiler plugin; without the plugin they fail at runtime by design.
 
 ---
 
 ## Startup Modes
 
-| Mode         | WAL   | Sync        | Version History | Use case                      |
-|--------------|-------|-------------|-----------------|-------------------------------|
-| `ULTRA_FAST` | Off   | —           | Off             | In-memory cache, test harness |
-| `FAST`       | Async | group flush | Off             | High-throughput ingestion     |
-| `NORMAL`     | Async | group flush | Off             | General-purpose (default)     |
-| `DURABLE`    | Sync  | per-write   | **On**          | Financial records, audit logs |
+| Mode         | WAL   | Close behavior          | Version history | Typical use                            |
+|--------------|-------|-------------------------|-----------------|----------------------------------------|
+| `ULTRA_FAST` | Off   | No forced flush or sync | Off             | In-memory cache, tests, temporary data |
+| `FAST`       | Async | Flush/sync on close     | Off             | High-throughput ingestion              |
+| `NORMAL`     | Async | Flush/sync on close     | Off             | General-purpose default                |
+| `DURABLE`    | Sync  | Flush/sync on close     | On              | Audit logs and strict durability       |
 
-Fine-grained overrides are available via `AkkaraDB::Options::Overrides`.
+Fine-grained overrides are available from both C++ and JVM:
+
+| Override                     | C++                            | JVM                         |
+|------------------------------|--------------------------------|-----------------------------|
+| MemTable threshold per shard | `memtable_threshold_per_shard` | `memtableThresholdPerShard` |
+| Version log                  | `version_log_enabled`          | `versionLogEnabled`         |
+| SST codec                    | `sst_codec`                    | `sstCodec`                  |
+| Blob codec                   | `blob_codec`                   | `blobCodec`                 |
+| Blob threshold               | `blob_threshold_bytes`         | `blobThresholdBytes`        |
+| Promote SST reads            | `sst_promote_reads`            | `sstPromoteReads`           |
+| Bloom bits per key           | `sst_bloom_bits_per_key`       | `sstBloomBitsPerKey`        |
+| Max L0 SST files             | `max_l0_sst_files`             | `maxL0SstFiles`             |
 
 ---
 
 ## Architecture Overview
 
-```
+```text
 put(key, value)
-  │
-  ├─ [value ≥ 16 KiB]  →  BlobManager (.blob file, atomic write)
-  │                          MemTable stores 20-byte BlobRef
-  │
-  └─ [value < 16 KiB]  →  WAL append (CRC32C, optional fdatasync)
-                           MemTable insert (BPTree / SkipList / ART, per-shard)
-                                │
-                         [shard full] → flush to SST → compaction
+  |
+  +-- value >= blob threshold
+  |     |
+  |     +-- BlobManager writes .blob payload
+  |     +-- MemTable stores a 20-byte BlobRef
+  |
+  +-- value < blob threshold
+        |
+        +-- WAL append with CRC32C
+        +-- VersionLog append when enabled
+        +-- MemTable insert
+              |
+              +-- shard threshold reached
+                    |
+                    +-- flush to SST
+                    +-- compaction across levels
 ```
 
-Read path: MemTable → SSTManager (L0 → L6, bloom filter + sparse index).
+Read path:
+
+```text
+MemTable -> SSTManager -> BlobManager when the value is externalized
+```
+
+SST reads use Bloom filters and sparse block indexes. When `sst_promote_reads` is enabled, SST hits can be promoted back into the MemTable.
 
 ---
 
 ## Configuration Highlights
 
 ```cpp
-AkkaraDB::Options opts;
-opts.data_dir = "/var/lib/akkaradb";
-opts.mode     = StartupMode::FAST;
+akkaradb::AkkaraDB::Options opts;
+opts.data_dir = "data";
+opts.mode = akkaradb::StartupMode::FAST;
 
-// Fine-tune
-opts.overrides.blob_threshold_bytes         = 32 * 1024;   // 32 KiB externalize threshold
-opts.overrides.sst_codec                    = Codec::Zstd;  // compress SST files
-opts.overrides.blob_codec                   = Codec::Zstd;  // compress blob files
-opts.overrides.sst_promote_reads            = true;         // cache SST hits in MemTable
-opts.overrides.memtable_threshold_per_shard = 128ULL << 20; // 128 MiB/shard
-opts.overrides.sst_bloom_bits_per_key       = 10;           // ~1% false-positive
+opts.overrides.memtable_threshold_per_shard = 128ULL << 20;
+opts.overrides.version_log_enabled = true;
+opts.overrides.sst_codec = akkaradb::Codec::Zstd;
+opts.overrides.blob_codec = akkaradb::Codec::Zstd;
+opts.overrides.blob_threshold_bytes = 32ULL * 1024ULL;
+opts.overrides.sst_promote_reads = true;
+opts.overrides.sst_bloom_bits_per_key = 10;
+opts.overrides.max_l0_sst_files = 8;
 
-auto db = AkkaraDB::open(opts);
+auto db = akkaradb::AkkaraDB::open(std::move(opts));
 ```
 
-For the full configuration reference, see [SPEC.md §14](SPEC.md#14-configuration-reference).
+For the complete native configuration surface, see [SPEC.md section 14](SPEC.md#14-configuration-reference).
 
 ---
 
 ## API Servers
 
-```cpp
-// Enable via engine options
-AkkEngineOptions eng_opts;
-eng_opts.api.http_enabled = true;   // REST on :8080
-eng_opts.api.tcp_enabled  = true;   // Binary protocol on :9090
+The internal engine can start HTTP and TCP API backends when `components.api_enabled` is set.
 
-// Optional TLS (requires AKKARADB_ENABLE_TLS=ON at build time)
-eng_opts.api.tls.enabled     = true;
-eng_opts.api.tls.cert_path   = "/etc/akkaradb/server.crt";
-eng_opts.api.tls.key_path    = "/etc/akkaradb/server.key";
-eng_opts.api.tls.ca_path     = "/etc/akkaradb/ca.crt";    // mTLS
-eng_opts.api.tls.verify_peer = true;                       // mTLS
+```cpp
+AkkEngineOptions opts;
+opts.paths.data_dir = "data";
+opts.components.api_enabled = true;
+opts.api.bind_host = "127.0.0.1";
+opts.api.backends = {
+    AkkEngineOptions::ApiBackend::Http,
+    AkkEngineOptions::ApiBackend::Tcp,
+};
+opts.api.http_port = 7070;
+opts.api.tcp_port = 7071;
 ```
 
-**HTTP endpoints**: `GET/POST/DELETE /v1/get|put|remove?key=<percent-encoded>`
+HTTP endpoints:
 
-**Binary protocol**: 16-byte framed request + 13-byte framed response. CRC32C on payload.
+| Method   | Path                                            |
+|----------|-------------------------------------------------|
+| `GET`    | `/v1/ping`                                      |
+| `POST`   | `/v1/put?key=<percent-encoded>`                 |
+| `GET`    | `/v1/get?key=<percent-encoded>`                 |
+| `DELETE` | `/v1/remove?key=<percent-encoded>`              |
+| `GET`    | `/v1/get_at?key=<percent-encoded>&seq=<number>` |
+
+The binary TCP protocol uses `AK5Q` request frames and `AK5S` response frames. See [SPEC.md section 11.2](SPEC.md#112-binary-protocol-v2) for the frame layout.
 
 ---
 
-## Version History & Rollback
+## File Layout
 
-Enabled in `DURABLE` mode or via `opts.overrides.version_log_enabled = true`.
+```text
+{data_dir}/
+|-- wal/             Write-ahead log segments
+|-- sstable/         SST levels
+|   |-- L0/
+|   |-- L1/
+|   |-- ...
+|   `-- L6/
+|-- blobs/           Externalized value payloads
+|-- history.akvlog   Version log when enabled
+|-- manifest.akmf    SST lifecycle manifest
+|-- cluster.akcc     Cluster topology when enabled
+`-- node.id          Persistent node identity
+```
 
-```cpp
-// Point-in-time read
-auto entry = eng.get_at(key, target_seq);
+---
 
-// Full write history for a key
-auto hist = eng.history(key);   // vector<VersionEntry>
+## Benchmarks And Smoke Tests
 
-// Rollback all keys to a prior state
-eng.rollback_to(checkpoint_seq);
+The native CMake file builds the benchmark and smoke executables under `build/bin`.
 
-// Rollback a single key
-eng.rollback_key(key, checkpoint_seq);
+```powershell
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+
+.\build\bin\akkaradb_akkengine_smoke_test.exe
+.\build\bin\akkaradb_typed_api_smoke_test.exe
+.\build\bin\akkaradb_benchmark.exe
+```
+
+Available benchmark sources live under:
+
+```text
+benchmarks/suite/
+benchmarks/smoke/
+benchmarks/throughput/
+benchmarks/api/
 ```
 
 ---
 
 ## Dependencies
 
-| Library   | Version      | License    | Notes                                                |
-|-----------|--------------|------------|------------------------------------------------------|
-| Zstandard | 1.5.6        | BSD        | Always included (static)                             |
-| Boost.PFR | boost-1.84.0 | BSL-1.0    | Header-only; aggregate struct reflection for BinPack |
-| mbedTLS   | 3.6.2        | Apache-2.0 | Optional (`-DAKKARADB_ENABLE_TLS=ON`)                |
+| Library   | Version      | Notes                                          |
+|-----------|--------------|------------------------------------------------|
+| Zstandard | 1.5.6        | Compression for SST and blob payloads          |
+| Boost.PFR | boost-1.84.0 | Aggregate reflection for BinPack               |
+| mbedTLS   | 3.6.2        | TLS support for API and replication transports |
 
-All dependencies are fetched automatically via CMake `FetchContent`.
-
----
-
-## File Layout
-
-```
-{data_dir}/
-├── wal/                        Write-Ahead Log segments (.akwal)
-├── sstable/
-│   ├── L0/                     Level-0 SST files (.aksst)
-│   ├── L1/ … L6/
-├── blobs/
-│   ├── 00/ … ff/               Large-value blob files (.blob)
-├── history.akvlog              Version log (if enabled)
-├── manifest.akmf               SST lifecycle manifest
-├── cluster.akcc                Cluster topology (if enabled)
-└── node.id                     Persistent node identity
-```
+Dependencies are fetched by CMake through `FetchContent`.
 
 ---
 
-## Performance Notes
+## Specification
 
-- **MemTable put**: ~100–200 ns (arena alloc + BPTree insert, no WAL in `ULTRA_FAST`)
-- **WAL enqueue** (Async): ~10–20 ns (double-buffered arena, fire-and-forget)
-- **WAL enqueue** (Sync): blocked until `fdatasync` completes
-- **SST point read**: ~1–5 µs (bloom check + sparse index seek + ≤128 record scan)
-- **Blob read**: disk I/O latency + optional Zstd decompression
-- **Shard selection**: `fp64 & mask` — ~1 ns, branchless
-
-For benchmark setup and results, see `benchmarks/suite/benchmark.cpp`.
+The current native specification is [SPEC.md](SPEC.md). It documents record layouts, WAL/SST/blob/manifest formats, API framing, configuration, concurrency, and
+recovery behavior.
 
 ---
 
 ## License
 
-AkkaraDB is free software licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0).
-Copyright © 2026 Swift Storm Studio.
+AkkaraDB is free software licensed under the GNU Affero General Public License v3.0.
+
+Copyright (C) 2026 Swift Storm Studio.
 
 See [LICENSE](LICENSE) for the full license text.

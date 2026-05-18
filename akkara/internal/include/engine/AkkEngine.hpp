@@ -18,6 +18,7 @@
 #include "engine/vlog/VersionLog.hpp"
 #include "engine/wal/WalWriter.hpp"
 #include "core/buffer/BufferArena.hpp"
+#include "core/utils/ArenaGenerator.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -108,22 +109,9 @@ namespace akkaradb::engine {
 
     class AkkEngine {
         public:
-            class ScanIterator {
-                public:
-                    ~ScanIterator();
-                    ScanIterator(ScanIterator&&) noexcept;
-                    ScanIterator& operator=(ScanIterator&&) noexcept;
-                    ScanIterator(const ScanIterator&) = delete;
-                    ScanIterator& operator=(const ScanIterator&) = delete;
-
-                    [[nodiscard]] bool has_next() const noexcept;
-                    [[nodiscard]] std::optional<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> next();
-
-                private:
-                    friend class AkkEngine;
-                    class Impl;
-                    explicit ScanIterator(std::unique_ptr<Impl> impl);
-                    std::unique_ptr<Impl> impl_;
+            struct ScanRecordView {
+                std::span<const uint8_t> key;
+                std::span<const uint8_t> value;
             };
 
             [[nodiscard]] static std::unique_ptr<AkkEngine> open(AkkEngineOptions options);
@@ -144,7 +132,11 @@ namespace akkaradb::engine {
             [[nodiscard]] bool get_into(std::span<const uint8_t> key, std::vector<uint8_t>& out) const;
             [[nodiscard]] bool get_into_arena(std::span<const uint8_t> key, core::BufferArena& arena, std::span<const uint8_t>& out) const;
             [[nodiscard]] size_t count(std::span<const uint8_t> start_key = {}, std::span<const uint8_t> end_key = {}) const;
-            [[nodiscard]] ScanIterator scan(std::span<const uint8_t> start_key = {}, std::span<const uint8_t> end_key = {}) const;
+            [[nodiscard]] core::ArenaGenerator<ScanRecordView> scan(
+                core::BufferArena& arena,
+                std::span<const uint8_t> start_key = {},
+                std::span<const uint8_t> end_key = {}
+            ) const;
 
             [[nodiscard]] std::optional<std::vector<uint8_t>> get_at(std::span<const uint8_t> key, uint64_t at_seq) const;
             [[nodiscard]] std::vector<VersionEntry> history(std::span<const uint8_t> key) const;
