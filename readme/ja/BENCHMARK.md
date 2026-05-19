@@ -2,8 +2,6 @@
 
 このファイルは、現時点で `akkaradb-native` に存在し、ビルドできるベンチマーク / smoke test の索引です。
 
-以前の `akkaradb_benchmark` 中心の記述には、SST、Blob、`AkkEngine`、typed API など、現在の native 実装と一致しない内容が含まれていました。いったん削除し、現状の実行可能ターゲットだけをここに残しています。
-
 ## 現在使うターゲット
 
 | ターゲット                                    | 目的                                                                                             |

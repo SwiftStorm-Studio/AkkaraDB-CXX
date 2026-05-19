@@ -441,6 +441,11 @@ The current native specification is [SPEC.md](../../SPEC.md). It documents recor
 concurrency, and
 recovery behavior.
 
+## Architecture
+
+The native architecture overview is [ARCHITECTURE_en.md](ARCHITECTURE_en.md). It explains how the public APIs, `AkkEngine`, MemTable, WAL, Blob Manager, SST
+Manager, Manifest, VersionLog, API servers, cluster runtime, and JNI scan path fit together.
+
 ---
 
 ## License
